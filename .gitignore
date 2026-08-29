@@ -1,0 +1,32 @@
+# build
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# local claude config (personal overrides, not shared)
+.claude/settings.local.json
+.claude/agent-memory-local/
+
+# secrets — never commit
+.env
+.env.*
+*.pem
+*.key
+/secrets/
+
+# lab artifacts
+/lab/captures/
+/lab/output/
+
+# editors
+.idea/
+.vscode/
+*.swp
