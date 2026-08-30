@@ -50,9 +50,22 @@ message CoreMessage {
 // ---------------------------------------------------------------------------
 
 message Hello {
+  // An echo, not an identity. Every value on this stream originates in a
+  // network whose compromise the threat model assumes (ADR-020). Core MUST
+  // resolve the scan point from the TLS peer certificate fingerprint
+  // (ADR-018), and MUST close the stream when this value names a different
+  // one rather than trusting it or quietly preferring the certificate: a
+  // mismatch is either our bug or someone's attempt, and both need an
+  // operator to see it.
   string scan_point_id = 1;
+
   string protocol_version = 2;  // additive-only within major
   string agent_version = 3;
+
+  // Self-asserted; see Capability. It can only narrow what Core dispatches,
+  // never widen it. Core MUST intersect this with what this scan point is
+  // independently authorised to run, so that claiming a capability cannot
+  // obtain work the scan point is not permitted to do.
   repeated Capability capabilities = 4;
 
   // Offline import means packs arrive out-of-band (ADR-019), so Core cannot
@@ -141,9 +154,18 @@ message Heartbeat {
   uint32 buffered_submissions = 3;
   uint64 buffered_bytes = 4;
 
-  // Measured aggregate send rate. ADR-024 bounds the aggregate by
-  // construction, but a ceiling Core cannot measure is decorative -- the same
-  // argument that ADR gives for requiring KillAck.
+  // Measured aggregate send rate. An attestation, not a control -- the same
+  // standing as JobTerminal.credentials_zeroised.
+  //
+  // A scan point that is sending faster than its ceiling can report any number
+  // here, and nothing in this field slows it down. ADR-024's bound is enforced
+  // where it can be: Core bounds the aggregate at planning, and the scan point
+  // runtime enforces it on the send path. This exists to catch our own bugs --
+  // a rate limiter that is wrong is otherwise invisible until a customer
+  // notices -- which is the argument ADR-024 gives for requiring KillAck.
+  //
+  // Core MUST treat a value it dislikes as an operator signal about a possibly
+  // faulty scan point, never as the rate that was actually sent.
   uint32 observed_rate_pps = 5;
 
   // Engine process restarts since this connection opened. An engine that
@@ -345,7 +367,16 @@ message CredentialGrant {
   //
   // Stops at the runtime. Engine processes receive a session handle or a
   // short-lived derived token, never this (ADR-027).
-  bytes material = 4;
+  //
+  // The marker below is intent, not a mechanism. protobuf-go v1.36.6 consults
+  // debug_redact nowhere in its encoding path, so String() on this message --
+  // or on the CoreMessage carrying it in its oneof -- still renders the
+  // material in full, and internal/logging redacts on the attribute key and
+  // cannot see inside a value a type rendered for it. Log either message only
+  // through logging.Proto(), and never install a payload-logging interceptor
+  // on Dispatch. .github/scripts/check_secret_logging.py enforces the first
+  // mechanically; the second is a human review obligation.
+  bytes material = 4 [debug_redact = true];
 
   repeated string scope = 5;  // targets this may be used against
 

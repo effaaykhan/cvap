@@ -118,11 +118,12 @@ so the hook reads the command and looks for redirects, `tee`, `mv`, `cp`, `rm`, 
 meant a heredoc — the most natural way to write a proto file from a shell — went straight
 through it.
 
-In command mode the hook runs in Claude Code's environment rather than the command's, so an
-inline `CVAP_ALLOW_PROTO_EDIT=1 cat > ...` would never reach it. It therefore accepts the
-override either from its own environment or as an explicit assignment written into the
-command. The second form is deliberate: it leaves the override visible in the transcript
-next to the write it authorised.
+The override is read **only from the hook's own environment**. An inline
+`CVAP_ALLOW_PROTO_EDIT=1 cat > ...` does not work and is not meant to: an override reachable
+from inside the command string is reachable by anything that composes commands, including a
+future session that hits the guard and routes around it rather than asking. Requiring the
+environment means the bypass needs a human to act, which is the entire point of a freeze.
+Both directions are in the case table, so neither half can rot.
 
 Unlike the scope guard, this one fails closed. That guard sanitises heredoc bodies so
 documentation mentioning `nmap` is not mistaken for an invocation, because a guard that

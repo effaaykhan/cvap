@@ -92,6 +92,21 @@ message Observation {
 
   // Vantage point. Exposure is derived from which zones saw what, so this is
   // a property of the observation and never a column on an asset (ADR-008).
+  //
+  // Self-asserted, and the field on this message where that matters most: a
+  // scan point free to name its own zone could rewrite the derived exposure of
+  // every asset it reports, making an internet-facing service look internal or
+  // the reverse. That is the ADR-008 derivation defeated at its source, and it
+  // is why EnrollRequest deliberately carries no zone.
+  //
+  // The field exists because a scan point may straddle segments and knows
+  // which interface saw the host, which Core cannot derive -- not so that it
+  // may choose. Core MUST validate this against the zones assigned to the
+  // authenticated scan point at enrolment. An observation naming a zone that
+  // scan point was not enrolled into MUST be quarantined, not dropped and not
+  // silently re-zoned: ACCEPTED_QUARANTINED stores it, withholds it from the
+  // finding pipeline and surfaces it to an operator, which is the right
+  // handling for what is either our bug or a compromised scan point.
   string zone_id = 3;
 
   // Deliberately an open string, not an enum.

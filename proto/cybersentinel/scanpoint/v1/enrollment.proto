@@ -23,7 +23,22 @@ message EnrollRequest {
   // being enrolled into. The zone is deliberately not a field on this message:
   // a scan point must not be able to influence its own vantage point, because
   // exposure is derived from the zone an observation was made from (ADR-008).
-  string enrollment_token = 1;
+  //
+  // A bearer credential: whoever holds it obtains a fleet identity. It must
+  // never reach a log, an error string, or a gRPC status returned to a caller
+  // (ADR-020).
+  //
+  // The marker below records that machine-readably and is not itself the
+  // control. protobuf-go v1.36.6 consults debug_redact nowhere in its encoding
+  // path, so String() on this message still renders the token in full, and
+  // internal/logging redacts on the attribute key and cannot see inside a
+  // value a type rendered for it. Core and scan point MUST log this message
+  // only through logging.Proto(), and MUST NOT install a payload-logging
+  // interceptor on Enrollment. .github/scripts/check_secret_logging.py
+  // enforces the first mechanically; the second is a human review obligation,
+  // because an interceptor sees the message reflectively and defeats any
+  // source-level check.
+  string enrollment_token = 1 [debug_redact = true];
 
   // PKCS#10 DER. Core signs; it never generates the key pair.
   //
@@ -33,7 +48,14 @@ message EnrollRequest {
   // fingerprint (ADR-020) and immediate per-device revocation all rest on.
   bytes csr = 2;
 
-  string hostname = 3;  // SCAN_POINT.hostname
+  // A self-asserted label, and nothing more. A scan point sits in a network
+  // whose compromise the threat model assumes (ADR-020), so this string is
+  // attacker-chosen. Core MUST record it for operator display only: it MUST
+  // NOT authenticate the enrolment, select a zone or a policy, or become an
+  // asset identity key. Under ADR-007 hostname is a moderate key only as part
+  // of hostname+domain+OS observed by Core; asserted here it is evidence of
+  // nothing.
+  string hostname = 3;  // SCAN_POINT.hostname, operator display only
   string agent_version = 4;
   string protocol_version = 5;
 
@@ -89,6 +111,10 @@ message EnrollResponse {
 }
 
 message RotateRequest {
+  // Self-asserted, and therefore not the identity. Core MUST resolve the scan
+  // point being rotated from the TLS peer certificate and MUST refuse the call
+  // when this value names a different one. The reservation of field 3 below is
+  // why nothing carried in this message can stand in for that certificate.
   string scan_point_id = 1;
 
   bytes csr = 2;  // new key pair, new CSR
@@ -96,11 +122,33 @@ message RotateRequest {
   // No enrollment token: ADR-018 says the token is exchanged exactly once.
   // Rotation authenticates with the certificate being replaced, over the mTLS
   // connection itself.
+
+  // Field 3 was current_fingerprint, the fingerprint of the certificate being
+  // replaced. It is reserved rather than reused, and removed rather than
+  // documented, because of what it is: a non-secret, attacker-known value
+  // carried in a field shaped like an authentication input.
   //
-  // This field is defence in depth on top of that. Core compares it against
-  // the TLS peer certificate and refuses a mismatch, so a rotation body
-  // captured from one scan point cannot be replayed to re-key another.
-  string current_fingerprint = 3;
+  // A certificate fingerprint is a digest of the public half. Core returns it
+  // at enrolment (EnrollResponse.cert_fingerprint), it appears in audit
+  // records, and any peer that completes a handshake with a scan point can
+  // compute it. Holding one demonstrates nothing.
+  //
+  // The shape is the defect, not the value. A field named current_fingerprint
+  // sitting next to scan_point_id invites the implementation that checks the
+  // body instead of the TLS peer certificate. That check reads as
+  // authentication, passes every test written against a well-behaved client,
+  // and turns RotateCertificate into a re-key oracle: any enrolled scan point
+  // could name another's id and fingerprint -- both obtainable without
+  // compromising it -- and be issued a certificate for that identity. It was
+  // documented here as defence in depth, which made it worse: a field
+  // described as a control gets relied on as one.
+  //
+  // A value that can only be checked correctly by consulting the thing it
+  // purports to corroborate adds no defence and supplies a wrong answer to
+  // reach for. Core MUST resolve the identity being rotated from the TLS peer
+  // certificate and from nothing in this message.
+  reserved 3;
+  reserved "current_fingerprint";
 
   string agent_version = 4;
   string protocol_version = 5;

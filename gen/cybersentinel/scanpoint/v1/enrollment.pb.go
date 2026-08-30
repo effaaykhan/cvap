@@ -35,6 +35,21 @@ type EnrollRequest struct {
 	// being enrolled into. The zone is deliberately not a field on this message:
 	// a scan point must not be able to influence its own vantage point, because
 	// exposure is derived from the zone an observation was made from (ADR-008).
+	//
+	// A bearer credential: whoever holds it obtains a fleet identity. It must
+	// never reach a log, an error string, or a gRPC status returned to a caller
+	// (ADR-020).
+	//
+	// The marker below records that machine-readably and is not itself the
+	// control. protobuf-go v1.36.6 consults debug_redact nowhere in its encoding
+	// path, so String() on this message still renders the token in full, and
+	// internal/logging redacts on the attribute key and cannot see inside a
+	// value a type rendered for it. Core and scan point MUST log this message
+	// only through logging.Proto(), and MUST NOT install a payload-logging
+	// interceptor on Enrollment. .github/scripts/check_secret_logging.py
+	// enforces the first mechanically; the second is a human review obligation,
+	// because an interceptor sees the message reflectively and defeats any
+	// source-level check.
 	EnrollmentToken string `protobuf:"bytes,1,opt,name=enrollment_token,json=enrollmentToken,proto3" json:"enrollment_token,omitempty"`
 	// PKCS#10 DER. Core signs; it never generates the key pair.
 	//
@@ -42,8 +57,15 @@ type EnrollRequest struct {
 	// cert_fingerprint a real per-device identity rather than a label -- and
 	// that identity is what the audit log, CREDENTIAL_GRANT.delivered_to_
 	// fingerprint (ADR-020) and immediate per-device revocation all rest on.
-	Csr             []byte `protobuf:"bytes,2,opt,name=csr,proto3" json:"csr,omitempty"`
-	Hostname        string `protobuf:"bytes,3,opt,name=hostname,proto3" json:"hostname,omitempty"` // SCAN_POINT.hostname
+	Csr []byte `protobuf:"bytes,2,opt,name=csr,proto3" json:"csr,omitempty"`
+	// A self-asserted label, and nothing more. A scan point sits in a network
+	// whose compromise the threat model assumes (ADR-020), so this string is
+	// attacker-chosen. Core MUST record it for operator display only: it MUST
+	// NOT authenticate the enrolment, select a zone or a policy, or become an
+	// asset identity key. Under ADR-007 hostname is a moderate key only as part
+	// of hostname+domain+OS observed by Core; asserted here it is evidence of
+	// nothing.
+	Hostname        string `protobuf:"bytes,3,opt,name=hostname,proto3" json:"hostname,omitempty"` // SCAN_POINT.hostname, operator display only
 	AgentVersion    string `protobuf:"bytes,4,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
 	ProtocolVersion string `protobuf:"bytes,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	// Declared here as well as on Hello so Core can populate
@@ -269,19 +291,15 @@ func (x *EnrollResponse) GetMinSupportedVersion() string {
 }
 
 type RotateRequest struct {
-	state       protoimpl.MessageState `protogen:"open.v1"`
-	ScanPointId string                 `protobuf:"bytes,1,opt,name=scan_point_id,json=scanPointId,proto3" json:"scan_point_id,omitempty"`
-	Csr         []byte                 `protobuf:"bytes,2,opt,name=csr,proto3" json:"csr,omitempty"` // new key pair, new CSR
-	// No enrollment token: ADR-018 says the token is exchanged exactly once.
-	// Rotation authenticates with the certificate being replaced, over the mTLS
-	// connection itself.
-	//
-	// This field is defence in depth on top of that. Core compares it against
-	// the TLS peer certificate and refuses a mismatch, so a rotation body
-	// captured from one scan point cannot be replayed to re-key another.
-	CurrentFingerprint string `protobuf:"bytes,3,opt,name=current_fingerprint,json=currentFingerprint,proto3" json:"current_fingerprint,omitempty"`
-	AgentVersion       string `protobuf:"bytes,4,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
-	ProtocolVersion    string `protobuf:"bytes,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Self-asserted, and therefore not the identity. Core MUST resolve the scan
+	// point being rotated from the TLS peer certificate and MUST refuse the call
+	// when this value names a different one. The reservation of field 3 below is
+	// why nothing carried in this message can stand in for that certificate.
+	ScanPointId     string `protobuf:"bytes,1,opt,name=scan_point_id,json=scanPointId,proto3" json:"scan_point_id,omitempty"`
+	Csr             []byte `protobuf:"bytes,2,opt,name=csr,proto3" json:"csr,omitempty"` // new key pair, new CSR
+	AgentVersion    string `protobuf:"bytes,4,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	ProtocolVersion string `protobuf:"bytes,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	// Re-declared because rotation is when an upgraded agent restates what it
 	// can do. Engines are replaced independently of the runtime under ADR-027,
 	// so the capability set at rotation is routinely not the set at enrollment.
@@ -334,13 +352,6 @@ func (x *RotateRequest) GetCsr() []byte {
 	return nil
 }
 
-func (x *RotateRequest) GetCurrentFingerprint() string {
-	if x != nil {
-		return x.CurrentFingerprint
-	}
-	return ""
-}
-
 func (x *RotateRequest) GetAgentVersion() string {
 	if x != nil {
 		return x.AgentVersion
@@ -366,9 +377,9 @@ var File_cybersentinel_scanpoint_v1_enrollment_proto protoreflect.FileDescriptor
 
 const file_cybersentinel_scanpoint_v1_enrollment_proto_rawDesc = "" +
 	"\n" +
-	"+cybersentinel/scanpoint/v1/enrollment.proto\x12\x1acybersentinel.scanpoint.v1\x1a'cybersentinel/scanpoint/v1/common.proto\"\x84\x02\n" +
-	"\rEnrollRequest\x12)\n" +
-	"\x10enrollment_token\x18\x01 \x01(\tR\x0fenrollmentToken\x12\x10\n" +
+	"+cybersentinel/scanpoint/v1/enrollment.proto\x12\x1acybersentinel.scanpoint.v1\x1a'cybersentinel/scanpoint/v1/common.proto\"\x89\x02\n" +
+	"\rEnrollRequest\x12.\n" +
+	"\x10enrollment_token\x18\x01 \x01(\tB\x03\x80\x01\x01R\x0fenrollmentToken\x12\x10\n" +
 	"\x03csr\x18\x02 \x01(\fR\x03csr\x12\x1a\n" +
 	"\bhostname\x18\x03 \x01(\tR\bhostname\x12#\n" +
 	"\ragent_version\x18\x04 \x01(\tR\fagentVersion\x12)\n" +
@@ -385,14 +396,13 @@ const file_cybersentinel_scanpoint_v1_enrollment_proto_rawDesc = "" +
 	"\x12rulepacks_endpoint\x18\b \x01(\tR\x11rulepacksEndpoint\x12:\n" +
 	"\x19accepted_protocol_version\x18\t \x01(\tR\x17acceptedProtocolVersion\x122\n" +
 	"\x15min_supported_version\x18\n" +
-	" \x01(\tR\x13minSupportedVersion\"\x92\x02\n" +
+	" \x01(\tR\x13minSupportedVersion\"\xfc\x01\n" +
 	"\rRotateRequest\x12\"\n" +
 	"\rscan_point_id\x18\x01 \x01(\tR\vscanPointId\x12\x10\n" +
-	"\x03csr\x18\x02 \x01(\fR\x03csr\x12/\n" +
-	"\x13current_fingerprint\x18\x03 \x01(\tR\x12currentFingerprint\x12#\n" +
+	"\x03csr\x18\x02 \x01(\fR\x03csr\x12#\n" +
 	"\ragent_version\x18\x04 \x01(\tR\fagentVersion\x12)\n" +
 	"\x10protocol_version\x18\x05 \x01(\tR\x0fprotocolVersion\x12J\n" +
-	"\fcapabilities\x18\x06 \x03(\v2&.cybersentinel.scanpoint.v1.CapabilityR\fcapabilities2\xd9\x01\n" +
+	"\fcapabilities\x18\x06 \x03(\v2&.cybersentinel.scanpoint.v1.CapabilityR\fcapabilitiesJ\x04\b\x03\x10\x04R\x13current_fingerprint2\xd9\x01\n" +
 	"\n" +
 	"Enrollment\x12_\n" +
 	"\x06Enroll\x12).cybersentinel.scanpoint.v1.EnrollRequest\x1a*.cybersentinel.scanpoint.v1.EnrollResponse\x12j\n" +

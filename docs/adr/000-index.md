@@ -36,3 +36,4 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 025 | Build-versus-consume boundary | Accepted |
 | 026 | Result submission contract | Accepted |
 | 027 | Engines are separate processes behind a job contract | Accepted |
+| 028 | One pre-release correction to the frozen wire contract | Accepted |

@@ -68,8 +68,12 @@ func IsSensitiveKey(key string) bool {
 //
 // It is a key-based control and cannot inspect what a type chooses to render:
 // a struct whose String or MarshalJSON emits a secret will still emit it. That
-// is why no type holding credential material may implement either
+// is why no hand-written type holding credential material may implement either
 // (see internal/scanpoint/CLAUDE.md).
+//
+// The generated protobuf types are the exception that rule cannot cover --
+// protoc-gen-go emits String() on every message and renders every field -- so
+// protobuf messages go through Proto instead. See proto.go.
 func Redact(_ []string, a slog.Attr) slog.Attr {
 	if IsSensitiveKey(a.Key) {
 		return slog.String(a.Key, Placeholder)

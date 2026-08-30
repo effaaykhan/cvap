@@ -545,11 +545,22 @@ func (*CoreMessage_Kill) isCoreMessage_Msg() {}
 func (*CoreMessage_ServerHello) isCoreMessage_Msg() {}
 
 type Hello struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	ScanPointId     string                 `protobuf:"bytes,1,opt,name=scan_point_id,json=scanPointId,proto3" json:"scan_point_id,omitempty"`
-	ProtocolVersion string                 `protobuf:"bytes,2,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"` // additive-only within major
-	AgentVersion    string                 `protobuf:"bytes,3,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
-	Capabilities    []*Capability          `protobuf:"bytes,4,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// An echo, not an identity. Every value on this stream originates in a
+	// network whose compromise the threat model assumes (ADR-020). Core MUST
+	// resolve the scan point from the TLS peer certificate fingerprint
+	// (ADR-018), and MUST close the stream when this value names a different
+	// one rather than trusting it or quietly preferring the certificate: a
+	// mismatch is either our bug or someone's attempt, and both need an
+	// operator to see it.
+	ScanPointId     string `protobuf:"bytes,1,opt,name=scan_point_id,json=scanPointId,proto3" json:"scan_point_id,omitempty"`
+	ProtocolVersion string `protobuf:"bytes,2,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"` // additive-only within major
+	AgentVersion    string `protobuf:"bytes,3,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	// Self-asserted; see Capability. It can only narrow what Core dispatches,
+	// never widen it. Core MUST intersect this with what this scan point is
+	// independently authorised to run, so that claiming a capability cannot
+	// obtain work the scan point is not permitted to do.
+	Capabilities []*Capability `protobuf:"bytes,4,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	// Offline import means packs arrive out-of-band (ADR-019), so Core cannot
 	// infer what is loaded from what it has sent.
 	LoadedPacks   []*LoadedRulePack `protobuf:"bytes,5,rep,name=loaded_packs,json=loadedPacks,proto3" json:"loaded_packs,omitempty"`
@@ -974,9 +985,18 @@ type Heartbeat struct {
 	// network is invisible to us by construction; this is what makes it visible.
 	BufferedSubmissions uint32 `protobuf:"varint,3,opt,name=buffered_submissions,json=bufferedSubmissions,proto3" json:"buffered_submissions,omitempty"`
 	BufferedBytes       uint64 `protobuf:"varint,4,opt,name=buffered_bytes,json=bufferedBytes,proto3" json:"buffered_bytes,omitempty"`
-	// Measured aggregate send rate. ADR-024 bounds the aggregate by
-	// construction, but a ceiling Core cannot measure is decorative -- the same
-	// argument that ADR gives for requiring KillAck.
+	// Measured aggregate send rate. An attestation, not a control -- the same
+	// standing as JobTerminal.credentials_zeroised.
+	//
+	// A scan point that is sending faster than its ceiling can report any number
+	// here, and nothing in this field slows it down. ADR-024's bound is enforced
+	// where it can be: Core bounds the aggregate at planning, and the scan point
+	// runtime enforces it on the send path. This exists to catch our own bugs --
+	// a rate limiter that is wrong is otherwise invisible until a customer
+	// notices -- which is the argument ADR-024 gives for requiring KillAck.
+	//
+	// Core MUST treat a value it dislikes as an operator signal about a possibly
+	// faulty scan point, never as the rate that was actually sent.
 	ObservedRatePps uint32 `protobuf:"varint,5,opt,name=observed_rate_pps,json=observedRatePps,proto3" json:"observed_rate_pps,omitempty"`
 	// Engine process restarts since this connection opened. An engine that
 	// crashes inside a job surfaces as ENGINE_FAILURE; one that flaps between
@@ -1725,6 +1745,15 @@ type CredentialGrant struct {
 	//
 	// Stops at the runtime. Engine processes receive a session handle or a
 	// short-lived derived token, never this (ADR-027).
+	//
+	// The marker below is intent, not a mechanism. protobuf-go v1.36.6 consults
+	// debug_redact nowhere in its encoding path, so String() on this message --
+	// or on the CoreMessage carrying it in its oneof -- still renders the
+	// material in full, and internal/logging redacts on the attribute key and
+	// cannot see inside a value a type rendered for it. Log either message only
+	// through logging.Proto(), and never install a payload-logging interceptor
+	// on Dispatch. .github/scripts/check_secret_logging.py enforces the first
+	// mechanically; the second is a human review obligation.
 	Material []byte   `protobuf:"bytes,4,opt,name=material,proto3" json:"material,omitempty"`
 	Scope    []string `protobuf:"bytes,5,rep,name=scope,proto3" json:"scope,omitempty"` // targets this may be used against
 	// Never overload material. The preferred secret-free mechanisms carry
@@ -1936,12 +1965,12 @@ const file_cybersentinel_scanpoint_v1_dispatch_proto_rawDesc = "" +
 	"\bgrace_ms\x18\x04 \x01(\rR\agraceMs\"%\n" +
 	"\n" +
 	"KillSwitch\x12\x17\n" +
-	"\akill_id\x18\x01 \x01(\tR\x06killId\"\xdb\x01\n" +
+	"\akill_id\x18\x01 \x01(\tR\x06killId\"\xe0\x01\n" +
 	"\x0fCredentialGrant\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x15\n" +
 	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x12!\n" +
-	"\fexpires_unix\x18\x03 \x01(\x03R\vexpiresUnix\x12\x1a\n" +
-	"\bmaterial\x18\x04 \x01(\fR\bmaterial\x12\x14\n" +
+	"\fexpires_unix\x18\x03 \x01(\x03R\vexpiresUnix\x12\x1f\n" +
+	"\bmaterial\x18\x04 \x01(\fB\x03\x80\x01\x01R\bmaterial\x12\x14\n" +
 	"\x05scope\x18\x05 \x03(\tR\x05scope\x12A\n" +
 	"\tcred_kind\x18\x06 \x01(\x0e2$.cybersentinel.scanpoint.v1.CredKindR\bcredKind*\x8c\x01\n" +
 	"\x11BackpressureState\x12\"\n" +

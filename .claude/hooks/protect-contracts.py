@@ -31,12 +31,20 @@ Exit 2 blocks the tool call and returns the message to Claude.
 ESCAPE HATCH
 ------------
 A genuinely additive proto change, or the commit that establishes the baseline,
-sets CVAP_ALLOW_PROTO_EDIT=1. In command mode the hook runs in Claude Code's
-environment and not the command's, so an inline `CVAP_ALLOW_PROTO_EDIT=1 cmd`
-assignment would never reach it. The hook therefore accepts either: the variable
-in its own environment, or an explicit assignment written into the command. The
-second form is deliberate — it leaves the override visible in the transcript
-next to the write it authorised, rather than in an environment nobody can see.
+sets CVAP_ALLOW_PROTO_EDIT=1 in the hook's own environment. That is the only
+form accepted.
+
+An earlier version of this hook also honoured an inline
+`CVAP_ALLOW_PROTO_EDIT=1 cmd` assignment written into the Bash command, on the
+grounds that it left the override visible in the transcript beside the write it
+authorised. That optimises the wrong property. An override reachable from
+inside the command string is reachable by anything that composes commands,
+including a future session that hits this guard and routes around it rather
+than asking. Requiring the environment means the bypass needs a human to act,
+which is the entire point of a freeze. Visibility does not help if nobody is
+reading.
+
+Accepted ADRs have no escape hatch at all. They are superseded, not edited.
 
 BIAS
 ----
@@ -68,9 +76,10 @@ Scan points in customer networks run months-old builds, so changes must be
 additive-only within a major version: no field removal, no renumbering, no
 changed semantics for an existing field.
 
-If the change is genuinely additive, authorise it for one call by setting
-CVAP_ALLOW_PROTO_EDIT=1 -- in the environment, or as an explicit assignment at
-the front of the Bash command -- and record the addition in the ADR.
+If the change is genuinely additive, authorise it by setting
+CVAP_ALLOW_PROTO_EDIT=1 in this hook's environment, and record the addition in
+the ADR. An assignment inside the command does not count and will not work: the
+override has to come from the operator, not from whatever composed the command.
 If it is not additive, it needs a major version and a migration plan first.
 
 buf breaking enforces the same rule mechanically in CI; this hook is the
@@ -165,10 +174,14 @@ def written_paths(segment: str) -> list[str]:
     return hits
 
 
-def escaped(command: str) -> bool:
-    if os.environ.get(ESCAPE_VAR, "0") == "1":
-        return True
-    return bool(re.search(rf"(?:^|[\s;&|(]){ESCAPE_VAR}=1\b", command))
+def escaped() -> bool:
+    """The override, honoured only from the hook's own environment.
+
+    Deliberately not readable from the command string. See ESCAPE HATCH above:
+    an override that anything composing a command can write into it is one that
+    anything composing a command can use.
+    """
+    return os.environ.get(ESCAPE_VAR, "0") == "1"
 
 
 def main() -> int:
@@ -186,7 +199,7 @@ def main() -> int:
         message = classify(file_path)
         if message is None:
             return 0
-        if message is PROTO_MSG and os.environ.get(ESCAPE_VAR, "0") == "1":
+        if message is PROTO_MSG and escaped():
             return 0
         print(message, file=sys.stderr)
         return 2
@@ -199,7 +212,7 @@ def main() -> int:
             message = classify(candidate)
             if message is None:
                 continue
-            if message is PROTO_MSG and escaped(command):
+            if message is PROTO_MSG and escaped():
                 return 0
             print(message, file=sys.stderr)
             return 2

@@ -9,8 +9,11 @@ Rules:
 - Emits observations. Never constructs an Asset or Finding.
 - Lease renewal failure means self-abort and credential zeroise, on every path including
   panic recovery. Not "log and continue".
-- Credentials live in memory for the life of the job and nowhere else. No struct holding
-  credential material may have a `String()`, a `MarshalJSON` or a json tag that exposes it.
+- Credentials live in memory for the life of the job and nowhere else. No hand-written
+  struct holding credential material may have a `String()`, a `MarshalJSON` or a json tag
+  that exposes it. The generated protobuf types do have `String()` and cannot be changed:
+  log them only through `logging.Proto` / `logging.ProtoAttr`, which `make secret-logging`
+  enforces.
 - **Credentials stop here.** Engine processes never receive raw credential material: the
   runtime holds the credential, establishes the authenticated session, and passes the engine
   a session handle or a short-lived derived token (ADR-020, ADR-027).

@@ -7,6 +7,7 @@
         up down lab-up lab-down \
         migrate-up migrate-down migrate-new \
         proto proto-tools proto-gen proto-lint proto-breaking proto-verify \
+        secret-logging secret-logging-test \
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
         contract-guard-test
 
@@ -59,7 +60,8 @@ fmt: ## Format and tidy
 
 tidy: fmt
 
-ci: build vet test lint proto frontmatter gitignore-test scope-guard-test contract-guard-test ## Everything CI runs, locally
+ci: build vet test lint proto frontmatter gitignore-test scope-guard-test \
+    contract-guard-test secret-logging secret-logging-test ## Everything CI runs, locally
 
 ## ---------- wire contract ----------
 
@@ -199,6 +201,18 @@ scope-guard-test: ## Test the lab scope guard against its case table
 
 contract-guard-test: ## Test the frozen-contract guard against its case table
 	python3 .claude/hooks/test_protect_contracts.py
+
+# An enrollment token is a bearer credential for a fleet identity and credential
+# material is the customer's estate. Both sit in plain fields on messages an
+# implementer debugging a stream reaches for first, and the key-based redactor in
+# internal/logging cannot see them because generated types render every field
+# through String(). Left as a contract comment this gets violated and nobody
+# notices, so it is a gate.
+secret-logging: ## Fail if a secret-bearing protobuf type reaches a logging call
+	python3 .github/scripts/check_secret_logging.py
+
+secret-logging-test: ## Test the secret-logging gate against its case table
+	python3 .github/scripts/test_check_secret_logging.py
 
 licences: ## Fail on GPL/AGPL dependencies (ADR-025)
 	python3 .github/scripts/check_licences.py

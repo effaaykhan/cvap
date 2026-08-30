@@ -119,6 +119,16 @@ jobs:
           go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
           gosec ./...
 
+      # internal/logging redacts on the attribute key. Generated protobuf types
+      # implement String() and render every field, so the enrollment token and
+      # credential material are invisible to that redactor. [debug_redact = true]
+      # does not help either: protobuf-go v1.36.6 consults it nowhere in its
+      # encoding path. This is what gives the marker teeth.
+      - name: Secret-bearing types never reach a log
+        run: |
+          python3 .github/scripts/test_check_secret_logging.py
+          python3 .github/scripts/check_secret_logging.py
+
   licences:
     name: Dependency licences
     runs-on: ubuntu-latest

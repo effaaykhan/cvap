@@ -26,14 +26,18 @@ HOOK = ROOT / ".claude" / "hooks" / "protect-contracts.py"
 
 ALLOW, BLOCK = "ALLOW", "BLOCK"
 
+FROZEN_PROTO = "proto/cybersentinel/scanpoint/v1/ingest.proto"
+
 PROTO_HEREDOC = """cat > proto/cybersentinel/scanpoint/v1/ingest.proto <<'EOF'
 syntax = "proto3";
 package cybersentinel.scanpoint.v1;
 EOF"""
 
-ESCAPED_PROTO_HEREDOC = """CVAP_ALLOW_PROTO_EDIT=1 cat > proto/cybersentinel/scanpoint/v1/ingest.proto <<'EOF'
+INLINE_ESCAPE_HEREDOC = """CVAP_ALLOW_PROTO_EDIT=1 cat > proto/cybersentinel/scanpoint/v1/ingest.proto <<'EOF'
 syntax = "proto3";
 EOF"""
+
+EXPORTED_ESCAPE_HEREDOC = "export CVAP_ALLOW_PROTO_EDIT=1\n" + PROTO_HEREDOC
 
 # A read whose output is redirected somewhere harmless. The protected path is on
 # the left of the redirect, not the right.
@@ -92,10 +96,23 @@ CASES: list[tuple[str, dict, dict, str]] = [
     ("ordinary build command", {"command": "go build ./..."}, {}, ALLOW),
     ("no command and no path at all", {}, {}, ALLOW),
 
-    # --- the escape hatch, both forms ---
-    ("inline assignment authorises the write", {"command": ESCAPED_PROTO_HEREDOC}, {}, ALLOW),
+    # --- the escape hatch: the environment, and only the environment ---
+    #
+    # An override reachable from inside the command string is reachable by
+    # anything that composes commands, including a future session that hits
+    # this guard and routes around it rather than asking. Requiring the
+    # environment is what makes the bypass need a human to act, which is the
+    # entire point of a freeze. These cases are that distinction, asserted in
+    # both directions so neither half can rot.
+    ("inline assignment does NOT authorise the write",
+     {"command": INLINE_ESCAPE_HEREDOC}, {}, BLOCK),
+    ("an exported assignment in the command does NOT authorise it either",
+     {"command": EXPORTED_ESCAPE_HEREDOC}, {}, BLOCK),
     ("environment variable authorises the write",
      {"command": PROTO_HEREDOC}, {"CVAP_ALLOW_PROTO_EDIT": "1"}, ALLOW),
+    ("environment variable authorises an in-place edit too",
+     {"command": "sed -i 's/int64/int32/' " + FROZEN_PROTO},
+     {"CVAP_ALLOW_PROTO_EDIT": "1"}, ALLOW),
     ("escape set to something other than 1 does not authorise",
      {"command": PROTO_HEREDOC}, {"CVAP_ALLOW_PROTO_EDIT": "0"}, BLOCK),
     ("the escape does not reach Accepted ADRs",

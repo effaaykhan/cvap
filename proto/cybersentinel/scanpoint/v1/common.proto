@@ -11,6 +11,14 @@ package cybersentinel.scanpoint.v1;
 
 // What one engine on a scan point can execute.
 //
+// Self-asserted in both places it appears, and a ceiling rather than a grant.
+// It states what a scan point CAN execute, never what it MAY: Core MUST use it
+// only to withhold work, and MUST take authorisation -- safety mode, engine
+// enablement, policy -- from its own records keyed on the authenticated
+// identity. Read as a grant, it would let a scan point in a network whose
+// compromise the threat model assumes (ADR-020) obtain intrusive work by
+// claiming to support it.
+//
 // Declared twice, to two different services, which is why it is here.
 // Enrollment carries it so Core can record SCAN_POINT_CAPABILITY and refuse an
 // unsupported build with an operator-facing error at enrollment, rather than
