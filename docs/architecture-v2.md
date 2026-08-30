@@ -508,7 +508,7 @@ erDiagram
         uuid scan_point_id FK
         uuid zone_id FK "vantage point"
         uuid asset_id FK "nullable until resolved"
-        text observation_type "host port service banner package config"
+        text observation_type "host port service banner package config verdict"
         jsonb payload
         numeric confidence
         timestamp observed_at
@@ -722,8 +722,11 @@ erDiagram
 
 ### 9.1 Storage notes
 
+> Where this section and `docs/adr/` disagree, **the ADRs are authoritative**. This document
+> records what was decided in August; ADRs are how those decisions change.
+
 - **RLS on every tenant-scoped table.** Policy is `tenant_id = current_setting('app.tenant_id')::uuid`. Application roles cannot bypass.
-- **Partition `OBSERVATION` and `EVIDENCE` by month.** They are the growth vector. Raw observations retain 90 days by default; derived findings retain indefinitely.
+- **Partition `OBSERVATION` and `EVIDENCE` by month.** They are the growth vector. Raw observations retain 90 days by default; derived findings retain indefinitely. *Superseded by ADR-016: `OBSERVATION` is partitioned, `EVIDENCE` is not.*
 - **`FINDING_HISTORY` is a state-change log**, not a row per finding per scan. A weekly scan of 10,000 findings must not write 10,000 rows a week.
 - **Large evidence goes to object store**, with `EVIDENCE.data` holding a summary and `object_store_ref` the pointer.
 - **`ASSET_ADDRESS` and `ASSET_IDENTITY_KEY` use validity intervals.** Query current state with `valid_to IS NULL`.

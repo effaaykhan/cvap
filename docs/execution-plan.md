@@ -148,11 +148,15 @@ Record each as a short file in `docs/adr/`. Decisions are already made in the v2
 
 ### 4.2 Protocol contract
 
-Write this before implementing either side.
+Write this before implementing either side. Frozen on ship: ADR-022 makes it additive-only
+within a major version, so field numbers are never reused and semantics never change.
 
 ```protobuf
 syntax = "proto3";
 package cybersentinel.scanpoint.v1;
+
+// Four services, all scan-point-initiated over the ADR-005 posture:
+// outbound TLS 1.3, mutual auth, no inbound connection to a scan point, ever.
 
 service Enrollment {
   // One-time. Token exchanged for a client certificate.
@@ -166,18 +170,27 @@ service Dispatch {
 }
 
 service Ingest {
-  // Client-streaming, chunked, idempotent by submission_id.
-  rpc SubmitResults(stream ResultChunk) returns (SubmitAck);
+  // Bidirectional: per-chunk acks carry resumption points and backpressure.
+  // A terminal-only ack cannot express either (ADR-026).
+  rpc SubmitResults(stream ResultChunk) returns (stream SubmitAck);
+}
+
+service RulePacks {
+  // Bulk transfer off the dispatch stream: a multi-MB bundle there would
+  // head-of-line block job dispatch, which ADR-005 rejects.
+  rpc FetchRulePack(FetchRequest) returns (stream RulePackChunk);
 }
 
 message ScanPointMessage {
   oneof msg {
-    Hello          hello           = 1;
-    Heartbeat      heartbeat       = 2;
-    LeaseRenewal   lease_renewal   = 3;
-    JobProgress    progress        = 4;
-    JobTerminal    terminal        = 5;
-    Backpressure   backpressure    = 6;
+    Hello           hello            = 1;
+    Heartbeat       heartbeat        = 2;
+    LeaseRenewal    lease_renewal    = 3;
+    JobProgress     progress         = 4;
+    JobTerminal     terminal         = 5;
+    Backpressure    backpressure     = 6;
+    KillAck         kill_ack         = 7;
+    RulePackStatus  rule_pack_status = 8;
   }
 }
 
@@ -189,6 +202,7 @@ message CoreMessage {
     RulePackUpdate   rule_pack    = 4;
     CredentialGrant  credential   = 5;
     KillSwitch       kill         = 6;
+    ServerHello      server_hello = 7;
   }
 }
 
@@ -197,12 +211,27 @@ message Hello {
   string protocol_version  = 2;   // additive-only within major
   string agent_version     = 3;
   repeated Capability capabilities = 4;
+  repeated LoadedRulePack loaded_packs = 5;  // offline import means packs
+                                             // arrive out-of-band (ADR-019)
+}
+
+message ServerHello {
+  string accepted_protocol_version = 1;
+  string min_supported_version     = 2;
+  string deprecation_notice        = 3;  // operator-facing, not a bare status
 }
 
 message Capability {
-  string engine         = 1;      // discovery | host | dast | api | cloud | sast
-  string engine_version = 2;
-  bool   enabled        = 3;
+  string engine              = 1;  // discovery | host | dast | api | cloud | sast
+  string engine_version      = 2;
+  bool   enabled             = 3;
+  string rule_format_version = 4;  // Core dispatches no rule format this
+                                   // scan point cannot execute (ADR-022)
+}
+
+message LoadedRulePack {
+  string pack_id = 1;
+  string version = 2;
 }
 
 message JobAssignment {
@@ -210,17 +239,30 @@ message JobAssignment {
   string engine        = 2;
   int64  lease_epoch   = 3;       // fencing token, monotonic
   int64  lease_expires_unix = 4;
-  bool   reassign_safe = 5;
+  bool   reassign_safe = 5;       // governs retry, never retention (ADR-026)
   ScanConstraints constraints = 6;
   repeated Task tasks  = 7;
 }
 
+message Task {
+  string task_id     = 1;
+  string target      = 2;
+  bool   fragile     = 3;  // Core-held asset attribute the scan point
+                           // cannot derive; caps rate regardless of policy
+}
+
 message ScanConstraints {
-  uint32 max_rate_pps        = 1;
-  uint32 max_rate_per_target = 2;
-  string safety_mode         = 3;  // safe | intrusive
-  repeated string exclusions = 4;  // enforced again scan-point side
-  int64  window_ends_unix    = 5;
+  uint32 max_rate_pps            = 1;
+  uint32 max_rate_per_target     = 2;
+  string safety_mode             = 3;  // safe | intrusive
+  repeated string exclusions     = 4;  // enforced again scan-point side
+  int64  window_ends_unix        = 5;
+  repeated string allowed_targets = 6; // allowlist; exclusions take precedence.
+                                       // Without this the scan-point check
+                                       // authorises anything not denied.
+  uint32 fragile_rate_pps        = 7;
+  uint32 max_concurrent_per_target = 8;
+  uint32 connect_timeout_ms      = 9;
 }
 
 message CredentialGrant {
@@ -229,22 +271,95 @@ message CredentialGrant {
   int64  expires_unix   = 3;      // short TTL
   bytes  material       = 4;      // memory only, zeroise on completion
   repeated string scope = 5;      // targets this may be used against
+  CredKind cred_kind    = 6;      // never overload material
+}
+
+enum CredKind {
+  CRED_KIND_UNSPECIFIED = 0;
+  SESSION_HANDLE        = 1;
+  KERBEROS_TICKET       = 2;
+  SSH_CERT              = 3;
+  DERIVED_TOKEN         = 4;
+  RAW_SECRET            = 5;
+}
+
+message KillSwitch { string kill_id = 1; }
+
+message KillAck {
+  string kill_id      = 1;
+  int64  acked_at_unix = 2;
+  uint32 tasks_halted = 3;
+}
+
+message RulePackUpdate {
+  // Notification only. Fetch via RulePacks.FetchRulePack.
+  string pack_id          = 1;
+  string version          = 2;
+  string signature_digest = 3;
+}
+
+message RulePackStatus {
+  string pack_id = 1;
+  string version = 2;
+  RulePackState state = 3;
+  string detail  = 4;
+}
+
+enum RulePackState {
+  RULE_PACK_STATE_UNSPECIFIED = 0;
+  LOADED                      = 1;
+  REJECTED_SIGNATURE          = 2;
+  REJECTED_FORMAT             = 3;
+  FETCH_FAILED                = 4;
 }
 
 message ResultChunk {
   string submission_id  = 1;      // idempotency key
   string job_id         = 2;
-  int64  lease_epoch    = 3;      // rejected if superseded
+  int64  lease_epoch    = 3;      // quarantined if superseded, never dropped
   uint32 chunk_index    = 4;
   bool   final          = 5;
   repeated Observation observations = 6;
+  bool   incomplete     = 7;      // on EVERY chunk: with resumption Core may
+                                  // process chunks before it sees final
+  TerminationReason termination_reason = 8;
+}
+
+enum TerminationReason {
+  TERMINATION_REASON_UNSPECIFIED = 0;
+  COMPLETED            = 1;
+  LEASE_LOST           = 2;
+  CANCELLED            = 3;
+  KILLED               = 4;
+  ENGINE_FAILURE       = 5;
+  WINDOW_EXPIRED       = 6;
+  SCOPE_VIOLATION_HALT = 7;
+}
+
+message SubmitAck {
+  string submission_id       = 1;
+  uint32 last_chunk_accepted = 2;  // resume point
+  SubmitStatus status        = 3;
+  uint32 retry_after_ms      = 4;  // Core-initiated backpressure
+  string detail              = 5;
+}
+
+enum SubmitStatus {
+  SUBMIT_STATUS_UNSPECIFIED = 0;
+  ACCEPTED              = 1;  // processed normally
+  ACCEPTED_QUARANTINED  = 2;  // stored, withheld from the finding pipeline,
+                              // operator-surfaced. Stop retrying, clear buffer.
+  REJECTED_DUPLICATE    = 3;  // submission_id already ingested. Clear, no retry.
+  REJECTED_MALFORMED    = 4;  // unparseable, or unknown observation_type.
+                              // Clear buffer, no retry, log locally.
+  RETRY_LATER           = 5;  // transient Core-side failure. Keep buffer, back off.
 }
 
 message Observation {
   string observation_id   = 1;    // scan-point generated, stable across retry
   string task_id          = 2;
   string zone_id          = 3;    // vantage point
-  string observation_type = 4;
+  string observation_type = 4;    // deliberately an open string, not an enum
   bytes  payload          = 5;    // JSON
   float  confidence       = 6;
   int64  observed_at_unix = 7;
@@ -254,13 +369,15 @@ message Observation {
 Non-obvious requirements to encode in the implementation:
 
 - `observation_id` is generated at the scan point and stable across retries, so a duplicated submission deduplicates cleanly.
-- Exclusions are enforced at the scan point as well as at Core. Defence in depth on scope is the one place duplication is correct.
-- On lease renewal failure the scan point aborts, zeroises credential material, and discards partial results from non-`reassign_safe` jobs.
-- `Backpressure` is scan-point-initiated when its local buffer grows, and Core-initiated via a field on `SubmitAck` when ingest is saturated.
+- Exclusions **and the allowlist** are enforced at the scan point as well as at Core. Defence in depth on scope is the one place duplication is correct. Under ADR-027 this check lives in the scan point *runtime*, never in an engine: engines receive resolved, pre-authorised targets and send anything discovered mid-scan — a redirect, a DNS answer, a referenced host — back to the runtime for authorisation. Two enforcement sites, whatever the engine count or language.
+- On lease renewal failure the scan point aborts, zeroises credential material, marks results incomplete, and submits them.
+- `Backpressure` is scan-point-initiated when its local buffer grows, and Core-initiated via `SubmitAck.retry_after_ms` when ingest is saturated. Per-chunk acks are what make both the resumption point and the saturation signal arrive while the upload is still running.
+- **A superseded lease epoch yields `ACCEPTED_QUARANTINED`, not a rejection.** The results are stored and withheld from the finding pipeline, never dropped — they are the record of what the job touched, which is the content of ADR-012's operator escalation. Only `REJECTED_DUPLICATE` and `REJECTED_MALFORMED` tell a scan point to clear its buffer without the data having been kept.
+- `observation_type` is an **open string on the wire by design**: engines are extensible under ADR-027, and a closed wire enum would make every new observation type a proto change. The closed enum lives in the ERD. Core validates the incoming value against it at ingest and returns `REJECTED_MALFORMED` for an unknown type. Do not "tighten" field 4 to an enum later — that is the semantic change ADR-022 forbids.
 
 ### 4.3 Schema
 
-Generate migrations directly from the v2 ERD. Every tenant-scoped table gets the RLS policy in the same migration that creates it, never a follow-up. `OBSERVATION` and `EVIDENCE` are created as partitioned tables from day one — retrofitting partitioning onto a populated table is painful.
+Generate migrations directly from the v2 ERD. Every tenant-scoped table gets the RLS policy in the same migration that creates it, never a follow-up. `OBSERVATION` is created as a partitioned table from day one — retrofitting partitioning onto a populated table is painful. `EVIDENCE` is **not** partitioned (ADR-016): it is pruned by finding status rather than by time, so there is no partition key matching how it is actually dropped. Revisit at Phase 4 with measured row counts.
 
 ---
 
@@ -293,13 +410,10 @@ Calibrated to the MVP, not the enterprise vision. Revisit at Phase 4.
 
 ### Scanning safety limits
 
-| Limit | Default | Policy may |
-|---|---|---|
-| Rate per scan point | 1,000 pps | lower only |
-| Rate per target host | 50 pps | lower only |
-| Rate against `fragile` assets | 10 pps | lower only |
-| Connection timeout | 3 s | adjust |
-| Concurrent connections per target | 20 | lower only |
+Defined in **ADR-024**, which is the authority. Not restated here — see
+`docs/adr/024-scan-blast-radius-controls.md` for the table of platform defaults
+(per-scan-point, per-target and `fragile` rate ceilings, connection timeout, concurrency cap
+and kill switch propagation). Policies may lower these ceilings and may never raise them.
 
 ### Reliability
 

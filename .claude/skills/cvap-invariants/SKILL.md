@@ -45,7 +45,8 @@ Violating any of these is a defect regardless of whether tests pass. Sources: `d
 
 - `tenant_id` on every tenant-scoped table, with an RLS policy created in the **same migration**.
 - Application roles never bypass RLS. Only migration roles do.
-- `observations` and `evidence` are partitioned by month from creation. Do not retrofit.
+- `observations` is partitioned by month from creation. Do not retrofit. `evidence` is **not** partitioned — it is pruned by finding status, not by time (ADR-016).
+- Observations are ephemeral. Anything that must outlive them is copied at the moment it becomes load-bearing: merge evidence into `asset_identity_keys`, finding and verdict payloads into `evidence`. `evidence.observation_id` is a nullable soft reference, never a hard FK.
 - `finding_history` is a state-change log. Never a row per finding per scan.
 - Evidence over a few KB goes to object store; the row holds a summary plus `object_store_ref`.
 
@@ -56,7 +57,7 @@ Violating any of these is a defect regardless of whether tests pass. Sources: `d
 - `proto/` is additive-only within a major version. No field removal, no renumbering, no semantic change.
 - Capability handshake on connect. Core never dispatches a job type or rule format the scan point cannot run.
 - Result submission is idempotent by `submission_id`, chunked, and carries the lease epoch.
-- Superseded epochs are rejected at ingest.
+- Superseded epochs are **withheld from the finding pipeline and surfaced to an operator, never dropped** (`ACCEPTED_QUARANTINED`). Results are always stored; `reassign_safe` governs retry, not retention.
 
 ## Leases
 
@@ -75,9 +76,9 @@ Violating any of these is a defect regardless of whether tests pass. Sources: `d
 
 - Detection establishes evidence without achieving impact: boolean and timing differentials rather than data extraction, out-of-band callbacks rather than internal enumeration, benign echo rather than a shell.
 - Exclusions are enforced at Core **and** again at the scan point. This duplication is deliberate.
-- Rate ceilings: policies may lower the platform default, never raise it. Per scan point 1000 pps, per target 50 pps, fragile assets 10 pps.
+- Rate ceilings: policies may lower the platform default, never raise it. The defaults live in ADR-024 (`docs/adr/024-scan-blast-radius-controls.md`), which is the authority — read them there rather than from memory.
 - `fragile` is a first-class asset attribute that caps rate regardless of policy.
-- Kill switch propagates within 10 seconds.
+- Kill switch propagates within the bound ADR-024 sets.
 
 ## Knowledge matching
 
