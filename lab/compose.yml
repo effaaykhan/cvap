@@ -1,0 +1,58 @@
+# CVAP scan lab: targets to point the scanner at during development.
+#
+# Two segments, matching lab/scope.txt. Both networks are `internal: true`,
+# which means Docker installs no route to the outside: a misaimed scan cannot
+# reach the internet even if every check in the code is wrong.
+#
+# That is the point. The lab-scope-guard hook and this network topology are two
+# independent controls, not one control stated twice — the hook constrains what
+# gets typed, the network constrains what can be reached. There is no route
+# between segment A and segment B either, which is what makes multi-vantage
+# exposure testable (ADR-008): the same target seen from two zones, or seen
+# from only one.
+#
+# These are ordinary static web servers. Deliberately vulnerable targets and
+# the golden corpus land in weeks 4 and 8; see docs/execution-plan.md 6.2.
+
+name: cvap-lab
+
+services:
+  target-a1:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./targets/segment-a:/usr/share/nginx/html:ro
+    networks:
+      segment-a:
+        ipv4_address: 10.10.0.11
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  target-b1:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./targets/segment-b:/usr/share/nginx/html:ro
+    networks:
+      segment-b:
+        ipv4_address: 10.20.0.11
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  segment-a:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.10.0.0/16
+  segment-b:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.20.0.0/16

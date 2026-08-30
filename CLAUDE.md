@@ -15,9 +15,10 @@ internal/
   control/      control plane services (auth, tenancy, asset, scan, policy)
   dispatch/     job broker + dispatch + ingest
   scanpoint/    scan point runtime, lease client, engine host
-  engines/      discovery, fingerprint, rules
+  engines/      discovery, fingerprint, rules — separate processes (ADR-027)
   domain/       observation, asset, finding models — no I/O in here
   store/        postgres access, RLS-aware
+  logging/      slog setup + credential redaction
 proto/          FROZEN wire contract. See ADR-022 before touching.
 migrations/     numbered SQL. RLS + partitioning in the creating migration.
 knowledge/      python ingestion pipelines
@@ -28,11 +29,16 @@ web/            React UI
 ## Commands
 
 ```
-make build        make test         make lint
-make lab-up       make lab-down     make corpus-check
-make safety       # scope-enforcement suite — must pass before any merge
+make build        make test         make lint         make ci
+make up           make down         # dev stack: postgres + minio
+make lab-up       make lab-down     # isolated scan lab, two segments
 make migrate-up   make migrate-new NAME=x
+make safety       # scope-enforcement gate — must pass before any merge
+make corpus-check # golden corpus diff
 ```
+
+`safety` and `corpus-check` are failing stubs until week 8. Deliberate: a gate that
+silently passes is worse than one that fails, because the first gets trusted.
 
 ## Non-negotiables
 

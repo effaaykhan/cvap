@@ -4,6 +4,7 @@
 *.exe
 *.test
 *.out
+coverage.*
 
 # python
 __pycache__/
@@ -18,8 +19,10 @@ venv/
 # secrets — never commit
 .env
 .env.*
+!.env.example
 *.pem
 *.key
+*.p12
 /secrets/
 
 # lab artifacts

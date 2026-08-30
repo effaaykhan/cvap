@@ -11,6 +11,15 @@ Falls back to loopback, RFC1918, link-local, CGNAT and the reserved
 documentation ranges if that file is absent.
 
 Exit 2 blocks the command and returns the message to Claude.
+
+Matching operates on a *sanitised* copy of the command with heredoc bodies and
+redirect targets removed. Writing a file that merely mentions a scanning tool is
+not an invocation of one, and a guard that fires on documentation gets routed
+around — which disables it far more thoroughly than deleting it would.
+
+The sanitising is deliberately narrow. It removes text that cannot be a command,
+never text that could be. Anything still executable is matched exactly as
+before, including targets that arrive through a variable.
 """
 
 import ipaddress
@@ -49,6 +58,54 @@ SOFT_TOOLS = re.compile(r"(?:^|[\s;&|(])(curl|wget|http|https)(?:\s|$)")
 
 IP_TOKEN = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})(/\d{1,2})?\b")
 V6_TOKEN = re.compile(r"\b([0-9a-fA-F]{0,4}(?::[0-9a-fA-F]{0,4}){2,7})(/\d{1,3})?\b")
+
+# `<<EOF`, `<< "EOF"`, `<<-'EOF'`. The delimiter word is what we track.
+HEREDOC_START = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+
+# `> file`, `>>file`, `2> file`, `&> file`. The `[^\s;&|<>]+` target class means
+# `2>&1` is left alone, which is correct: it names no file.
+REDIRECT_TARGET = re.compile(r"(?:\d?>>?|&>)\s*(?:'[^']*'|\"[^\"]*\"|[^\s;&|<>()]+)")
+
+
+def strip_heredocs(command):
+    """Remove heredoc bodies, keeping the command lines that introduce them.
+
+    The `<<` operator itself is preserved (only the delimiter word is dropped)
+    so that the indirect-input check below still sees an input redirect.
+    """
+    lines = command.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        pending = [(m.group(3), m.group(1) == "-") for m in HEREDOC_START.finditer(line)]
+        out.append(HEREDOC_START.sub("<< ", line))
+        i += 1
+        for delim, dash_form in pending:
+            while i < len(lines):
+                body_line = lines[i]
+                # bash requires the delimiter alone on its line; `<<-` also
+                # permits leading tabs.
+                closing = body_line.strip() if dash_form else body_line.rstrip()
+                i += 1
+                if closing == delim:
+                    break
+            # An unterminated heredoc consumes to end of input, which is what
+            # bash does too. The body stays excluded.
+    return "\n".join(out)
+
+
+def strip_redirect_targets(command):
+    """Remove the filename side of a redirect.
+
+    `cat > cvap-notes.md` writes a file; it does not run a scanner.
+    """
+    return REDIRECT_TARGET.sub(" ", command)
+
+
+def sanitise(command):
+    """The string all matching runs against."""
+    return strip_redirect_targets(strip_heredocs(command))
 
 
 def load_scope():
@@ -97,9 +154,11 @@ def main():
     except Exception:
         sys.exit(0)
 
-    command = (payload.get("tool_input") or {}).get("command") or ""
-    if not command:
+    raw = (payload.get("tool_input") or {}).get("command") or ""
+    if not raw:
         sys.exit(0)
+
+    command = sanitise(raw)
 
     is_scan = bool(SCAN_TOOLS.search(command))
     is_soft = bool(SOFT_TOOLS.search(command))
