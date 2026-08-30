@@ -6,12 +6,27 @@
 .PHONY: help build test lint vet fmt tidy ci \
         up down lab-up lab-down \
         migrate-up migrate-down migrate-new \
-        safety corpus-check frontmatter licences gitignore-test scope-guard-test
+        proto proto-tools proto-gen proto-lint proto-breaking proto-verify \
+        safety corpus-check frontmatter licences gitignore-test scope-guard-test \
+        contract-guard-test
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
 # under a running project (ADR-025: consume commodity infrastructure).
 MIGRATE_IMAGE := migrate/migrate@sha256:f21c436af23c282f4516b00ba3e93bccf5c5fe5cd52530fd5c319a936998f539
 MIGRATIONS_DIR := migrations
+
+# Protobuf toolchain, pinned. Local plugins rather than buf.build remote ones,
+# so generating the contract is not a network call to a third party (ADR-025).
+BUF_VERSION := v1.47.2
+PROTOC_GEN_GO_VERSION := v1.36.6
+PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
+
+# What `buf breaking` compares against. ADR-022 is additive-only within a major
+# version and this is what enforces it mechanically rather than by review.
+# Locally that is the last commit; in CI it is the branch being merged into,
+# because a break that is already committed locally compares clean against
+# itself.
+PROTO_BASELINE ?= .git#ref=HEAD
 
 # Loaded from .env when present so make migrate-up works without exporting by
 # hand. Copy .env.example to .env first.
@@ -44,7 +59,57 @@ fmt: ## Format and tidy
 
 tidy: fmt
 
-ci: build vet test lint frontmatter gitignore-test scope-guard-test ## Everything CI runs, locally
+ci: build vet test lint proto frontmatter gitignore-test scope-guard-test contract-guard-test ## Everything CI runs, locally
+
+## ---------- wire contract ----------
+
+# proto/ is frozen (ADR-022). These three targets are what make that mechanical:
+# lint holds the shape, breaking holds the additive-only rule, and verify holds
+# the committed bindings to the .proto files they came from.
+proto: proto-lint proto-breaking proto-verify ## Lint, breaking-check and verify the wire contract
+
+proto-tools: ## Install the pinned protobuf toolchain into $(GOPATH)/bin
+	go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
+
+proto-gen: ## Regenerate the Go bindings in gen/
+	@command -v buf >/dev/null || { echo "buf not on PATH -- run: make proto-tools"; exit 1; }
+	buf generate
+
+proto-lint: ## Lint the wire contract
+	@command -v buf >/dev/null || { echo "buf not on PATH -- run: make proto-tools"; exit 1; }
+	buf lint
+
+# The gate ADR-022 rests on. No field removal, no renumbering, no type change,
+# ever, within a major version -- because scan points in customer networks run
+# months-old builds and cannot be told to upgrade first.
+proto-breaking: ## Check the contract is additive-only against $(PROTO_BASELINE)
+	@command -v buf >/dev/null || { echo "buf not on PATH -- run: make proto-tools"; exit 1; }
+	@out=$$(buf breaking --against '$(PROTO_BASELINE)' 2>&1); status=$$?; \
+	if [ $$status -eq 0 ]; then \
+		echo "buf breaking: clean against $(PROTO_BASELINE)"; \
+	elif echo "$$out" | grep -q 'had no .proto files'; then \
+		echo "buf breaking: NO BASELINE in $(PROTO_BASELINE) -- nothing to compare against."; \
+		echo "Expected only at the commit that establishes the contract. If you see this"; \
+		echo "afterwards, the baseline ref is wrong and the additive-only gate is not running."; \
+	else \
+		echo "$$out"; exit $$status; \
+	fi
+
+# gen/ is committed, so it can drift from proto/ silently. This is what stops a
+# hand-edited .pb.go, and what stops a .proto change landing without the
+# bindings that go with it.
+proto-verify: ## Assert gen/ matches proto/
+	@command -v buf >/dev/null || { echo "buf not on PATH -- run: make proto-tools"; exit 1; }
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	buf generate --output "$$tmp"; \
+	if ! diff -r -q gen "$$tmp/gen" >/dev/null 2>&1; then \
+		echo "gen/ does not match proto/. Run: make proto-gen"; \
+		diff -r gen "$$tmp/gen" | head -40; \
+		exit 1; \
+	fi; \
+	echo "gen/ matches proto/"
 
 ## ---------- dev stack ----------
 
@@ -131,6 +196,9 @@ gitignore-test: ## Assert .gitignore still covers what it must
 
 scope-guard-test: ## Test the lab scope guard against its case table
 	python3 .claude/hooks/test_lab_scope_guard.py
+
+contract-guard-test: ## Test the frozen-contract guard against its case table
+	python3 .claude/hooks/test_protect_contracts.py
 
 licences: ## Fail on GPL/AGPL dependencies (ADR-025)
 	python3 .github/scripts/check_licences.py

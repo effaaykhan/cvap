@@ -1,0 +1,107 @@
+// Signed rule packs: notification on the dispatch stream, bulk transfer here.
+// ADR-019, ADR-005.
+//
+// The rule-pack vocabulary lives in one file even though RulePackUpdate and
+// RulePackStatus travel on the dispatch stream, because they are entirely the
+// rule-pack concern -- the notify-then-fetch shape ADR-019 chose. Splitting by
+// which connection carries the bytes would put three of the five messages in a
+// file about something else.
+
+syntax = "proto3";
+
+package cybersentinel.scanpoint.v1;
+
+service RulePacks {
+  // Bulk transfer off the dispatch stream: a multi-MB bundle there would
+  // head-of-line block job dispatch, which ADR-005 rejects.
+  rpc FetchRulePack(FetchRequest) returns (stream RulePackChunk);
+}
+
+// A pack the scan point currently has loaded, reported on Hello.
+//
+// Offline import means a pack can arrive out-of-band -- an air-gapped operator
+// carrying a signed bundle in by hand is a first-class path under ADR-019, not
+// a workaround -- so Core cannot infer what is live from what it has sent.
+message LoadedRulePack {
+  string pack_id = 1;
+  string version = 2;
+}
+
+// Notification only. Fetch via RulePacks.FetchRulePack.
+message RulePackUpdate {
+  string pack_id = 1;
+  string version = 2;
+  string signature_digest = 3;
+}
+
+// What the scan point did with a pack.
+//
+// A scan point that refuses a pack reports it upstream. Silent fail-closed
+// inside a network we cannot observe is precisely the mysterious failure
+// ADR-019 and ADR-022 both argue against: the pack is not loaded, detection
+// silently regresses, and nothing says so.
+message RulePackStatus {
+  string pack_id = 1;
+  string version = 2;
+  RulePackState state = 3;
+  string detail = 4;
+}
+
+enum RulePackState {
+  RULE_PACK_STATE_UNSPECIFIED = 0;
+  LOADED = 1;
+  REJECTED_SIGNATURE = 2;
+  REJECTED_FORMAT = 3;
+  FETCH_FAILED = 4;
+}
+
+message FetchRequest {
+  string pack_id = 1;
+  string version = 2;
+
+  // Echoed back from the RulePackUpdate that prompted this fetch. Core can
+  // then refuse to serve a different artefact under the same (pack_id,
+  // version), which turns a substitution into an error before the scan point
+  // spends the transfer on it. Signature verification would catch it either
+  // way (ADR-019); catching it here costs nothing and names the problem.
+  string signature_digest = 3;
+
+  // Bytes already durable locally. A multi-MB pack over a customer link drops,
+  // and without resumption a site on a poor connection never completes one.
+  // Putting packs on their own service (ADR-005) is what lets a fetch take as
+  // long as it needs without blocking job dispatch.
+  uint64 resume_offset = 4;
+
+  // The scan point owns its 512 MB RSS ceiling and Core cannot know it.
+  uint32 max_chunk_bytes = 5;
+}
+
+message RulePackChunk {
+  string pack_id = 1;
+  string version = 2;
+  uint64 offset = 3;  // byte offset of this chunk within the artefact
+
+  // Hot path: field 4 keeps the payload tag to a single byte.
+  bytes data = 4;
+
+  bool final = 5;
+
+  // On every chunk, so the scan point can refuse a pack larger than it can
+  // hold before spending the transfer rather than after.
+  uint64 total_bytes = 6;
+
+  // The signature travels on every chunk, not only the last one.
+  //
+  // A scan point that loses the connection mid-transfer would otherwise hold a
+  // complete-looking artefact it has no way to verify, and ADR-019 requires it
+  // to fail closed -- which would make a dropped connection indistinguishable
+  // from a tampered pack. A few hundred repeated bytes against a multi-MB
+  // bundle is not a cost worth that ambiguity.
+  string signature_digest = 7;
+  bytes signature = 8;
+
+  // Which key signed it. ADR-019 names signing key custody and rotation as a
+  // live cost; a scan point that cannot tell which key to verify against
+  // cannot survive a rotation.
+  string signing_key_id = 9;
+}

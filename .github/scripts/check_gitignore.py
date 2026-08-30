@@ -51,6 +51,12 @@ CASES: list[tuple[str, bool, str]] = [
     ("bin/cvap-core", True, "build output"),
     ("coverage.out", True, "test artefact"),
     ("go.mod", False, "source of truth for the module"),
+    # gen/ is generated but committed: CI verifies it matches proto/, and the
+    # scan point protocol has no build step that would regenerate it on the
+    # fly. An over-broad ignore rule aimed at build output would silently empty
+    # the wire contract's bindings.
+    ("gen/cybersentinel/scanpoint/v1/common.pb.go", False, "generated wire bindings are committed"),
+    ("proto/cybersentinel/scanpoint/v1/common.proto", False, "the frozen wire contract"),
     ("Makefile", False, "committed build entrypoint"),
 ]
 

@@ -1,0 +1,365 @@
+// The long-lived bidirectional stream. Jobs, leases, credentials, capability
+// negotiation, cancellation and the kill switch. ADR-005, ADR-004.
+//
+// The scan point always initiates. Core never opens a connection into a
+// customer network, in any deployment mode, for any reason.
+//
+// Results do not travel here -- they go to Ingest (ADR-026), and rule pack
+// bodies go to RulePacks (ADR-019). Both are bulk, and bulk on this stream
+// head-of-line blocks job assignment behind it.
+
+syntax = "proto3";
+
+package cybersentinel.scanpoint.v1;
+
+import "cybersentinel/scanpoint/v1/common.proto";
+import "cybersentinel/scanpoint/v1/rulepacks.proto";
+
+service Dispatch {
+  // Long-lived bidirectional stream. Scan point always initiates.
+  rpc Connect(stream ScanPointMessage) returns (stream CoreMessage);
+}
+
+message ScanPointMessage {
+  oneof msg {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    LeaseRenewal lease_renewal = 3;
+    JobProgress progress = 4;
+    JobTerminal terminal = 5;
+    Backpressure backpressure = 6;
+    KillAck kill_ack = 7;
+    RulePackStatus rule_pack_status = 8;
+  }
+}
+
+message CoreMessage {
+  oneof msg {
+    JobAssignment job = 1;
+    LeaseGrant lease = 2;
+    CancelJob cancel = 3;
+    RulePackUpdate rule_pack = 4;
+    CredentialGrant credential = 5;
+    KillSwitch kill = 6;
+    ServerHello server_hello = 7;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Handshake
+// ---------------------------------------------------------------------------
+
+message Hello {
+  string scan_point_id = 1;
+  string protocol_version = 2;  // additive-only within major
+  string agent_version = 3;
+  repeated Capability capabilities = 4;
+
+  // Offline import means packs arrive out-of-band (ADR-019), so Core cannot
+  // infer what is loaded from what it has sent.
+  repeated LoadedRulePack loaded_packs = 5;
+}
+
+message ServerHello {
+  string accepted_protocol_version = 1;
+  string min_supported_version = 2;
+
+  // Operator-facing, not a bare status. A scan point outside the supported
+  // window is told so in words an operator can act on; closing the stream with
+  // a status code is the mysterious failure ADR-022 rejects, in a network we
+  // cannot reach to diagnose.
+  string deprecation_notice = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Job assignment
+// ---------------------------------------------------------------------------
+
+message JobAssignment {
+  string job_id = 1;
+  string engine = 2;
+  int64 lease_epoch = 3;  // fencing token, monotonic
+  int64 lease_expires_unix = 4;
+  bool reassign_safe = 5;  // governs retry, never retention (ADR-026)
+  ScanConstraints constraints = 6;
+  repeated Task tasks = 7;
+}
+
+message Task {
+  string task_id = 1;
+  string target = 2;
+
+  // Core-held asset attribute the scan point cannot derive; caps rate
+  // regardless of policy. Fragility belongs to the device, not to the scan, so
+  // it must apply to every scan that ever touches it -- including one written
+  // by someone who has never heard of that device (ADR-024).
+  bool fragile = 3;
+}
+
+message ScanConstraints {
+  uint32 max_rate_pps = 1;
+  uint32 max_rate_per_target = 2;
+  string safety_mode = 3;  // safe | intrusive
+
+  // Enforced again scan-point side. Scope enforcement is duplicated on purpose
+  // and lives at exactly two sites -- Core at planning, the scan point runtime
+  // on the send path. Never in an engine: engines receive resolved,
+  // pre-authorised targets and send anything discovered mid-scan back to the
+  // runtime for authorisation (ADR-024, ADR-027).
+  repeated string exclusions = 4;
+
+  int64 window_ends_unix = 5;
+
+  // Allowlist; exclusions take precedence. Without this the scan-point check
+  // authorises anything not denied, which is not a scope check.
+  repeated string allowed_targets = 6;
+
+  uint32 fragile_rate_pps = 7;
+  uint32 max_concurrent_per_target = 8;
+  uint32 connect_timeout_ms = 9;
+}
+
+// ---------------------------------------------------------------------------
+// Liveness and flow control, scan point to Core
+// ---------------------------------------------------------------------------
+
+// Sent every 30 s; Core times out at 90 s.
+//
+// Liveness plus the small set of numbers that are invisible between jobs.
+// Anything job-scoped belongs on JobProgress, and anything about a single
+// failure belongs on JobTerminal.
+message Heartbeat {
+  int64 sent_at_unix = 1;
+  uint32 active_jobs = 2;
+
+  // Depth of the local durable buffer (ADR-026), bounded at 500 MB / 24 h.
+  //
+  // The heartbeat is the only always-flowing channel, so it is the only place
+  // Core can see a scan point approaching that ceiling rather than learning
+  // about it once data starts being shed. A buffer filling inside a customer
+  // network is invisible to us by construction; this is what makes it visible.
+  uint32 buffered_submissions = 3;
+  uint64 buffered_bytes = 4;
+
+  // Measured aggregate send rate. ADR-024 bounds the aggregate by
+  // construction, but a ceiling Core cannot measure is decorative -- the same
+  // argument that ADR gives for requiring KillAck.
+  uint32 observed_rate_pps = 5;
+
+  // Engine process restarts since this connection opened. An engine that
+  // crashes inside a job surfaces as ENGINE_FAILURE; one that flaps between
+  // jobs (ADR-027) is otherwise invisible until throughput is already gone.
+  uint32 engine_restarts = 6;
+}
+
+// A request to continue, not a claim of continuation.
+//
+// The epoch is the fencing check (ADR-012). If Core has issued a higher one,
+// the renewal is refused and the scan point must self-abort and zeroise
+// credentials (ADR-020) rather than continue optimistically.
+message LeaseRenewal {
+  string job_id = 1;
+  int64 lease_epoch = 2;  // the epoch the scan point believes it holds
+  int64 renewed_at_unix = 3;
+
+  // Deliberately no requested duration. TTL is Core's -- 60 s with renewal at
+  // 20 s -- and letting the scan point ask for longer would let a compromised
+  // one extend the window in which credential material lives in its memory,
+  // which is exactly the bound that makes ADR-020's memory-only model mean
+  // anything.
+}
+
+message JobProgress {
+  string job_id = 1;
+  int64 lease_epoch = 2;
+
+  // Counts rather than a percentage. The task is the unit of attribution
+  // (ADR-011), and "3 of 254 failed" is what an operator acts on; a percentage
+  // is derived and discards the part that matters.
+  uint32 tasks_total = 3;
+  uint32 tasks_completed = 4;
+  uint32 tasks_failed = 5;
+
+  uint32 observations_emitted = 6;
+  int64 reported_at_unix = 7;
+
+  // The rate actually in effect. ADR-024's rate limiting is adaptive during
+  // execution, and without this a scan running at 40 pps under a 1,000 pps
+  // ceiling looks identical to a broken one -- when in fact the fragile-device
+  // guard fired, which is the whole explanation for the duration.
+  uint32 current_rate_pps = 8;
+}
+
+// The job ended. Notification only: the results themselves go to Ingest.
+message JobTerminal {
+  string job_id = 1;
+  int64 lease_epoch = 2;
+  TerminationReason reason = 3;
+
+  // The join between the two streams. Dispatch learns the job ended; Ingest
+  // receives the results. Without the submission_id, "terminal seen, results
+  // never arrived" is indistinguishable from "results still uploading", and
+  // only one of those needs an operator.
+  string submission_id = 4;
+
+  // Marked, submitted, never discarded (ADR-026). A job that lost its lease
+  // has already put packets on the wire, and the partial record is the only
+  // account of what it touched.
+  bool incomplete = 5;
+
+  uint32 tasks_completed = 6;
+  uint32 tasks_failed = 7;
+  int64 ended_at_unix = 8;
+
+  // Operator-facing detail: which engine failed, which target halted the scan.
+  string detail = 9;
+
+  // An attestation, not a control.
+  //
+  // A compromised scan point can set this and lie, and nothing here would
+  // catch that. It exists to catch our own bugs: ADR-020 requires zeroisation
+  // on completion, lease loss and abort, and an invariant that nothing ever
+  // asserts is an invariant nothing notices the loss of. Core raises an audit
+  // event naming the scan point when a JobTerminal arrives without it set --
+  // an unchecked field would be worse than no field at all.
+  bool credentials_zeroised = 10;
+}
+
+// Scan-point-initiated flow control (ADR-026).
+//
+// This is the half that throttles job assignment. SubmitAck.retry_after_ms is
+// the other half and throttles the upload. Only this one can stop the buffer
+// growing, because only dispatch can stop Core handing out more work -- which
+// is why an ingest-side signal alone would not be flow control at all.
+message Backpressure {
+  BackpressureState state = 1;
+  uint32 buffered_submissions = 2;
+  uint64 buffered_bytes = 3;
+  uint32 suggested_pause_ms = 4;
+  int64 reported_at_unix = 5;
+}
+
+enum BackpressureState {
+  BACKPRESSURE_STATE_UNSPECIFIED = 0;
+  BACKPRESSURE_STATE_OK = 1;    // recovered; resume normal assignment
+  BACKPRESSURE_STATE_SOFT = 2;  // assign fewer jobs
+  BACKPRESSURE_STATE_HARD = 3;  // assign nothing; buffer near its ceiling
+}
+
+message KillAck {
+  string kill_id = 1;
+  int64 acked_at_unix = 2;
+  uint32 tasks_halted = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Leases, cancellation and the kill switch, Core to scan point
+// ---------------------------------------------------------------------------
+
+// Core's answer to a LeaseRenewal, and the vehicle for revoking a lease
+// unsolicited.
+//
+// Revocation is sent, not waited for. ADR-005 rejected long-polling precisely
+// because lease revocation, cancellation and the kill switch would then arrive
+// only at poll boundaries, when being immediate is their entire value.
+message LeaseGrant {
+  string job_id = 1;
+
+  // Authoritative, and may exceed the epoch the scan point asked with.
+  int64 lease_epoch = 2;
+
+  int64 lease_expires_unix = 3;
+  LeaseState state = 4;
+  string detail = 5;  // operator-facing on loss
+}
+
+enum LeaseState {
+  LEASE_STATE_UNSPECIFIED = 0;
+
+  // Renewed; continue.
+  LEASE_STATE_GRANTED = 1;
+
+  // Superseded or expired. Self-abort, zeroise credentials, mark results
+  // incomplete, submit them (ADR-012, ADR-020, ADR-026).
+  //
+  // Stated explicitly rather than left to a renewal timeout: it fires the
+  // self-abort deterministically and shortens the window credential material
+  // sits in memory. ADR-022 wants comprehensible failure over silence.
+  LEASE_STATE_LOST = 2;
+
+  // Core has no record of this job -- after a Core restart, or after a scan
+  // point returns from a long outage. Same self-abort, different operator
+  // message, and worth distinguishing because one of the two means Core lost
+  // state and the other does not.
+  LEASE_STATE_UNKNOWN_JOB = 3;
+}
+
+// Per-scan immediate cancellation, distinct from the global kill switch
+// (ADR-024).
+message CancelJob {
+  string job_id = 1;
+
+  // Cancels the incarnation Core means, not whatever is running under that
+  // job id after a reassignment.
+  int64 lease_epoch = 2;
+
+  string reason = 3;  // operator-facing; surfaces in the audit log
+
+  // The runtime's SIGTERM-then-SIGKILL window for engine processes. ADR-027
+  // fixes the mechanism and not the number, so setting it here lets an
+  // operator cancel an intrusive job harder without a fleet redeploy. Still
+  // bounded by ADR-024's 10 s propagation guarantee.
+  uint32 grace_ms = 4;
+
+  // Deliberately no "discard results" option.
+  //
+  // ADR-026 is unambiguous: results are always persisted and submitted, and
+  // §11's ABORT node is corrected to zeroise, mark incomplete, submit. A wire
+  // field that could switch that off would make the invariant negotiable by
+  // whoever controls Core -- and the partial record is exactly the "what did
+  // we touch" evidence ADR-012's operator escalation exists to serve.
+}
+
+message KillSwitch {
+  string kill_id = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Credentials
+// ---------------------------------------------------------------------------
+
+// Just-in-time, scoped to this job's targets, short TTL, memory only (ADR-020).
+//
+// Never a bulk sync of the credential store. A scan point sits in the network
+// whose compromise the threat model assumes, so what it holds must be bounded
+// to the jobs in flight and the remaining seconds of their TTL.
+message CredentialGrant {
+  string grant_id = 1;
+  string job_id = 2;
+  int64 expires_unix = 3;  // short TTL
+
+  // Memory only, zeroised on completion, lease loss or abort. Never written to
+  // disk on a scan point: anything on disk survives the process, and the
+  // decryption key would have to be on that host too, which converts a
+  // memory-scraping attack into a file read.
+  //
+  // Stops at the runtime. Engine processes receive a session handle or a
+  // short-lived derived token, never this (ADR-027).
+  bytes material = 4;
+
+  repeated string scope = 5;  // targets this may be used against
+
+  // Never overload material. The preferred secret-free mechanisms carry
+  // structurally different bytes, and one opaque field meaning different
+  // things per protocol is exactly the semantic drift ADR-022 forbids.
+  CredKind cred_kind = 6;
+}
+
+enum CredKind {
+  CRED_KIND_UNSPECIFIED = 0;
+  SESSION_HANDLE = 1;
+  KERBEROS_TICKET = 2;
+  SSH_CERT = 3;
+  DERIVED_TOKEN = 4;
+  RAW_SECRET = 5;
+}

@@ -1,0 +1,58 @@
+# buf configuration for the frozen scan point wire contract.
+#
+# ADR-022 makes proto/ additive-only within a major version. `buf breaking` is
+# what enforces that mechanically rather than by review -- a reviewer who has
+# read the ADR still has to notice a renumbered field in a large diff, and
+# eventually will not.
+
+version: v2
+
+modules:
+  - path: proto
+
+lint:
+  use:
+    - STANDARD
+  except:
+    # execution-plan 4.2 froze the contract before this configuration existed,
+    # and 4.2 wins: these are not style preferences we are declining, they are
+    # names that are already permanent under ADR-022. Each exception below
+    # names the frozen shape that forces it.
+
+    # 4.2 froze unprefixed enum values -- SESSION_HANDLE, LOADED, ACCEPTED,
+    # COMPLETED -- on CredKind, RulePackState, SubmitStatus and
+    # TerminationReason. Renaming an enum value is a wire-compatible change but
+    # a source-breaking one for every generated client, and ADR-022's whole
+    # argument is that we do not get to require a fleet-wide rebuild.
+    #
+    # New enums use the full prefix anyway, by convention rather than by lint.
+    # That is not cosmetic: enum values share package scope under proto's C++
+    # scoping rules, so an unprefixed LEASE_LOST on LeaseState would collide
+    # with TerminationReason.LEASE_LOST and fail to compile. protoc catches a
+    # real collision even with this rule off.
+    - ENUM_VALUE_PREFIX
+
+    # 4.2 named the services Enrollment, Dispatch, Ingest and RulePacks. They
+    # are the four ADR-005 services by those names in the ADR, the execution
+    # plan and the architecture document.
+    - SERVICE_SUFFIX
+
+    # 4.2 froze Enroll(EnrollRequest), RotateCertificate(RotateRequest),
+    # Connect(stream ScanPointMessage), SubmitResults(stream ResultChunk) and
+    # FetchRulePack(FetchRequest). None match the MethodNameRequest convention.
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+
+    # RotateCertificate returns EnrollResponse by design: rotation produces
+    # exactly what enrollment produces, and ADR-018 requires the two flows to
+    # be byte-identical.
+    - RPC_REQUEST_RESPONSE_UNIQUE
+
+breaking:
+  use:
+    # The strictest category, which is the right one for a contract that is
+    # frozen rather than merely versioned. Beyond wire compatibility it also
+    # pins a message to its file and pins go_package, so a message cannot be
+    # quietly relocated -- wire-safe, but it breaks every import in the fleet's
+    # generated code.
+    - FILE

@@ -56,7 +56,8 @@ internal/scanpoint/CLAUDE.md
 internal/engines/CLAUDE.md
 .claude/settings.json                      hooks + permissions
 .claude/hooks/lab-scope-guard.py           blocks scans outside lab/scope.txt
-.claude/hooks/protect-contracts.sh         freezes proto/ and accepted ADRs
+.claude/hooks/protect-contracts.py         freezes proto/ and accepted ADRs
+.claude/hooks/test_protect_contracts.py    its case table
 .claude/hooks/go-fmt-lint.sh               fmt, vet, RLS warning on migrations
 .claude/agents/security-reviewer.md
 .claude/agents/scan-safety-auditor.md
@@ -102,12 +103,35 @@ pass; `cvap-cli scan 8.8.8.8`, `masscan 0.0.0.0/0`, `nmap -iL targets.txt` and
 This is a development guardrail, not the product's scope enforcement. The real one is the
 policy engine plus the `make safety` egress-capture suite, and neither is replaced by this.
 
-### `protect-contracts.sh`
+### `protect-contracts.py`
 
-Blocks edits to `proto/*.proto` and to accepted ADRs. The protocol is additive-only because
-scan points in customer networks run months-old builds; accepted decisions get superseded,
-not rewritten. Proto edits can be allowed for one command with `CVAP_ALLOW_PROTO_EDIT=1`,
-which is deliberately slightly annoying.
+Blocks writes to `proto/**/*.proto` and to accepted ADRs. The protocol is additive-only
+because scan points in customer networks run months-old builds; accepted decisions get
+superseded, not rewritten. Proto edits can be allowed for one call with
+`CVAP_ALLOW_PROTO_EDIT=1`, which is deliberately slightly annoying. Accepted ADRs have no
+escape hatch — supersede them instead.
+
+It covers two write paths, because there are two ways to write a file. `Edit`, `Write` and
+`NotebookEdit` hand the hook a `file_path`. `Bash` hands it a `command` and no path at all,
+so the hook reads the command and looks for redirects, `tee`, `mv`, `cp`, `rm`, `sed -i` and
+`truncate` against a protected path. The earlier shell version read `file_path` only, which
+meant a heredoc — the most natural way to write a proto file from a shell — went straight
+through it.
+
+In command mode the hook runs in Claude Code's environment rather than the command's, so an
+inline `CVAP_ALLOW_PROTO_EDIT=1 cat > ...` would never reach it. It therefore accepts the
+override either from its own environment or as an explicit assignment written into the
+command. The second form is deliberate: it leaves the override visible in the transcript
+next to the write it authorised.
+
+Unlike the scope guard, this one fails closed. That guard sanitises heredoc bodies so
+documentation mentioning `nmap` is not mistaken for an invocation, because a guard that
+fires on prose gets routed around. Here the cost of a false block is one environment
+variable and the cost of a false allow is a silently broken contract, so a protected path
+near a write construct is blocked without further analysis.
+
+`make contract-guard-test` runs its case table. `buf breaking` in CI is the same rule
+enforced on the merge, for changes that never went through this hook at all.
 
 ### `go-fmt-lint.sh`
 

@@ -1,0 +1,24 @@
+# Generation for the scan point wire contract. Output is committed to gen/ and
+# verified in CI by `make proto-verify`, so a hand-edited .pb.go fails the build.
+#
+# Local plugins rather than buf.build remote plugins, deliberately: remote
+# plugins make code generation a network operation against a third party. This
+# project already treats that as a thing to avoid -- ADR-019 requires a fully
+# offline import path for knowledge data, and ADR-025 pins tooling so it cannot
+# change under a running project. Install them with `make proto-tools`.
+
+version: v2
+
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/effaaykhan/cvap/gen
+
+plugins:
+  - local: protoc-gen-go
+    out: gen
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: gen
+    opt: paths=source_relative

@@ -1,0 +1,48 @@
+// Types that cross more than one of the four scan point services.
+//
+// Deliberately small. A shared file that accumulates everything becomes a
+// dependency every service carries for the sake of one message, and under
+// ADR-022 nothing here can ever be moved out again. Only two types genuinely
+// cross a service boundary today, so only two types live here.
+
+syntax = "proto3";
+
+package cybersentinel.scanpoint.v1;
+
+// What one engine on a scan point can execute.
+//
+// Declared twice, to two different services, which is why it is here.
+// Enrollment carries it so Core can record SCAN_POINT_CAPABILITY and refuse an
+// unsupported build with an operator-facing error at enrollment, rather than
+// enrolling cleanly and failing at the first Connect. Dispatch carries it on
+// Hello because engines are separate processes that upgrade independently of
+// the runtime (ADR-027), so what the scan point can execute changes between
+// one connection and the next.
+message Capability {
+  string engine = 1;  // discovery | host | dast | api | cloud | sast
+  string engine_version = 2;
+  bool enabled = 3;
+
+  // Core dispatches no rule format this scan point cannot execute (ADR-022).
+  // Engine version alone is not enough: a scan point may run a current engine
+  // against an older rule format after a partial upgrade.
+  string rule_format_version = 4;
+}
+
+// Why a job stopped.
+//
+// Shared between JobTerminal on the dispatch stream and ResultChunk on the
+// ingest stream, which is what puts it here. One enum rather than two means
+// the reason Core is told on the stream and the reason attached to the results
+// are checkably the same value, instead of two vocabularies Core has to
+// reconcile after the fact.
+enum TerminationReason {
+  TERMINATION_REASON_UNSPECIFIED = 0;
+  COMPLETED = 1;
+  LEASE_LOST = 2;            // renewal failed; self-abort (ADR-012)
+  CANCELLED = 3;             // per-scan cancellation (ADR-024)
+  KILLED = 4;                // global kill switch (ADR-024)
+  ENGINE_FAILURE = 5;        // engine process died or refused the job (ADR-027)
+  WINDOW_EXPIRED = 6;        // ScanConstraints.window_ends_unix passed
+  SCOPE_VIOLATION_HALT = 7;  // scan-point-side scope check refused a target
+}

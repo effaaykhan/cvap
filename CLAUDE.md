@@ -19,7 +19,9 @@ internal/
   domain/       observation, asset, finding models — no I/O in here
   store/        postgres access, RLS-aware
   logging/      slog setup + credential redaction
+  protocol/     wire-contract conformance tests. No production code.
 proto/          FROZEN wire contract. See ADR-022 before touching.
+gen/            generated Go bindings, committed. Never hand-edit — make proto-gen.
 migrations/     numbered SQL. RLS + partitioning in the creating migration.
 knowledge/      python ingestion pipelines
 lab/            vulnerable target compose + golden corpus
@@ -33,6 +35,8 @@ make build        make test         make lint         make ci
 make up           make down         # dev stack: postgres + minio
 make lab-up       make lab-down     # isolated scan lab, two segments
 make migrate-up   make migrate-new NAME=x
+make proto        # lint + additive-only check + gen/ matches proto/
+make proto-gen    make proto-tools  # regenerate bindings; install pinned toolchain
 make safety       # scope-enforcement gate — must pass before any merge
 make corpus-check # golden corpus diff
 ```

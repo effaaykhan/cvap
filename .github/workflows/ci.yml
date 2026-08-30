@@ -50,6 +50,42 @@ jobs:
       - name: Test
         run: go test ./... -race
 
+  proto:
+    name: Wire contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # buf breaking needs the base branch present to compare against.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install the pinned protobuf toolchain
+        run: make proto-tools
+
+      - name: Lint
+        run: make proto-lint
+
+      # ADR-022: proto/ is additive-only within a major version. Scan points in
+      # customer networks run months-old builds, so a removed or renumbered
+      # field is a fleet-wide outage in networks we cannot observe or fix. This
+      # is what enforces that mechanically rather than by review -- a reviewer
+      # who has read the ADR still has to notice a renumbered field in a large
+      # diff, and eventually will not.
+      #
+      # Compared against the merge base, not HEAD: a break that is already
+      # committed on the branch compares clean against itself.
+      - name: Additive-only check
+        run: make proto-breaking PROTO_BASELINE=".git#ref=origin/${{ github.base_ref || 'main' }}"
+
+      # gen/ is committed and must match proto/. Stops a hand-edited .pb.go and
+      # stops a .proto change landing without its bindings.
+      - name: Generated bindings match
+        run: make proto-verify
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -120,3 +156,10 @@ jobs:
       # real network. It gets a test table, not trust.
       - name: Lab scope guard
         run: python3 .claude/hooks/test_lab_scope_guard.py
+
+      # The contract guard was extended from file paths to Bash commands
+      # because a heredoc was a straight path through it. An extension like
+      # that is exactly the kind that looks done and is not, so it gets a case
+      # table too.
+      - name: Frozen contract guard
+        run: python3 .claude/hooks/test_protect_contracts.py

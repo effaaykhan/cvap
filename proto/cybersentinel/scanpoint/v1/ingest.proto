@@ -1,0 +1,120 @@
+// Result submission. Chunked, idempotent, resumable, with per-chunk acks.
+// ADR-026, ADR-006.
+//
+// A distinct contract from job dispatch, carried by its own service. Folding
+// it into the dispatch stream couples upload progress to dispatch liveness --
+// a long upload is then killed by an ordinary reconnect -- and makes
+// independent scaling of ingest impossible. The two have genuinely different
+// load shapes.
+
+syntax = "proto3";
+
+package cybersentinel.scanpoint.v1;
+
+import "cybersentinel/scanpoint/v1/common.proto";
+
+service Ingest {
+  // Bidirectional: per-chunk acks carry resumption points and backpressure.
+  // A terminal-only ack cannot express either (ADR-026).
+  rpc SubmitResults(stream ResultChunk) returns (stream SubmitAck);
+}
+
+message ResultChunk {
+  // Idempotency key. A scan point that submits and loses the connection before
+  // the ack will retry; ingest deduplicates on this. Idempotency has to be at
+  // the boundary -- the finding dedup key (ADR-010) is computed downstream of
+  // correlation, by which point duplicates have already been merged into
+  // assets.
+  string submission_id = 1;
+
+  string job_id = 2;
+
+  // Quarantined if superseded, never dropped. A superseded epoch yields
+  // ACCEPTED_QUARANTINED: the results are stored and withheld from the finding
+  // pipeline, because they are the record of what the job touched, which is
+  // the content of ADR-012's operator escalation.
+  int64 lease_epoch = 3;
+
+  uint32 chunk_index = 4;
+  bool final = 5;
+
+  repeated Observation observations = 6;
+
+  // On EVERY chunk, not only the final one: with resumption Core may process
+  // chunks before it ever sees final, and a flag that arrives last cannot stop
+  // the finding pipeline from having already run.
+  bool incomplete = 7;
+
+  TerminationReason termination_reason = 8;
+}
+
+message SubmitAck {
+  string submission_id = 1;
+  uint32 last_chunk_accepted = 2;  // resume point
+  SubmitStatus status = 3;
+
+  // Core-initiated backpressure, arriving while the upload is still running.
+  // A saturation signal that arrives after the upload finishes has applied no
+  // backpressure to it (ADR-026).
+  uint32 retry_after_ms = 4;
+
+  string detail = 5;
+}
+
+// Five outcomes, because two are not enough to tell a scan point what to do
+// with its buffer. Only REJECTED_DUPLICATE and REJECTED_MALFORMED tell it to
+// clear without the data having been kept.
+enum SubmitStatus {
+  SUBMIT_STATUS_UNSPECIFIED = 0;
+  ACCEPTED = 1;  // processed normally
+  ACCEPTED_QUARANTINED = 2;  // stored, withheld from the finding pipeline,
+                             // operator-surfaced. Stop retrying, clear buffer.
+  REJECTED_DUPLICATE = 3;  // submission_id already ingested. Clear, no retry.
+  REJECTED_MALFORMED = 4;  // unparseable, or unknown observation_type.
+                           // Clear buffer, no retry, log locally.
+  RETRY_LATER = 5;  // transient Core-side failure. Keep buffer, back off.
+}
+
+// What a scan point saw: immutable, timestamped, vantage-tagged, evidence-
+// bearing. Scan points emit these and nothing else. Assets, services, software
+// components and findings are derived from them by Core (ADR-006).
+//
+// Every field is 1-7 -- single-byte tags on the highest-volume message on the
+// wire, at 5,000 observations/sec ingest target.
+message Observation {
+  // Generated at the scan point and stable across retries, so a duplicated
+  // submission deduplicates cleanly.
+  string observation_id = 1;
+
+  // The unit of attribution (ADR-011). Every observation traces to a task,
+  // every task to a job, every job to a scan.
+  string task_id = 2;
+
+  // Vantage point. Exposure is derived from which zones saw what, so this is
+  // a property of the observation and never a column on an asset (ADR-008).
+  string zone_id = 3;
+
+  // Deliberately an open string, not an enum.
+  //
+  // The closed type set -- host | port | service | banner | package | config |
+  // verdict -- lives in the ERD. It is open here because engines are
+  // extensible by design (ADR-027) and a closed wire enum would make every new
+  // observation type a protocol change. Producer and consumer agreement is
+  // enforced by Core validating this value against the ERD enum at ingest and
+  // returning REJECTED_MALFORMED for an unknown one.
+  //
+  // Do NOT tighten field 4 to an enum later. That is precisely the semantic
+  // change to an existing field that ADR-022 forbids, and it is called out by
+  // name in ADR-006 and in execution-plan 4.2.
+  string observation_type = 4;
+
+  // JSON. For observation_type "verdict" this carries the rule_id, the
+  // outcome, the request/response pair that produced it, and the rule pack
+  // version that produced it -- a months-old scan point emits months-old
+  // verdicts and Core must know which rule version to attribute them to
+  // (ADR-013). A verdict is still an observation: Core constructs the Finding.
+  bytes payload = 5;
+
+  float confidence = 6;
+  int64 observed_at_unix = 7;
+}
