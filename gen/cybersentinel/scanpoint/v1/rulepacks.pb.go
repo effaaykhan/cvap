@@ -291,9 +291,7 @@ type FetchRequest struct {
 	// and without resumption a site on a poor connection never completes one.
 	// Putting packs on their own service (ADR-005) is what lets a fetch take as
 	// long as it needs without blocking job dispatch.
-	ResumeOffset uint64 `protobuf:"varint,4,opt,name=resume_offset,json=resumeOffset,proto3" json:"resume_offset,omitempty"`
-	// The scan point owns its 512 MB RSS ceiling and Core cannot know it.
-	MaxChunkBytes uint32 `protobuf:"varint,5,opt,name=max_chunk_bytes,json=maxChunkBytes,proto3" json:"max_chunk_bytes,omitempty"`
+	ResumeOffset  uint64 `protobuf:"varint,4,opt,name=resume_offset,json=resumeOffset,proto3" json:"resume_offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -352,13 +350,6 @@ func (x *FetchRequest) GetSignatureDigest() string {
 func (x *FetchRequest) GetResumeOffset() uint64 {
 	if x != nil {
 		return x.ResumeOffset
-	}
-	return 0
-}
-
-func (x *FetchRequest) GetMaxChunkBytes() uint32 {
-	if x != nil {
-		return x.MaxChunkBytes
 	}
 	return 0
 }
@@ -500,13 +491,12 @@ const file_cybersentinel_scanpoint_v1_rulepacks_proto_rawDesc = "" +
 	"\apack_id\x18\x01 \x01(\tR\x06packId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12?\n" +
 	"\x05state\x18\x03 \x01(\x0e2).cybersentinel.scanpoint.v1.RulePackStateR\x05state\x12\x16\n" +
-	"\x06detail\x18\x04 \x01(\tR\x06detail\"\xb9\x01\n" +
+	"\x06detail\x18\x04 \x01(\tR\x06detail\"\x91\x01\n" +
 	"\fFetchRequest\x12\x17\n" +
 	"\apack_id\x18\x01 \x01(\tR\x06packId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12)\n" +
 	"\x10signature_digest\x18\x03 \x01(\tR\x0fsignatureDigest\x12#\n" +
-	"\rresume_offset\x18\x04 \x01(\x04R\fresumeOffset\x12&\n" +
-	"\x0fmax_chunk_bytes\x18\x05 \x01(\rR\rmaxChunkBytes\"\x94\x02\n" +
+	"\rresume_offset\x18\x04 \x01(\x04R\fresumeOffset\"\x94\x02\n" +
 	"\rRulePackChunk\x12\x17\n" +
 	"\apack_id\x18\x01 \x01(\tR\x06packId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x16\n" +

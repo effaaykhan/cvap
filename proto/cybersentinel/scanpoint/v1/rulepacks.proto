@@ -71,9 +71,6 @@ message FetchRequest {
   // Putting packs on their own service (ADR-005) is what lets a fetch take as
   // long as it needs without blocking job dispatch.
   uint64 resume_offset = 4;
-
-  // The scan point owns its 512 MB RSS ceiling and Core cannot know it.
-  uint32 max_chunk_bytes = 5;
 }
 
 message RulePackChunk {
