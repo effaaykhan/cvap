@@ -76,10 +76,54 @@ jobs:
       # who has read the ADR still has to notice a renumbered field in a large
       # diff, and eventually will not.
       #
-      # Compared against the merge base, not HEAD: a break that is already
-      # committed on the branch compares clean against itself.
+      # The baseline has to be a commit that does NOT already contain the change
+      # under test, and there are two different ways to get one.
+      #
+      # On a pull request that is the base branch, github.base_ref. On a push
+      # there is no base_ref at all, and the previous form fell back to the
+      # literal 'main' -- which after checkout resolves to the very commit being
+      # tested. buf then compared the contract against itself and reported it
+      # clean, every time, for any change. The gate passed on the commit that
+      # deleted RotateRequest field 3 (see ADR-028) without reporting the
+      # deletion, which is how it was found: a gate that cannot fail is worse
+      # than no gate, because the first one gets trusted.
+      #
+      # So on a push the baseline is github.event.before -- what the branch
+      # pointed at before this push -- which checks the whole push rather than
+      # only its last commit. Branch creation reports an all-zero before, and a
+      # workflow_dispatch has no push event at all; both fall back to HEAD~1.
+      #
+      # Values arrive through env rather than ${{ }} interpolation into the
+      # script. Neither is attacker-controlled here, but a ref interpolated
+      # straight into a shell line is a script-injection shape, and this
+      # repository does not get to keep those.
       - name: Additive-only check
-        run: make proto-breaking PROTO_BASELINE=".git#ref=origin/${{ github.base_ref || 'main' }}"
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          zero=0000000000000000000000000000000000000000
+          if [ -n "$BASE_REF" ]; then
+            baseline="origin/$BASE_REF"
+            why="the base branch of this pull request"
+          elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "$zero" ]; then
+            baseline="$BEFORE_SHA"
+            why="what this branch pointed at before the push"
+          elif git rev-parse --verify --quiet HEAD~1 >/dev/null; then
+            baseline="HEAD~1"
+            why="the previous commit; no usable push event"
+          else
+            echo "No baseline: HEAD has no parent. Expected only at the very"
+            echo "first commit in the repository."
+            exit 0
+          fi
+          echo "Additive-only baseline: $baseline ($why)"
+          if [ "$(git rev-parse "$baseline")" = "$(git rev-parse HEAD)" ]; then
+            echo "Baseline resolved to HEAD. buf would compare the contract"
+            echo "against itself and pass whatever the change was. Refusing."
+            exit 1
+          fi
+          make proto-breaking PROTO_BASELINE=".git#ref=$baseline"
 
       # gen/ is committed and must match proto/. Stops a hand-edited .pb.go and
       # stops a .proto change landing without its bindings.
