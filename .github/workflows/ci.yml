@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.23"
+  GO_VERSION: "1.25"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -109,25 +109,59 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: govulncheck
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
-
-      - name: gosec
-        run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
-          gosec ./...
+      # Ordered repo-specific gates first, dependency scans last.
+      #
+      # A step failure ends the job, so whatever runs first decides what the
+      # other steps get to say. govulncheck was first, it failed on the Go 1.23
+      # standard library, and the secret-logging gate below it had therefore
+      # never executed in CI once -- a gate that has never run is not a gate.
+      # The checks that are about THIS repository run before the ones that are
+      # about the state of the world, because only the first kind can be fixed
+      # by the commit under test.
+      #
+      # continue-on-error is stated explicitly on every step so that this
+      # reordering changed the order and nothing else: each of these still fails
+      # the build, exactly as before.
 
       # internal/logging redacts on the attribute key. Generated protobuf types
       # implement String() and render every field, so the enrollment token and
       # credential material are invisible to that redactor. [debug_redact = true]
-      # does not help either: protobuf-go v1.36.6 consults it nowhere in its
-      # encoding path. This is what gives the marker teeth.
+      # does not help either: protobuf-go consults it nowhere in its encoding
+      # path, re-verified at v1.36.11. This is what gives the marker teeth.
       - name: Secret-bearing types never reach a log
+        continue-on-error: false
         run: |
           python3 .github/scripts/test_check_secret_logging.py
           python3 .github/scripts/check_secret_logging.py
+
+      # gen/ is excluded, and only gen/.
+      #
+      # Every finding there was G103 on the one line protoc-gen-go emits per
+      # file: protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(rawDesc),
+      # len(rawDesc))). It is not our code and it is not editable -- gen/ is
+      # regenerated, and `make proto-verify` fails the build if a committed
+      # binding differs by a byte from what the contract generates, so the
+      # exclusion cannot hide a hand-edited .pb.go.
+      #
+      # Scoped to the directory rather than written as a G103 suppression on
+      # purpose. `-exclude=G103` would also silence unsafe in hand-written code,
+      # which is where an audited-unsafe finding would actually mean something.
+      # Hand-written code is currently clean of G103 and must stay checked.
+      - name: gosec
+        continue-on-error: false
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+          gosec -exclude-dir=gen ./...
+
+      # Last, because it fails on the state of the world rather than on this
+      # commit: a stdlib or dependency advisory published this morning fails a
+      # branch that has not changed. That is worth failing on, and it is worth
+      # failing on after everything this commit can actually control.
+      - name: govulncheck
+        continue-on-error: false
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
 
   licences:
     name: Dependency licences

@@ -14,9 +14,9 @@ material. So the redactor cannot see these leaks:
                                       gRPC status returned to the caller
 
 Marking the fields [debug_redact = true] does not fix it either. The option is
-defined in descriptorpb but protobuf-go v1.36.6 consults it nowhere in its
-encoding path -- verified by grep across the module -- so String() still prints
-the secret. The marker is machine-readable intent; this script is what gives it
+defined in descriptorpb but protobuf-go consults it nowhere in its encoding
+path -- verified by grep across the module, most recently at v1.36.11 -- so
+String() still prints the secret. The marker is machine-readable intent; this script is what gives it
 teeth, and logging.Proto() is what gives callers a safe alternative.
 
 An enrollment token is a bearer credential that yields a full fleet identity.

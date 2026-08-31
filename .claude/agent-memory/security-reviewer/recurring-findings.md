@@ -20,10 +20,12 @@ because of this value, and is the peer certificate the real source?"
 
 **2. Secrets leaking through generated `String()`.** `internal/logging` redacts by attribute
 *key*, so `slog.Any("req", msg)` or `fmt.Errorf("%v", grant)` defeats it entirely. Generated
-protobuf types implement `String()` and render every field. protobuf-go v1.36.6 does **not**
-honour the `debug_redact` field option in `String()`/prototext — verified by grep, so a fix
-that only marks fields `[debug_redact = true]` is decorative without a reflection-based
-scrubber.
+protobuf types implement `String()` and render every field. protobuf-go does **not** honour
+the `debug_redact` field option in `String()`/prototext — verified by grep, most recently at
+v1.36.11 — so a fix that only marks fields `[debug_redact = true]` is decorative without a
+reflection-based scrubber. `internal/logging.Proto` is that scrubber. The two `.proto`
+comments still name v1.36.6, the version the claim was first verified against; editing them
+needs CVAP_ALLOW_PROTO_EDIT and is not worth a contract edit on its own.
 **Why:** ADR-020 forbids credentials reaching any log; the redactor's own doc comment claims
 no type holding credential material implements `String()`, which the generated code breaks.
 **How to apply:** flag any code path that logs or wraps a whole proto message.

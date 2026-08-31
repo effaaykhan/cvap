@@ -26,7 +26,8 @@ const maxProtoDepth = 8
 // able to intervene.
 //
 // [debug_redact = true] in the contract does not prevent that either:
-// protobuf-go v1.36.6 consults the option nowhere in its own encoding path. The
+// protobuf-go consults the option nowhere in its own encoding path -- verified
+// by grep across the module, most recently at v1.36.11. The
 // marker is machine-readable intent, and this function is the code that acts on
 // it. .github/scripts/check_secret_logging.py is what stops a caller reaching
 // past both.

@@ -17,8 +17,8 @@ Rules:
   `protoc-gen-go` emits `String()` on every message unconditionally, and it renders every
   field — including `EnrollRequest.enrollment_token` and `CredentialGrant.material`, and
   anything carrying them, such as `CoreMessage`. Marking the fields
-  `[debug_redact = true]` does not help: protobuf-go v1.36.6 consults the option nowhere in
-  its encoding path. **Log a protobuf message only through `logging.Proto` /
+  `[debug_redact = true]` does not help: protobuf-go consults the option nowhere in its
+  encoding path, re-verified at v1.36.11. **Log a protobuf message only through `logging.Proto` /
   `logging.ProtoAttr`**, which reads the marker itself and applies `IsSensitiveKey` to field
   names as well. `.github/scripts/check_secret_logging.py` (`make secret-logging`) fails the
   build if one reaches a logging call any other way.

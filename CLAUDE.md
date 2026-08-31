@@ -5,7 +5,7 @@ Architecture: `docs/architecture-v2.md`. Plan: `docs/execution-plan.md`. Decisio
 
 ## Stack
 
-Go 1.23 (control plane, scan points, agents) · Python 3.12 (knowledge pipelines) · PostgreSQL 16 · gRPC/protobuf · React + TypeScript.
+Go 1.25 (control plane, scan points, agents) · Python 3.12 (knowledge pipelines) · PostgreSQL 16 · gRPC/protobuf · React + TypeScript.
 
 ## Layout
 
