@@ -10,9 +10,16 @@ Rules:
   sensitive-key list is deliberately narrow: `dedup_key`, `identity_key`, `host_key` and
   `signature_digest` are load-bearing and must stay readable. Widening the list until useful
   fields disappear is how the redactor gets removed.
-- It cannot see through a type's own rendering. **No hand-written type holding credential
-  material may implement `String`, `MarshalJSON` or carry json tags that expose it** — that
-  rule lives in `internal/scanpoint` and this package is why it matters (ADR-020).
+- It cannot see through a type's own rendering, so a hand-written type holding credential
+  material must render itself safely. **It MUST implement `String()`, `LogValue()` and
+  `MarshalJSON()` returning a redacted form, and MUST NOT provide any other accessor that
+  renders the value implicitly.** The single way to obtain the secret is a method named
+  `Reveal()` — named that so it is conspicuous at every call site and greppable.
+
+  Implementing nothing is *not* the safe option, which is the trap this rule exists to close:
+  a bare struct with an unexported string field still prints its contents under `%v`, because
+  `fmt` reaches unexported fields by reflection. The danger is a type that renders by default,
+  not a type that renders at all. No json tags exposing the value either (ADR-020).
 - **The generated protobuf types break that rule and cannot be made to follow it.**
   `protoc-gen-go` emits `String()` on every message unconditionally, and it renders every
   field — including `EnrollRequest.enrollment_token` and `CredentialGrant.material`, and

@@ -45,9 +45,25 @@ formatting call is flagged regardless of what the surrounding types are. That
 rule is sound, and it is the one that catches the direct leak.
 
 The remaining gap is a gRPC payload-logging interceptor, which sees the messages
-reflectively and defeats any source-level check. That is forbidden on Enrollment
-and Dispatch by contract comment, and it is the one thing here a human review
-still has to hold.
+reflectively and defeats any source-level check: it receives `any`, calls
+something generic, and never names EnrollRequest anywhere, so nothing below can
+see it.
+
+That gap is covered by ADR-034, not by this script. ADR-034 forbids any
+interceptor, middleware or tracing layer from rendering message bodies on any of
+the four scan point services, and its review trigger is any proposal to add
+request logging or distributed tracing. It is a prohibition held by review, and
+naming it here is the point: a gate should say what it cannot see, so nobody
+mistakes a passing build for full coverage.
+
+HAND-WRITTEN TYPES
+------------------
+Everything above concerns generated protobuf types. Hand-written types holding
+credential material are covered by GO_SECRET_IDENTIFIERS below, and by
+internal/logging/CLAUDE.md's rule that such a type must implement String(),
+GoString(), LogValue() and MarshalJSON() returning a redacted form, with Reveal()
+as the only accessor. Implementing nothing is NOT safe: a bare struct with an
+unexported field still prints its contents under %v.
 
 Run: python3 .github/scripts/check_secret_logging.py
 """
@@ -69,6 +85,27 @@ GENERATED_PKG = "scanpointv1"
 SECRET_FIELDS: dict[str, set[str]] = {
     "EnrollRequest": {"enrollment_token"},
     "CredentialGrant": {"material"},
+}
+
+# Hand-written Go identifiers that must never appear inside a formatting or
+# logging call. Unlike the protobuf table above, there is no .proto to check
+# these against, so the list is maintained by hand and each entry says why.
+#
+# The type-level protection is separate and stronger: PlaintextToken closes
+# String, GoString, LogValue and MarshalJSON, so even a leak past this check
+# renders [REDACTED]. This is the second layer, and it catches the case the type
+# cannot — someone calling .Reveal() and formatting the result.
+GO_SECRET_IDENTIFIERS: dict[str, str] = {
+    # The accessor that yields an enrollment token. Two legitimate callers: the
+    # operator API returning a freshly issued token once, and a test.
+    ".Reveal()": "yields an enrollment token in plaintext (ADR-018, ADR-020)",
+    # CA signing key material. crypto.Signer is how the CA holds its key
+    # precisely so the private half cannot be reached, but a formatting verb
+    # applied to any of these renders it.
+    "ecdsa.PrivateKey": "CA signing key material",
+    "ed25519.PrivateKey": "CA signing key material",
+    "rsa.PrivateKey": "CA signing key material",
+    "crypto.Signer": "holds CA signing key material",
 }
 
 # Calls that render their arguments somewhere a human or a file will see.
@@ -272,6 +309,22 @@ def check_sources() -> list[str]:
                                     f"{rel}:{n}: {GENERATED_PKG}.{t} formatted into a log or error "
                                     f"string. Use logging.Proto()."
                                 )
+
+                    # Rule 4: a hand-written secret identifier inside a
+                    # formatting call. Same shape as rule 3, over the
+                    # hand-written table rather than the generated one.
+                    #
+                    # This is the second layer. PlaintextToken already renders
+                    # as [REDACTED] through every path, so a leak past this
+                    # check is not a leak — but .Reveal() defeats that by
+                    # design, and formatting its result is the one way to spill
+                    # a token without naming a protobuf type anywhere.
+                    for ident, why in GO_SECRET_IDENTIFIERS.items():
+                        if ident in args:
+                            problems.append(
+                                f"{rel}:{n}: {ident} passed to a logging or formatting call; "
+                                f"it {why}. Log an identifier instead."
+                            )
 
                 # Rule 1: String() on a secret-bearing message, anywhere.
                 for ident in idents:

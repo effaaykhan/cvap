@@ -293,50 +293,127 @@ func TestNoConnectionTypeInInterfacesAliasesOrVars(t *testing.T) {
 	}
 }
 
-// resolveTenant is the enrolment lookup (ADR-031) and the one path that runs
-// without a tenant, because deriving the tenant is its whole job. Two things
-// must stay true of it: it is unexported, and it returns only a TenantID.
+// preTenantMembers is the ADR-033 closed class: the lookups that run BEFORE any
+// tenant is known, because deriving the tenant is their whole job.
 //
-// If it were exported, it would be a way to call a SECURITY DEFINER function
-// from outside the package. If it returned a connection, it would be a way to
-// obtain one with no tenant — reopening exactly the hole Read and Write close.
-func TestResolveTenantStaysNarrow(t *testing.T) {
+// A third member is an amendment to ADR-033, not an addition to this list — but
+// the list is checked, so adding one without reading the ADR fails here with a
+// message pointing at it.
+var preTenantMembers = map[string]bool{
+	"resolvePreTenant":             true, // the shared implementation
+	"resolveTenant":                true, // unexported: fingerprint
+	"ResolveScanPointTenant":       true, // exported member: fingerprint
+	"ResolveEnrollmentTokenTenant": true, // exported member: token hash
+}
+
+// Every member of the class returns exactly (TenantID, error) and nothing wider.
+//
+// Wider is how a lookup becomes a cross-tenant read primitive: returning the
+// scan point row, or the token row, would hand a caller data from a tenant whose
+// context has not been established. Returning a connection would be worse still
+// — it would reopen exactly the hole Read and Write close.
+//
+// The unexported implementation must stay unexported, and the exported wrappers
+// must stay exactly two: they are the only way to reach a SECURITY DEFINER
+// function from outside this package.
+func TestPreTenantClassStaysNarrow(t *testing.T) {
 	fset, files := parsePackage(t)
 
-	found := false
+	seen := map[string]bool{}
 	for name, file := range files {
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if !ok {
+			if !ok || !preTenantMembers[fn.Name.Name] {
 				continue
 			}
-			if !strings.EqualFold(fn.Name.Name, "resolveTenant") {
-				continue
-			}
-			found = true
+			seen[fn.Name.Name] = true
 
-			if fn.Name.IsExported() {
-				t.Errorf("%s: resolveTenant must stay unexported (ADR-031): it reaches a "+
-					"SECURITY DEFINER function and runs with no tenant context.", name)
-			}
 			if fn.Type.Results == nil || len(fn.Type.Results.List) != 2 {
-				t.Fatalf("%s: resolveTenant should return exactly (TenantID, error), got %d results",
-					name, len(fn.Type.Results.List))
+				got := 0
+				if fn.Type.Results != nil {
+					got = len(fn.Type.Results.List)
+				}
+				t.Errorf("%s: %s returns %d results; every ADR-033 member returns exactly "+
+					"(TenantID, error)", name, fn.Name.Name, got)
+				continue
 			}
+
 			first := fn.Type.Results.List[0].Type
-			id, ok := first.(*ast.Ident)
-			if !ok || id.Name != "TenantID" {
-				t.Errorf("%s: resolveTenant must return TenantID and nothing wider (ADR-031). "+
-					"Returning the scan point row turns a lookup into a cross-tenant read primitive.", name)
+			if id, ok := first.(*ast.Ident); !ok || id.Name != "TenantID" {
+				t.Errorf("%s: %s must return TenantID and nothing wider (ADR-033). Returning "+
+					"the row turns a pre-tenant lookup into a cross-tenant read primitive.",
+					name, fn.Name.Name)
 			}
-			if bad := typeMentions(fset, first); bad != "" {
-				t.Errorf("%s: resolveTenant returns %s. An enrolment path that hands back a "+
-					"connection has no tenant on it (ADR-031).", name, bad)
+			for _, res := range fn.Type.Results.List {
+				if bad := typeMentions(fset, res.Type); bad != "" {
+					t.Errorf("%s: %s returns %s. A pre-tenant path that hands back a "+
+						"connection has no tenant on it (ADR-033).", name, fn.Name.Name, bad)
+				}
 			}
 		}
 	}
-	if !found {
-		t.Skip("resolveTenant not present; nothing to constrain")
+
+	for member := range preTenantMembers {
+		if !seen[member] {
+			t.Errorf("ADR-033 names %s as a member of the pre-tenant class, but it is not in "+
+				"this package. Amend ADR-033 and this list together.", member)
+		}
+	}
+}
+
+// Nothing outside the declared class may query the raw pool.
+//
+// This is the check that makes "the guard checks the class" true. The test above
+// only inspects four names it already knows, so a fifth wrapper —
+// ResolveApiKeyTenant, say — would pass it while being exactly the unreviewed
+// third member ADR-033 exists to catch.
+//
+// db.pool is the seam: every pre-tenant lookup reaches it, and everything else
+// in the package goes through Read or Write. So any function that touches
+// db.pool or calls resolvePreTenant and is not a declared member is either a new
+// class member that skipped the ADR, or a query running with no tenant context
+// at all.
+//
+// Open, verifyRole, Close, Ping and inTx are the pool's legitimate lifecycle and
+// are listed rather than pattern-matched, so adding one is also a decision.
+func TestNothingElseTouchesTheRawPool(t *testing.T) {
+	_, files := parsePackage(t)
+
+	poolLifecycle := map[string]bool{
+		"Open": true, "verifyRole": true, "Close": true, "Ping": true, "inTx": true,
+	}
+
+	for name, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			if preTenantMembers[fn.Name.Name] || poolLifecycle[fn.Name.Name] {
+				continue
+			}
+
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if sel.Sel.Name == "pool" {
+					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "db" {
+						t.Errorf("%s: %s touches db.pool directly. Either it is an undeclared "+
+							"member of the ADR-033 pre-tenant class — amend the ADR — or it is a "+
+							"query with no tenant context, which Read and Write exist to prevent.",
+							name, fn.Name.Name)
+					}
+				}
+				if sel.Sel.Name == "resolvePreTenant" {
+					t.Errorf("%s: %s calls resolvePreTenant but is not a declared member of the "+
+						"ADR-033 class. Adding a member is an amendment to that ADR.",
+						name, fn.Name.Name)
+				}
+				return true
+			})
+		}
 	}
 }
 

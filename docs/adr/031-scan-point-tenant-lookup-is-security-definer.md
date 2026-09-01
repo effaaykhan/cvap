@@ -1,6 +1,6 @@
 # ADR-031: Enrolment tenant lookup is a one-value SECURITY DEFINER function
 
-**Status:** Accepted
+**Status:** Accepted — generalised by ADR-033
 **Date:** 2026-09-01
 
 ## Context
@@ -47,8 +47,12 @@ the decision, not an implementation detail:
   time. This is the constraint that fails silently in a deployment nobody tested, which is
   why it is written down rather than left to hold on its own.
 
-In Go, the function is reached only by an unexported `DB.resolveTenant`, which runs outside
-`Read`/`Write` and returns only a `TenantID`. It must never return a connection: the store's
+In Go, the function is reached by `DB.ResolveScanPointTenant`, a thin exported wrapper over
+the unexported `DB.resolveTenant`, which runs outside `Read`/`Write` and returns only a
+`TenantID`. The wrapper exists because the caller — `internal/control/enrollment` — is a
+different package; the original wording here said only "unexported", which was the right
+intent and the wrong letter. **ADR-033 now defines this as a class** with a fixed SQL and Go
+shape and a second member, `tenant_for_enrollment_token`. Read ADR-033 before adding a third. It must never return a connection: the store's
 whole design is that no code path obtains a connection without a tenant, and an enrolment path
 handing back a live connection reopens exactly that. Callers resolve the tenant, then enter
 `Write(ctx, tenant, …)` normally. The package's AST encapsulation test covers this.
@@ -103,6 +107,5 @@ comment is not a constraint, and nothing mechanical will fail if someone ignores
 
 **Any request to return more than a tenant id from this function.** That is the change that
 converts a lookup into a cross-tenant read primitive, and it should reopen this ADR rather than
-be made in a migration. Also revisit if a second enrolment-time lookup appears needing the same
-treatment — two exceptions is a pattern, and a pattern deserves a mechanism rather than a
-second bespoke function.
+be made in a migration. A second enrolment-time lookup did appear, for enrolment tokens, and this trigger fired as
+intended: the answer was ADR-033's closed class rather than a second bespoke function.

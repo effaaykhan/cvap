@@ -34,6 +34,10 @@ no type holding credential material implements `String()`, which the generated c
 but are attestations or theatre (`current_fingerprint`, `Heartbeat.observed_rate_pps`). The
 codebase gets this right once — `JobTerminal.credentials_zeroised` is explicitly labelled
 "an attestation, not a control" — so the fix is to hold every other field to that standard.
+Also appears as a *factually wrong mechanism story* attached to a control that is fine on its
+own: `ca.CA.LogValue`'s comment claims fmt would otherwise "render the private scalar", but
+fmt prints pointers at depth > 0 as addresses, so it would not. Verify the stated mechanism,
+not just the conclusion — the next author generalises the story, not the code.
 **Why:** a field documented as a defence gets relied on as one by the next implementer.
 **How to apply:** ask whether the field stops an attacker who already satisfies the
 surrounding control (usually mTLS); if not, say so in the comment.
@@ -71,6 +75,51 @@ turns the deliberately NULL-returning lookup back into the error oracle the ADR 
 does not let a `SECURITY DEFINER` function read it.
 **How to apply:** for any `SECURITY DEFINER` function, check the definer role's attributes,
 not just the function's, and check it under a non-superuser definer.
+
+**7. A hand-written secret type that closes `String`/`GoString`/`LogValue`/`MarshalJSON` is
+still not closed.** Verified empirically on `enrollment.PlaintextToken` at Go 1.25: `fmt`
+consults `Stringer` only for `%v %s %q %x %X`, so **any other verb** (`%d %b %o %O %c %U %e
+%f %g %t`) falls to reflection and prints the unexported string in full, via `badVerb`. And a
+`PlaintextToken` held in an **unexported field of a containing struct** leaks under plain
+`%v`/`%+v`/`%#v`/`%s`/`%q`, because `reflect.Value.CanInterface()` is false there so `fmt`
+never calls `String()` at all. `go vet`'s printf check catches the wrong-verb case (constant
+format strings only) and catches nothing in the unexported-field case.
+**Why:** these types are the last line under ADR-020 once a value is past the key-based
+redactor, and the doc comments assert "every rendering path is closed".
+**How to apply:** demand `fmt.Formatter` (`Format(fmt.State, rune)`), which `handleMethods`
+consults before any verb switch and so covers every verb, value, pointer, slice, map and
+exported field. For the unexported-field case the only structural fix is to make the field a
+type reflection cannot render — a `func() string` closure prints as an address at every verb.
+`encoding/gob` is already safe (no exported fields); `text/template` `{{.Reveal}}` is not.
+
+**8. Attacker-chosen asymmetric-crypto cost, performed before authentication.** In
+`Enroll`, `ca.ParseCSR` (parse + `CheckSignature`) runs before the token is even shape-checked,
+and `checkPublicKey` bounds RSA below (>= 2048) but not above — and it runs *after*
+`CheckSignature`. Measured: a 16,323-byte CSR (under the 16 KiB cap) carrying a 65,000-bit
+modulus costs ~38 ms per call versus ~30 µs for RSA-2048, so ~26 unauthenticated req/s
+saturates a core. No private key is needed; a garbage signature still forces the modexp.
+**Why:** the enrollment RPC is by design reachable pre-auth, and a byte-count cap does not
+bound the *work* a parser is asked to do.
+**How to apply:** for any pre-auth parser, ask what the most expensive input under the size
+cap costs, order the cheap checks first, and put type/size gates before signature checks.
+
+**9. Guards and assertions that structurally cannot fire.** `encapsulation_test.go` ends with
+`if strings.ToUpper(string("resolveTenant"[0])) == string("resolveTenant"[0])` — two constants,
+always false, dead. The same test only inspects four hardcoded names, while ADR-033 and
+`internal/store/CLAUDE.md` both claim it "checks the class", so a fifth `Resolve*Tenant`
+wrapper would pass. This project's own rule is that a gate which silently passes is worse than
+one that fails, because the first gets trusted.
+**How to apply:** for every mechanical guard, construct the violation it claims to catch and
+run it. If it passes, that is the finding.
+
+**10. `ON DELETE SET NULL` against a biconditional `CHECK`.** `enrollment_tokens` pairs
+`(redeemed_at IS NULL) = (redeemed_scan_point IS NULL)` with
+`FOREIGN KEY (tenant_id, redeemed_scan_point) ... ON DELETE SET NULL (redeemed_scan_point)`.
+Deleting an enrolled scan point nulls one side and violates the check, so the DELETE fails —
+verified on the dev database. Sibling tables declare `ON DELETE CASCADE` from the same parent,
+so the schema clearly expects deletion to work.
+**How to apply:** whenever a referential action mutates a column, check every `CHECK` that
+mentions that column, and actually run the DELETE.
 
 **Constraint on fixes:** `proto/` is frozen additive-only within a major version (ADR-022),
 enforced by `buf breaking` with the FILE category and a baseline established at bd0e4f9.

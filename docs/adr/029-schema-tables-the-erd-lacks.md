@@ -14,9 +14,9 @@ the migration rather than a gap in the diagram.
 
 ## Decision
 
-Four tables exist in the schema that the ERD does not draw. Each is listed here with the
+Six tables exist in the schema that the ERD does not draw. Each is listed here with the
 decision that requires it, so a future reader diffing schema against diagram finds the
-reason rather than a discrepancy. Two are required by ADRs accepted after the diagram; two
+reason rather than a discrepancy. Four are required by ADRs accepted after the diagram; two
 are join tables the diagram implies but cannot name.
 
 - **`result_submissions`** — ADR-026's idempotency ledger. Ingest deduplicates on
@@ -32,6 +32,17 @@ are join tables the diagram implies but cannot name.
   a table and not a column on `observations`: observations are immutable and ephemeral
   (ADR-016), and an adjudication that outlives the 90-day window is exactly the load-bearing
   state that rule says to copy.
+- **`enrollment_tokens`** — ADR-018's single-use, TTL-bounded enrolment credential, added in
+  migration 0017. The ERD draws no way for a scan point to acquire an identity at all: it
+  shows `SCAN_POINT.cert_fingerprint` as though the certificate simply exists. This table is
+  where the tenant and the zone come from, and the zone above all — a scan point must not be
+  able to influence its own vantage point (ADR-008), so `EnrollRequest` carries no zone field
+  and this row is the only source of one.
+- **`scan_point_certificates`** — issuance history, added in migration 0018.
+  `SCAN_POINT.cert_fingerprint` answers "who is this peer, now", and replacing it in place is
+  what makes revocation immediate (ADR-031) — and also what destroys the record of which
+  certificate was valid when. Backfilled at creation so the history has no hole covering
+  everything before the migration.
 - **`scan_policy_credential_profiles`** and **`advisory_vuln_map`** — join tables for the
   ERD's own `SCAN_POLICY }o--o{ CREDENTIAL_PROFILE` and
   `VULNERABILITY_DEF }o--o{ VENDOR_ADVISORY`. Mermaid draws a many-to-many as a line; a
@@ -80,10 +91,12 @@ migration depends on cannot be added by a later one without rewriting the earlie
 
 The schema satisfies ADR-007 and ADR-026 rather than only the ERD, and the divergence is
 documented where the next person to compare them will look. The cost is a diagram that is now
-incomplete in four named places, which is a maintenance obligation: a fifth table that the
-ERD lacks belongs in this ADR, not in a further one. That obligation has already been
-exercised once — `advisory_vuln_map` was found while writing migration 0010 and added here
-rather than given an ADR of its own. Anyone regenerating the schema from the
+incomplete in six named places, which is a maintenance obligation: a seventh table that the
+ERD lacks belongs in this ADR, not in a further one. That obligation has now been exercised
+three times — `advisory_vuln_map` while writing migration 0010, and both enrolment tables
+while building the Enrollment service — which is evidence the annotation approach is holding
+rather than that it is failing. The signal to redraw is when a reader can no longer hold the
+divergences in mind, not the count itself. Anyone regenerating the schema from the
 diagram alone will still produce the wrong thing, so execution-plan §4.3's "generate
 migrations directly from the v2 ERD" is now qualified by this record.
 

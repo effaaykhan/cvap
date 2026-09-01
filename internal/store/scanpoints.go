@@ -32,7 +32,35 @@ const (
 	EngineDiscovery   Engine = "discovery"
 	EngineFingerprint Engine = "fingerprint"
 	EngineRules       Engine = "rules"
+
+	// The rest of the engine_kind enum. Out of MVP scope (execution-plan §2)
+	// and carrying no code, but present in the type because a scan point may
+	// declare one and Core must be able to say "recorded, and never dispatched"
+	// rather than failing the enrollment.
+	EngineHost  Engine = "host"
+	EngineDAST  Engine = "dast"
+	EngineAPI   Engine = "api"
+	EngineSAST  Engine = "sast"
+	EngineCloud Engine = "cloud"
 )
+
+var validEngines = map[Engine]struct{}{
+	EngineDiscovery: {}, EngineFingerprint: {}, EngineRules: {},
+	EngineHost: {}, EngineDAST: {}, EngineAPI: {}, EngineSAST: {}, EngineCloud: {},
+}
+
+// ValidEngine reports whether a self-asserted engine name is one the
+// engine_kind enum knows.
+//
+// Used at enrollment to SKIP an unknown engine rather than refuse the
+// enrollment: a newer scan point declaring an engine this Core has never heard
+// of should still enroll, because Core will not dispatch that engine to it
+// regardless. Refusing would make every new engine a fleet-wide enrollment
+// outage, which is what ADR-022's additive-only posture exists to avoid.
+func ValidEngine(s string) bool {
+	_, ok := validEngines[Engine(s)]
+	return ok
+}
 
 type ScanPoint struct {
 	ID              uuid.UUID

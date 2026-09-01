@@ -228,6 +228,32 @@ BEGIN
                 '02:00:00:00:00:01', ARRAY[v_asset, v_asset2],
                 'fixture: two candidates agree only on a weak key');
 
+    -- Enrolment. One redeemed token, and the certificate the scan point holds.
+    --
+    -- token_hash is a digest of a value that never existed as a token: fixtures
+    -- must not contain anything shaped like a working credential, even an
+    -- expired one, because fixture files get copied into bug reports.
+    INSERT INTO enrollment_tokens (tenant_id, zone_id, token_hash, issued_by,
+                                   expires_at, redeemed_at, redeemed_scan_point,
+                                   description)
+        VALUES (p_tenant, v_zone, sha256(('fixture-not-a-real-token-' || p_tag)::bytea),
+                v_user, now() + interval '1 day', now(), v_point,
+                'fixture: already redeemed');
+
+    -- A second, still pending, so the operator-queue read has something to find.
+    INSERT INTO enrollment_tokens (tenant_id, zone_id, token_hash, issued_by,
+                                   expires_at, description)
+        VALUES (p_tenant, v_zone, sha256(('fixture-pending-' || p_tag)::bytea),
+                v_user, now() + interval '1 day', 'fixture: pending');
+
+    -- The certificate history. cert_fingerprint matches scan_points, which is
+    -- the invariant the pairing statement exists to hold — a fixture that
+    -- disagreed would encode the bug it is meant to help catch.
+    INSERT INTO scan_point_certificates (tenant_id, scan_point_id, cert_fingerprint,
+                                         serial_number, not_before, not_after)
+        VALUES (p_tenant, v_point, 'fixture-fp-' || p_tag, 'fixture-serial-' || p_tag,
+                now() - interval '1 day', now() + interval '89 days');
+
     INSERT INTO reports (tenant_id, report_type, parameters, object_store_ref, requested_by, generated_at)
         VALUES (p_tenant, 'exposure-summary', '{"window":"30d"}'::jsonb,
                 's3://cvap-evidence/reports/fixture-' || p_tag, v_user, now());

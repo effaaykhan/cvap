@@ -447,37 +447,91 @@ func (db *DB) inTx(ctx context.Context, tenant TenantID, opts pgx.TxOptions, fn 
 	return nil
 }
 
-// resolveTenant maps a scan point certificate fingerprint to its tenant, for
-// enrolment — the one operation that must run before any tenant is known
-// (ADR-031).
+// ---------------------------------------------------------------------------
+// Pre-tenant resolution (ADR-033)
+// ---------------------------------------------------------------------------
 //
-// Unexported on purpose, and it returns a TenantID and nothing else. It must
-// never return a *Conn: the whole design above is that no code path obtains a
-// connection without a tenant, and an enrolment path handing back a live
-// connection would reopen exactly that. Callers resolve the tenant, then enter
-// Write(ctx, tenant, ...) like everything else.
+// A closed class of lookups that run BEFORE any tenant is known, because
+// deriving the tenant is their whole job. Two members today, and a third
+// requires amending ADR-033 rather than adding a function here.
 //
-// The narrowness lives in the database, not here: tenant_for_scan_point is
-// SECURITY DEFINER, returns one uuid, resolves only enrollable statuses, and
-// returns NULL rather than raising on no match so it is not an enrolment oracle.
-// This function is a thin call through to it and must stay that way.
+// Every member obeys the same shape, and the shape is the control:
+//
+//   SQL   one input, RETURNS uuid, STABLE, SECURITY DEFINER with a pinned
+//         search_path, the validity filter expressed in SQL, NULL rather than
+//         RAISE on no match, owned by the migration role with BYPASSRLS
+//         asserted at migrate time.
+//   Go    one exported method per member, returning exactly (TenantID, error)
+//         and NOTHING wider. Never a connection: the whole design of this
+//         package is that no code path obtains a connection without a tenant,
+//         and a pre-tenant path handing one back would reopen exactly that.
+//         One sentinel error for every failure mode, so the caller cannot tell
+//         "unknown" from "expired" from "revoked" — distinguishing them is an
+//         oracle, which is what the SQL side avoids by returning NULL.
+//
+// Callers resolve the tenant, then enter Write(ctx, tenant, ...) like everything
+// else. encapsulation_test.go checks the class rather than one function name.
+
+// resolvePreTenant is the single implementation every member shares.
+//
+// It runs on the raw pool rather than through Read or Write, which is the only
+// place in this package that happens. That is the exception ADR-033 describes,
+// and keeping it in one function is what stops it becoming a habit: a new member
+// calls this, and gets the shape for free.
+func (db *DB) resolvePreTenant(ctx context.Context, query string, arg any) (TenantID, error) {
+	var u *uuid.UUID
+	if err := db.pool.QueryRow(ctx, query, arg).Scan(&u); err != nil {
+		// The error is wrapped rather than flattened to the sentinel: a failure
+		// HERE is a database or deployment fault, not a resolution outcome, and
+		// conflating the two would hide a broken SECURITY DEFINER function
+		// behind a message that reads like an ordinary unknown fingerprint.
+		return TenantID{}, fmt.Errorf("store: pre-tenant resolution: %w", err)
+	}
+	if u == nil {
+		return TenantID{}, ErrTenantNotResolved
+	}
+	return NewTenantID(*u)
+}
+
+// resolveTenant maps a scan point certificate fingerprint to its tenant
+// (ADR-031, ADR-033). Unexported implementation; ResolveScanPointTenant is the
+// exported member.
 func (db *DB) resolveTenant(ctx context.Context, certFingerprint string) (TenantID, error) {
 	if certFingerprint == "" {
 		return TenantID{}, ErrTenantNotResolved
 	}
+	return db.resolvePreTenant(ctx, `SELECT tenant_for_scan_point($1)`, certFingerprint)
+}
 
-	var u *uuid.UUID
-	err := db.pool.QueryRow(ctx,
-		`SELECT tenant_for_scan_point($1)`, certFingerprint,
-	).Scan(&u)
-	if err != nil {
-		return TenantID{}, fmt.Errorf("store: resolve tenant for scan point: %w", err)
-	}
-	if u == nil {
-		// No match, or a revoked or disabled scan point. Deliberately the same
-		// error for both: the caller must not be able to tell them apart, or it
-		// becomes the oracle the SQL function avoids being.
+// ResolveScanPointTenant resolves the tenant of an authenticated scan point from
+// its TLS peer certificate fingerprint.
+//
+// This is what RotateCertificate calls, and it is the reason the fingerprint is
+// the identity: the certificate the peer actually presented, not anything in the
+// request body (ADR-028's reserved field 3).
+//
+// It is also the revocation mechanism. There is no CRL and no OCSP because there
+// need not be: a fingerprint scan_points no longer carries resolves to nothing,
+// so the connection is refused the moment the row changes.
+func (db *DB) ResolveScanPointTenant(ctx context.Context, certFingerprint string) (TenantID, error) {
+	return db.resolveTenant(ctx, certFingerprint)
+}
+
+// ResolveEnrollmentTokenTenant resolves the tenant an enrollment token belongs
+// to, so Enroll can open a transaction (ADR-033).
+//
+// Takes the SHA-256 HASH, never the token: the token is a bearer credential and
+// this package must not be a place one is handled. Hashing happens in the
+// enrollment service, next to the type that carries the plaintext.
+//
+// Resolution is NOT redemption. This says which tenant to open a transaction as;
+// single-use is enforced inside that transaction by a conditional UPDATE, whose
+// atomicity comes from the database re-evaluating the predicate after a lock
+// wait. A caller that treats a successful resolve as a redeemed token has
+// created two scan points with one identity.
+func (db *DB) ResolveEnrollmentTokenTenant(ctx context.Context, tokenHash []byte) (TenantID, error) {
+	if len(tokenHash) == 0 {
 		return TenantID{}, ErrTenantNotResolved
 	}
-	return NewTenantID(*u)
+	return db.resolvePreTenant(ctx, `SELECT tenant_for_enrollment_token($1)`, tokenHash)
 }

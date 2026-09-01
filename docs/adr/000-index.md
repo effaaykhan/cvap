@@ -41,3 +41,5 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 030 | Knowledge tables are read-only to the application role | Accepted |
 | 031 | Enrolment tenant lookup is a one-value SECURITY DEFINER function | Accepted |
 | 032 | The store package exposes no path to a raw connection | Accepted |
+| 033 | Pre-tenant resolution is a closed class | Accepted |
+| 034 | No interceptor, middleware or tracing layer may render message bodies | Accepted |

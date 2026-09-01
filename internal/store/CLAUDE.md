@@ -95,6 +95,42 @@ forgotten. `ListQuarantined` is the single deliberate exception, named so.
 Reads over `observations` require a bounded time window. It is partitioned by `observed_at`,
 so a query without one scans every live partition.
 
+## cert_fingerprint has exactly two writers
+
+`scan_points.cert_fingerprint` must always name the live row in
+`scan_point_certificates` for that scan point. No constraint enforces it: a circular foreign
+key would need `DEFERRABLE INITIALLY DEFERRED` on one side, and a deferred constraint is the
+kind of cleverness that surprises whoever debugs it at 2am.
+
+Instead each pairing is **one statement** — `Certificates.EnrollScanPoint` takes the
+certificate's fingerprint from the scan point row it is inserting, and
+`Certificates.RotateCertificate` takes the scan point's fingerprint from the certificate row
+it is inserting. There is no window where one exists without the other, and no way for a
+caller to do half of it.
+
+**Any code path that writes `cert_fingerprint` outside those two statements is a defect.** Not
+a style preference: the fingerprint is the scan point's identity in the audit log and the
+input to `tenant_for_scan_point`, so a scan point pointing at a superseded certificate is a
+peer that cannot authenticate, and one pointing at no certificate at all is an identity with
+no issuance record. `TestScanPointAndCertificateHistoryAgree` asserts the agreement after both
+enrolment and rotation.
+
+## Pre-tenant resolution is a closed class (ADR-033)
+
+Two lookups run before any tenant is known, because deriving the tenant is their whole job:
+`ResolveScanPointTenant` (certificate fingerprint) and `ResolveEnrollmentTokenTenant` (token
+hash). Both are thin wrappers over one unexported implementation, `resolvePreTenant`, which is
+the only place in this package that queries the raw pool.
+
+Every member returns exactly `(TenantID, error)` and nothing wider, and every resolution
+failure is the same sentinel — distinguishing "unknown" from "expired" from "revoked" is an
+oracle. A third member amends ADR-033; `encapsulation_test.go` checks the class, so adding one
+without reading the ADR fails the build.
+
+Resolution is **not** redemption. `ResolveEnrollmentTokenTenant` says which tenant to open a
+transaction as; single-use is enforced inside it by `EnrollmentTokens.Redeem`, a conditional
+UPDATE whose atomicity comes from the database re-evaluating its predicate after a lock wait.
+
 ## Errors carry schema detail — do not pass them to a caller
 
 `mapError` embeds `pgErr.ConstraintName`, `pgErr.ColumnName` and `pgErr.Message`. That is
