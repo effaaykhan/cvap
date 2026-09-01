@@ -150,5 +150,5 @@ type errBatchResults struct{ err error }
 
 func (b errBatchResults) Exec() (pgconn.CommandTag, error) { return pgconn.CommandTag{}, b.err }
 func (b errBatchResults) Query() (Rows, error)             { return nil, b.err }
-func (b errBatchResults) QueryRow() Row                    { return errRow{b.err} }
+func (b errBatchResults) QueryRow() Row                    { return errRow(b) }
 func (b errBatchResults) Close() error                     { return b.err }

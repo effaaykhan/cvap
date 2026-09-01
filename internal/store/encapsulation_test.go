@@ -4,7 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"os"
 	"strings"
 	"testing"
 )
@@ -70,20 +70,42 @@ var forbiddenInExportedAPI = []string{
 	"pgx.QueuedQuery",
 }
 
+// parsePackage reads every non-test .go file in this directory.
+//
+// parser.ParseFile per file rather than parser.ParseDir: the latter is
+// deprecated as of Go 1.25 because it ignores build tags. That caveat matters
+// here — a file excluded by a build tag would still be parsed and could produce
+// a spurious failure — but the alternative it points at, go/packages, type-checks
+// the world and is far more machinery than a syntactic guard needs. This package
+// has no build-tagged files; if one is ever added, this is the thing to revisit.
 func parsePackage(t *testing.T) (*token.FileSet, map[string]*ast.File) {
 	t.Helper()
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, parser.ParseComments)
+
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parse internal/store: %v", err)
+		t.Fatalf("read internal/store: %v", err)
 	}
-	pkg, ok := pkgs["store"]
-	if !ok {
-		t.Fatal("package store not found in .")
+
+	files := map[string]*ast.File{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		if f.Name.Name != "store" {
+			t.Fatalf("%s declares package %q, expected store", name, f.Name.Name)
+		}
+		files[name] = f
 	}
-	return fset, pkg.Files
+	if len(files) == 0 {
+		t.Fatal("no non-test .go files found; the guards would pass over nothing")
+	}
+	return fset, files
 }
 
 // typeMentions renders a type expression and reports which forbidden type it
