@@ -9,6 +9,7 @@
         proto proto-tools proto-gen proto-lint proto-breaking proto-verify \
         secret-logging secret-logging-test \
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
+        env-check app-role store-test \
         contract-guard-test
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
@@ -30,7 +31,7 @@ PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
 PROTO_BASELINE ?= .git#ref=HEAD
 
 # Loaded from .env when present so make migrate-up works without exporting by
-# hand. Copy .env.example to .env first.
+# hand. Copy env.example to .env first.
 ifneq (,$(wildcard .env))
 include .env
 export
@@ -61,7 +62,7 @@ fmt: ## Format and tidy
 tidy: fmt
 
 ci: build vet test lint proto frontmatter gitignore-test scope-guard-test \
-    contract-guard-test secret-logging secret-logging-test ## Everything CI runs, locally
+    contract-guard-test secret-logging secret-logging-test env-check ## Everything CI runs, locally
 
 ## ---------- wire contract ----------
 
@@ -116,6 +117,24 @@ proto-verify: ## Assert gen/ matches proto/
 ## ---------- dev stack ----------
 
 up: ## Start the dev stack (postgres, minio)
+	@# Warn when the local .env is missing a key the template defines. A missing
+	@# key does not fail here -- it fails much later, in whatever subsystem first
+	@# reads an empty string, which is how MINIO_BUCKET and LOG_LEVEL went missing
+	@# from a .env without anything noticing.
+	@# Plain sh: make's default SHELL is /bin/sh, which has no process
+	@# substitution, so this compares the two key lists with a loop and grep
+	@# rather than comm on two <(...) inputs.
+	@if [ -f .env ] && [ -f env.example ]; then \
+		missing=''; \
+		for k in $$(grep -oE '^[A-Z][A-Z0-9_]*=' env.example | tr -d '='); do \
+			grep -qE "^$$k=" .env || missing="$$missing $$k"; \
+		done; \
+		if [ -n "$$missing" ]; then \
+			echo "WARNING: your .env is missing keys that env.example defines:"; \
+			for k in $$missing; do echo "  - $$k"; done; \
+			echo "The stack will start. Whatever reads them will get an empty string."; \
+		fi; \
+	fi
 	docker compose up -d --wait
 
 down: ## Stop the dev stack, keep volumes
@@ -132,7 +151,7 @@ lab-down: ## Stop the scan lab and drop its volumes
 ## ---------- migrations ----------
 
 migrate-up: ## Apply all migrations
-	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy .env.example to .env."; exit 1; }
+	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
 	@if [ -z "$$(ls -A $(MIGRATIONS_DIR)/*.sql 2>/dev/null)" ]; then \
 		echo "No migrations yet — nothing to apply. Schema lands in session 4."; \
 	else \
@@ -143,14 +162,14 @@ migrate-up: ## Apply all migrations
 	fi
 
 migrate-down: ## Roll back the most recent migration
-	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy .env.example to .env."; exit 1; }
+	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
 	docker run --rm --network host \
 		-v "$(CURDIR)/$(MIGRATIONS_DIR):/migrations" \
 		$(MIGRATE_IMAGE) \
 		-path=/migrations -database "$(DATABASE_URL)" down 1
 
 migrate-verify: ## Apply every migration, roll it all back, apply again
-	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy .env.example to .env."; exit 1; }
+	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
 	@echo "==> up"
 	@docker run --rm --network host \
 		-v "$(CURDIR)/$(MIGRATIONS_DIR):/migrations" \
@@ -169,12 +188,36 @@ migrate-verify: ## Apply every migration, roll it all back, apply again
 	@echo "up / down / up all succeeded"
 
 rls-test: ## Prove tenant isolation as cvap_app: reads, unset context, writes, composite FK
-	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy .env.example to .env."; exit 1; }
+	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
 	@docker run --rm --network host \
 		-v "$(CURDIR)/internal/store/testdata:/testdata:ro" \
 		-e PGOPTIONS=--client-min-messages=notice \
 		postgres:16-alpine \
 		psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -f /testdata/rls_test.sql
+
+app-role: ## Create the LOGIN role the application connects as (dev and CI)
+	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
+	@docker run --rm --network host \
+		-v "$(CURDIR)/internal/store/testdata:/testdata:ro" \
+		postgres:16-alpine \
+		psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -f /testdata/app_role.sql
+
+# Extra flags for store-test. CI passes -race; it is not the default because
+# -race needs cgo and a C compiler, which not every development box has, and a
+# target that fails to build locally stops being run locally.
+#
+# CI MUST pass it. Conn.done is an atomic.Bool because a callback can start a
+# goroutine that outlives it, and that fix was reasoned rather than demonstrated
+# until the race detector ran over these tests. Reasoned-not-demonstrated is the
+# gap the tenant-context bugs sat in.
+GOTEST_FLAGS ?=
+
+store-test: ## Run internal/store against the dev database as the application role
+	@# Run `make app-role` first if you have just run migrate-verify: its
+	@# `down -all` drops cvap_app, and the role membership that makes
+	@# cvap_app_login useful goes with it. The CI schema job orders them that way.
+	@test -n "$(APP_DATABASE_URL)" || { echo "APP_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
+	CVAP_TEST_DATABASE_URL="$(APP_DATABASE_URL)" go test ./internal/store/... -count=1 $(GOTEST_FLAGS)
 
 migrate-new: ## Scaffold a migration pair: make migrate-new NAME=snake_case
 	@test -n "$(NAME)" || { echo "usage: make migrate-new NAME=snake_case"; exit 1; }
@@ -191,6 +234,9 @@ migrate-new: ## Scaffold a migration pair: make migrate-new NAME=snake_case
 	echo "created $$down"
 
 ## ---------- gates ----------
+
+env-check: ## Assert env.example matches the environment the code reads
+	python3 .github/scripts/check_env_example.py
 
 safety: ## Scope-enforcement gate (NOT IMPLEMENTED — week 8)
 	@echo "NOT IMPLEMENTED — week 8. Scope-enforcement gate, docs/execution-plan.md 6.3."

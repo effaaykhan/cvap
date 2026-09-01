@@ -130,6 +130,76 @@ jobs:
       - name: Generated bindings match
         run: make proto-verify
 
+  # Tenant isolation was verified only on the author's machine until this job
+  # existed. That is the same category of gap as a gate that cannot fail: the
+  # assertions were real, but nothing ran them on anyone else's change.
+  schema:
+    name: Schema and tenant isolation
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cvap
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+          POSTGRES_DB: cvap
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cvap -d cvap"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # The MIGRATION role: owns the schema, may bypass RLS.
+      DATABASE_URL: postgres://cvap:ci-only-not-a-secret@127.0.0.1:5432/cvap?sslmode=disable
+      # The APPLICATION role: a LOGIN member of cvap_app, holds neither
+      # BYPASSRLS nor SUPERUSER. Running the store tests as the migration role
+      # would pass every assertion while proving nothing, which is why
+      # store.Open refuses such a role outright.
+      APP_DATABASE_URL: postgres://cvap_app_login:cvap_dev_only_app_password@127.0.0.1:5432/cvap?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # up, down -all, up again. The second up is what catches a down migration
+      # that left an object behind — a summary "verify passed" would not.
+      - name: Migrations apply, reverse and reapply
+        run: make migrate-verify
+
+      # cvap_app is NOLOGIN by design: it is a group role carrying the grants,
+      # with no password to leak or rotate. What connects is a LOGIN member of
+      # it. In production this is provisioning's job; here it is this file.
+      - name: Create the application login role
+        run: make app-role
+
+      # Four cases: filtered reads across every tenant-scoped table, an unset
+      # tenant context RAISING rather than returning nothing, cross-tenant
+      # writes refused by WITH CHECK on all 40 policies, and a composite FK
+      # refusing a cross-tenant parent.
+      - name: Tenant isolation
+        run: make rls-test
+
+      # The Go half of the same property: the store destroys rather than recycles
+      # any connection whose transaction did not end where inTx decided it did.
+      #
+      # -race is not optional here. Conn.done is an atomic.Bool because a
+      # callback may start a goroutine that outlives it, and until this ran, that
+      # fix was reasoned rather than demonstrated. "Reasoned rather than
+      # demonstrated" is precisely the gap the two tenant-context bugs sat in, so
+      # it does not get to persist in the fix for them.
+      #
+      # These tests skip without CVAP_TEST_DATABASE_URL, which is why they cannot
+      # simply live in build-test: that job has no database. This job has one.
+      - name: Store integration tests (race detector)
+        run: make store-test GOTEST_FLAGS=-race
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -239,6 +309,12 @@ jobs:
       # categories of entry. This is what makes the next one loud.
       - name: .gitignore regression
         run: python3 .github/scripts/check_gitignore.py
+
+      # A .env copied from a stale env.example fails later, in whatever
+      # subsystem first reads an empty string, rather than at startup. This is
+      # what makes that a build failure instead of a mystery.
+      - name: env.example matches what the code reads
+        run: python3 .github/scripts/check_env_example.py
 
       # The scope guard is the control that stops a development scan reaching a
       # real network. It gets a test table, not trust.

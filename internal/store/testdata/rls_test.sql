@@ -91,6 +91,34 @@ UNION ALL
 SELECT 'zone_b', zone_id FROM zb;
 
 -- ---------------------------------------------------------------------------
+-- Populate every tenant-scoped table, for both tenants.
+-- ---------------------------------------------------------------------------
+-- Case 1's sweep asserts that no foreign rows are visible. Against an empty
+-- table that assertion is vacuous, and it used to be vacuous for 29 of the 33
+-- tables — the suite said so on every run rather than reporting a clean pass,
+-- which is what made it worth fixing rather than living with.
+--
+-- Both tenants are populated, not just one. If only tenant A had rows there
+-- would be no foreign rows for the sweep to fail on, and it would pass for the
+-- wrong reason.
+
+\i /testdata/fixtures.sql
+
+-- CALL takes no subquery argument at all, even inside a DO block, so the ids
+-- go through local variables.
+DO $seed$
+DECLARE
+    a uuid;
+    b uuid;
+BEGIN
+    SELECT id INTO a FROM rls_fixture WHERE label = 'tenant_a';
+    SELECT id INTO b FROM rls_fixture WHERE label = 'tenant_b';
+    CALL fixture_seed_tenant(a, 'a');
+    CALL fixture_seed_tenant(b, 'b');
+END
+$seed$;
+
+-- ---------------------------------------------------------------------------
 -- Drop to the application role. Everything below is cvap_app.
 -- ---------------------------------------------------------------------------
 
@@ -131,12 +159,15 @@ BEGIN
     IF n_foreign <> 0 THEN
         RAISE EXCEPTION 'CASE 1 FAILED: % rows from another tenant are visible in users', n_foreign;
     END IF;
-    -- Tenant B's user exists and must not be counted. If nothing is visible at
-    -- all the filter has proved nothing, so that is a failure too.
-    IF n_visible <> 1 THEN
-        RAISE EXCEPTION 'CASE 1 FAILED: expected exactly 1 visible user, got %', n_visible;
+    -- Tenant B's users exist and must not be counted. If nothing is visible at
+    -- all the filter has proved nothing, so that is a failure too. The count is
+    -- not pinned to an exact number: the fixtures may grow, and a test that has
+    -- to be edited every time a fixture is added is a test people edit without
+    -- reading.
+    IF n_visible < 1 THEN
+        RAISE EXCEPTION 'CASE 1 FAILED: no users visible at all, so the filter proved nothing';
     END IF;
-    RAISE NOTICE 'case 1 passed on users: 1 own row visible, 0 foreign';
+    RAISE NOTICE 'case 1 passed on users: % own rows visible, 0 foreign', n_visible;
 END
 $$;
 
@@ -179,7 +210,21 @@ BEGIN
     END LOOP;
 
     RAISE NOTICE 'case 1 swept % tenant-scoped tables', checked;
-    RAISE NOTICE 'case 1: % of them were empty and therefore prove nothing: %', empty, empties;
+
+    -- Empty tables are now a FAILURE, not a note.
+    --
+    -- Before fixtures existed this printed a warning, because the alternative
+    -- was failing every run for a known gap. The fixtures close that gap, so an
+    -- empty tenant-scoped table now means either a table was added without a
+    -- fixture row, or a fixture stopped inserting one. Both make the sweep
+    -- silently weaker, which is exactly the failure mode this suite exists to
+    -- avoid — the sweep would still pass, over less.
+    IF empty > 0 THEN
+        RAISE EXCEPTION
+            'CASE 1 FAILED: % tenant-scoped table(s) have no rows, so the sweep proves nothing for them: %. Add fixture rows in internal/store/testdata/fixtures.sql.',
+            empty, empties;
+    END IF;
+    RAISE NOTICE 'case 1: every swept table had rows, so the filter was actually exercised';
 END
 $$;
 

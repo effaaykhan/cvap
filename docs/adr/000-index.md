@@ -39,3 +39,5 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 028 | One pre-release correction to the frozen wire contract | Accepted |
 | 029 | Schema tables the v2 ERD does not draw | Accepted |
 | 030 | Knowledge tables are read-only to the application role | Accepted |
+| 031 | Enrolment tenant lookup is a one-value SECURITY DEFINER function | Accepted |
+| 032 | The store package exposes no path to a raw connection | Accepted |

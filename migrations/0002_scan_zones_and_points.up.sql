@@ -16,12 +16,26 @@ BEGIN;
 
 CREATE TYPE zone_type AS ENUM ('external', 'dmz', 'internal', 'branch', 'cloud', 'mgmt');
 
+-- ADDING A VALUE HERE REQUIRES A DECISION IN tenant_for_scan_point()
+-- (migration 0015, ADR-031). That function carries an allowlist of the statuses
+-- from which a scan point may resolve its tenant at enrolment; a value not in
+-- that list cannot enrol at all. The default is therefore "cannot enrol", which
+-- is the safe direction — but it is silent, and a status added without reading
+-- this will inherit it by accident rather than by choice.
+--
+-- The same warning is attached to the type itself as a COMMENT ON TYPE in 0015,
+-- so it is visible from \dT+ as well as from here. It lives there rather than
+-- here because golang-migrate tracks version numbers, not file contents: an
+-- executable statement added to this already-applied migration would only ever
+-- run on a fresh deployment.
 CREATE TYPE scan_point_status AS ENUM (
-    'pending',   -- enrolled, not yet seen
-    'online',
+    'pending',   -- enrolled, not yet seen        -- enrollable
+    'online',    --                                  enrollable
     'offline',   -- heartbeat timeout exceeded (90s, execution-plan 5)
-    'disabled',  -- operator-disabled
+                 --                                  enrollable
+    'disabled',  -- operator-disabled            -- NOT enrollable
     'revoked'    -- certificate revoked; may not re-enrol on the same identity
+                 --                               -- NOT enrollable
 );
 
 -- Closed set, validated at ingest and dispatch. Note this is deliberately

@@ -39,4 +39,79 @@ Every RLS policy carries **both** `USING` and `WITH CHECK`, and uses the one-arg
 `current_setting('app.tenant_id')`. The two-argument form returns NULL when unset, which
 makes the predicate NULL and silently returns nothing instead of raising.
 
+## The pool
+
+`Read` and `Write` are the only doors, and a `TenantID` is what opens them. There is no
+`Acquire`, no `Begin`, no exported accessor for the pool or a connection.
+
+- **`SET LOCAL` inside a transaction, always.** A session `SET` would have to be undone by
+  our own cleanup on release, and cleanup that must run is cleanup that eventually does not.
+  Postgres discards `SET LOCAL` at `COMMIT`/`ROLLBACK`, so a connection returning to the pool
+  *cannot* carry the previous tenant. **This is why there is no non-transactional path, and
+  adding one would undo the guarantee.** Set via `set_config('app.tenant_id', $1, true)` — a
+  bind parameter, because `SET` takes none and interpolating there is an injection shape in
+  the statement that decides which tenant's data is visible.
+- **`Read` opens `READ ONLY`**, so a write on a read path fails at the database.
+- **`Conn` holds `pgx.Tx` as a named field, never embedded.** Embedding promotes `Tx.Conn()`.
+  For the same reason `Conn.Query` returns `store.Rows`, not `pgx.Rows`: the pgx interface
+  carries `Conn() *pgx.Conn`, so returning it would hand out the connection through a method
+  nobody wrote. Same for `SendBatch` and `store.BatchResults`.
+- **A `Conn` is dead after its callback returns** — every method then gives `ErrConnReleased`.
+- **Repositories are stateless and take the tenant from `c.Tenant()`**, never as an argument,
+  so a row cannot be written claiming a tenant the connection is not scoped to.
+- `store.Open` refuses a role holding `BYPASSRLS` or `SUPERUSER`. Migration 0001 asserts the
+  same at deploy time; the two catch different things, the second catching a `DATABASE_URL`
+  edited to the migration user to "fix" a permission error.
+
+`encapsulation_test.go` parses the package and fails the build if any of that regresses. It
+is a test rather than a comment because the regression looks like a convenience in review.
+
+**Connect as `cvap_app_login`, not `cvap_app`.** `cvap_app` is `NOLOGIN`: a group role
+carrying the grants, with no password to leak or rotate. A `LOGIN` member of it is what
+connects — `internal/store/testdata/app_role.sql` in dev and CI, provisioning elsewhere.
+`APP_DATABASE_URL` is that connection string; `DATABASE_URL` is the migration role and must
+never be used by the running application.
+
+## Deliberate exceptions, both narrow
+
+- **`DB.resolveTenant`** (ADR-031) maps a scan point certificate fingerprint to a tenant with
+  no tenant context, because deriving the tenant is its whole job. It is unexported, returns
+  only a `TenantID`, and must never return a connection. The narrowness lives in the database:
+  `tenant_for_scan_point` is `SECURITY DEFINER`, returns one uuid, resolves only enrollable
+  statuses, and returns NULL rather than raising so it is not an enrolment oracle.
+- **There is no unscoped path**, deliberately. The knowledge tables carry no `tenant_id`, so
+  they would need one — but nothing in this package reads them yet, and an escape hatch with
+  no caller is how escape hatches get misused. The session that needs `rules` on the finding
+  read path should make the case then.
+
+## Observations
+
+`ingest_state` is written at INSERT and never updated; migration 0016 grants
+`UPDATE (asset_id)` and nothing wider, so the column the finding pipeline filters on cannot
+be cleared by the pipeline. Every read path filters `ingest_state = 'accepted'` in the query
+rather than leaving it to the caller — a filter the caller can forget is one that will be
+forgotten. `ListQuarantined` is the single deliberate exception, named so.
+
+Reads over `observations` require a bounded time window. It is partitioned by `observed_at`,
+so a query without one scans every live partition.
+
+## Errors carry schema detail — do not pass them to a caller
+
+`mapError` embeds `pgErr.ConstraintName`, `pgErr.ColumnName` and `pgErr.Message`. That is
+deliberate and useful at this layer: `findings_dedup_key_uidx` and `network_ranges_zone_fk`
+say very different things about what went wrong. Every one of them is also a schema fact.
+
+**The API layer must not return these verbatim.** Map to a sentinel, log the detail, return
+something that does not describe the schema to whoever sent the request. Written down here
+while the constraint is being created rather than left to be remembered when the API lands.
+
+Two errors are deliberately conflated and two deliberately are not:
+
+- `ErrNotFound` covers both "no such row" and "belongs to another tenant". Under RLS these
+  are the same answer, and an error that distinguished them would be a cross-tenant oracle.
+- `ErrTenantIsolation` (an RLS refusal) and `ErrNotPermitted` (a missing GRANT) are separate,
+  even though PostgreSQL reports both as SQLSTATE 42501. A cross-tenant write attempt is a
+  security event worth alerting on; a missing GRANT is a deployment mistake. Alerting that
+  cannot tell them apart fires on the wrong one and gets muted.
+
 Run `schema-auditor` on any migration.

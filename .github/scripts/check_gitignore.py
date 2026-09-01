@@ -13,7 +13,7 @@ should be tested like one.
 
 Asserts both directions — that sensitive paths ARE ignored, and that paths which
 must stay committable are NOT. The second half matters just as much: an
-over-broad rule that swallows .env.example or .claude/agents/ breaks the repo in
+over-broad rule that swallows env.example or .claude/agents/ breaks the repo in
 a way that is easy to "fix" by deleting the rule that was protecting something
 else.
 """
@@ -30,7 +30,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 CASES: list[tuple[str, bool, str]] = [
     (".env", True, "local credentials must never reach the remote"),
     (".env.local", True, "any .env variant"),
-    (".env.example", False, "the committed template developers copy from"),
+    ("env.example", False, "the committed template developers copy from"),
+    # Ignored, and that is correct now: the template is env.example, so a file
+    # called .env.example is somebody's real config that picked up the old name.
+    (".env.example", True, "no longer the template; treat as a real env file"),
     # Deliberately not a .pyc: that would also be caught by *.py[cod], so the
     # case would pass even if the __pycache__/ rule were deleted.
     ("knowledge/__pycache__/index.txt", True, "__pycache__ dirs from knowledge/ pipelines"),

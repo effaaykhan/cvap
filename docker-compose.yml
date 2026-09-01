@@ -4,7 +4,7 @@
 # (ADR-023). What runs here is what an on-prem customer runs. Kubernetes is
 # Phase 12 and never mandatory.
 #
-# Credentials come from .env, which is gitignored. Copy .env.example first.
+# Credentials come from .env, which is gitignored. Copy env.example first.
 
 name: cvap
 

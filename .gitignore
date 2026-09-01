@@ -19,7 +19,11 @@ venv/
 # secrets — never commit
 .env
 .env.*
-!.env.example
+
+# No negation here on purpose. The committed template is `env.example`, with no
+# leading dot, so it does not match the patterns above and needs no exception.
+# `.env.example` therefore stays ignored like every other .env.* file — if one
+# appears it is somebody's real config, not the template.
 *.pem
 *.key
 *.p12
