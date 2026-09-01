@@ -72,7 +72,7 @@ var (
 //	MarshalJSON()  encoding/json, and anything built on it
 //	Reveal()       the ONLY way out, named to be conspicuous and greppable
 //
-// # Why the field is a func
+// # Why the field is a func (ADR-035)
 //
 // The second thing the review found, and the reason this is not just a string.
 // A PlaintextToken held in an UNEXPORTED field of some other struct is rendered

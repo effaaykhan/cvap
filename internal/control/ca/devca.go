@@ -85,38 +85,52 @@ func GenerateSelfSigned(dir, commonName string, validFor time.Duration) (certPat
 		return "", "", fmt.Errorf("ca: marshal key: %w", err)
 	}
 
-	certPath = filepath.Join(dir, "ca.crt")
-	keyPath = filepath.Join(dir, "ca.key")
+	// Writes go through an os.Root scoped to dir (Go 1.24+), with fixed
+	// filenames. Three properties, and each replaces something that was wrong or
+	// merely asserted before:
+	//
+	//   os.WriteFile's permission argument applies only when it CREATES the
+	//   file. Against a pre-existing ca.key at 0666 it wrote the key and left
+	//   the mode alone — so the "written 0600" claim was false in exactly the
+	//   case that mattered, and Open would then refuse to load what this had
+	//   just written. O_EXCL makes it refuse instead, which is also what stops
+	//   this silently replacing a live CA key: every certificate that key issued
+	//   stops validating, and the previous key is gone.
+	//
+	//   os.Root confines every write beneath dir and refuses to traverse a
+	//   symlink out of it. os.WriteFile followed one, so a planted link
+	//   redirected the key somewhere readable.
+	//
+	//   The names passed to the root are constants, so there is no path for a
+	//   caller to influence beyond the directory they already chose. That is
+	//   also why gosec's G304 no longer fires: this is its own suggested fix
+	//   rather than a suppression of it.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return "", "", fmt.Errorf("ca: open target directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
 
-	// O_EXCL, not os.WriteFile, and for two reasons.
-	//
-	// os.WriteFile's permission argument applies only when it CREATES the file.
-	// Against a pre-existing ca.key at 0666 it writes the key and leaves the
-	// mode alone — so the "written 0600" claim was false in exactly the case
-	// that matters, and Open would then refuse to load what this just wrote.
-	// os.WriteFile also follows symlinks, so a planted link redirects the key.
-	//
-	// O_EXCL also makes this refuse rather than overwrite. Silently replacing a
-	// live CA key is a fleet-wide outage: every issued certificate stops
-	// validating, and the previous key is gone.
-	if err := writeNew(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+	if err := writeNew(root, "ca.crt", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
 		return "", "", fmt.Errorf("ca: write certificate: %w", err)
 	}
-	if err := writeNew(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+	if err := writeNew(root, "ca.key", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
 		return "", "", fmt.Errorf("ca: write signing key: %w", err)
 	}
-	return certPath, keyPath, nil
+	return filepath.Join(dir, "ca.crt"), filepath.Join(dir, "ca.key"), nil
 }
 
 // writeNew creates a file that must not already exist, at exactly the mode
-// given. O_EXCL defeats a symlink and refuses to clobber.
-func writeNew(path string, data []byte, perm os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+// given, beneath root.
+func writeNew(root *os.Root, name string, data []byte, perm os.FileMode) error {
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
-		f.Close()
+		// The close error is discarded on purpose: the write error is the one
+		// that matters, and returning a close failure instead would hide it.
+		_ = f.Close()
 		return err
 	}
 	return f.Close()

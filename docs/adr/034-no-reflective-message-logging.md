@@ -54,6 +54,11 @@ deliberate, named call at a specific site — reviewable in a way a reflective l
 `check_secret_logging.py`'s docstring names this ADR as the gap it cannot see, so the gate
 points at the control that covers it.
 
+ADR-035 is the sibling of this one: the same family — renderings a source-level gate cannot
+see — with a different mechanism. This ADR is about a reflective layer we choose to add;
+ADR-035 is about `fmt` bypassing the redacting methods we did add, whenever the value sits in
+an unexported field.
+
 ## Alternatives considered
 
 **Keep it as a contract comment.** What we had. Rejected on audience: a proto comment is read

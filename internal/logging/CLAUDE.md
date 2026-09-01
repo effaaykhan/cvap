@@ -20,6 +20,14 @@ Rules:
   a bare struct with an unexported string field still prints its contents under `%v`, because
   `fmt` reaches unexported fields by reflection. The danger is a type that renders by default,
   not a type that renders at all. No json tags exposing the value either (ADR-020).
+
+- **The secret is stored in a `func() string` field, never a `string` field (ADR-035).** The
+  methods above are necessary and not sufficient: `fmt` calls *none* of them when the value
+  sits in an unexported field of another struct, because `reflect.Value.CanInterface` is false
+  there. Every method-based defence is skipped at once. A func value has no rendering at any
+  verb in any position, which is what actually closes it — measured, not assumed:
+  a `string` field gives `{%!d(string=SECRET)}` and `{{SECRET}}`; a `func() string` field
+  gives `{4824512}` and `{{0x499dc0}}`.
 - **The generated protobuf types break that rule and cannot be made to follow it.**
   `protoc-gen-go` emits `String()` on every message unconditionally, and it renders every
   field — including `EnrollRequest.enrollment_token` and `CredentialGrant.material`, and
