@@ -37,3 +37,5 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 026 | Result submission contract | Accepted |
 | 027 | Engines are separate processes behind a job contract | Accepted |
 | 028 | One pre-release correction to the frozen wire contract | Accepted |
+| 029 | Schema tables the v2 ERD does not draw | Accepted |
+| 030 | Knowledge tables are read-only to the application role | Accepted |

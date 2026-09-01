@@ -5,7 +5,7 @@
 
 .PHONY: help build test lint vet fmt tidy ci \
         up down lab-up lab-down \
-        migrate-up migrate-down migrate-new \
+        migrate-up migrate-down migrate-new migrate-verify rls-test \
         proto proto-tools proto-gen proto-lint proto-breaking proto-verify \
         secret-logging secret-logging-test \
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
@@ -148,6 +148,33 @@ migrate-down: ## Roll back the most recent migration
 		-v "$(CURDIR)/$(MIGRATIONS_DIR):/migrations" \
 		$(MIGRATE_IMAGE) \
 		-path=/migrations -database "$(DATABASE_URL)" down 1
+
+migrate-verify: ## Apply every migration, roll it all back, apply again
+	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy .env.example to .env."; exit 1; }
+	@echo "==> up"
+	@docker run --rm --network host \
+		-v "$(CURDIR)/$(MIGRATIONS_DIR):/migrations" \
+		$(MIGRATE_IMAGE) \
+		-path=/migrations -database "$(DATABASE_URL)" up
+	@echo "==> down (all)"
+	@docker run --rm --network host \
+		-v "$(CURDIR)/$(MIGRATIONS_DIR):/migrations" \
+		$(MIGRATE_IMAGE) \
+		-path=/migrations -database "$(DATABASE_URL)" down -all
+	@echo "==> up again"
+	@docker run --rm --network host \
+		-v "$(CURDIR)/$(MIGRATIONS_DIR):/migrations" \
+		$(MIGRATE_IMAGE) \
+		-path=/migrations -database "$(DATABASE_URL)" up
+	@echo "up / down / up all succeeded"
+
+rls-test: ## Prove tenant isolation as cvap_app: reads, unset context, writes, composite FK
+	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy .env.example to .env."; exit 1; }
+	@docker run --rm --network host \
+		-v "$(CURDIR)/internal/store/testdata:/testdata:ro" \
+		-e PGOPTIONS=--client-min-messages=notice \
+		postgres:16-alpine \
+		psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -f /testdata/rls_test.sql
 
 migrate-new: ## Scaffold a migration pair: make migrate-new NAME=snake_case
 	@test -n "$(NAME)" || { echo "usage: make migrate-new NAME=snake_case"; exit 1; }

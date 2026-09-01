@@ -19,4 +19,26 @@ Rules:
   `vuln_def_id` being present (ADR-009).
 - Exposure is computed per vantage point, never read from a column on the asset (ADR-008).
 
+## Email is not a global key
+
+`users` is constrained `UNIQUE (tenant_id, lower(email))` — per tenant, as a functional
+index, not a plain column constraint. Two reasons, and both look like obstacles if you meet
+the constraint before the reasoning:
+
+- One person may hold accounts at two tenants. A global unique email forecloses that, and
+  retrofitting it later means touching every account.
+- A global constraint is a membership oracle: signup tells an anonymous caller whether an
+  address already exists somewhere in the platform.
+
+Email is stored **as entered** and compared lowercased. Do not normalise on write — it
+loses what the user typed, and that shows up in outbound mail.
+
+**Login resolves tenant first**, by subdomain, SSO issuer, or explicit selection, then the
+user within it. There is no lookup path from a bare email address to an account.
+
+The consequence, which is real and must be designed for rather than worked around: tenant
+discovery is its own problem. A user at two tenants who types only an email cannot be
+routed automatically. Any "which tenant?" flow that answers from the email address is the
+enumeration oracle the per-tenant constraint exists to avoid — **it must ask, not tell.**
+
 Run `security-reviewer` on any change to auth, tenancy or the API surface.

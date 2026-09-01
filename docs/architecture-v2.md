@@ -297,6 +297,14 @@ The same CVE on the same host seen from internal and DMZ is **one finding with t
 
 ## 9. Entity relationship diagram
 
+> The schema carries four tables this diagram does not draw: `result_submissions`
+> (ADR-026's idempotency ledger), `asset_resolution_queue` (ADR-007's unresolved merge
+> queue), and `scan_policy_credential_profiles` and `advisory_vuln_map` (join tables for
+> the `SCAN_POLICY }o--o{ CREDENTIAL_PROFILE` and `VULNERABILITY_DEF }o--o{ VENDOR_ADVISORY`
+> lines below, which mermaid draws as lines and a relational schema cannot).
+> **See ADR-029**, which is authoritative. Generating migrations from this diagram alone produces a schema that
+> cannot satisfy ADR-007 or ADR-026.
+
 ```mermaid
 erDiagram
 
