@@ -382,6 +382,12 @@ func TestNothingElseTouchesTheRawPool(t *testing.T) {
 	poolLifecycle := map[string]bool{
 		"Open": true, "verifyRole": true, "Close": true, "Ping": true, "inTx": true,
 	}
+	// ADR-036: the sweep enumerator. A separate class from ADR-033 because it is
+	// enumeration rather than resolution, and its shape is pinned by
+	// TestSweepEnumeratorStaysNarrow rather than by the pre-tenant checks.
+	for m := range sweepEnumerators {
+		poolLifecycle[m] = true
+	}
 
 	for name, file := range files {
 		for _, decl := range file.Decls {
@@ -401,8 +407,9 @@ func TestNothingElseTouchesTheRawPool(t *testing.T) {
 				if sel.Sel.Name == "pool" {
 					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "db" {
 						t.Errorf("%s: %s touches db.pool directly. Either it is an undeclared "+
-							"member of the ADR-033 pre-tenant class — amend the ADR — or it is a "+
-							"query with no tenant context, which Read and Write exist to prevent.",
+							"member of the ADR-033 pre-tenant class or the ADR-036 sweep class — "+
+							"amend that ADR — or it is a query with no tenant context, which Read "+
+							"and Write exist to prevent.",
 							name, fn.Name.Name)
 					}
 				}
@@ -497,6 +504,60 @@ func TestConnDoesNotUnwrap(t *testing.T) {
 				t.Errorf("%s: Conn.%s unwraps to the underlying transaction or connection. "+
 					"Conn exists precisely so that cannot be reached (ADR-002).", name, fn.Name.Name)
 			}
+		}
+	}
+}
+
+// sweepEnumerators is the ADR-036 class: unscoped enumeration for a background
+// sweep. Exactly one member, and adding a second is an amendment to that ADR.
+var sweepEnumerators = map[string]bool{"ActiveTenantIDs": true}
+
+// TestSweepEnumeratorStaysNarrow pins the one thing that keeps ADR-036 small.
+//
+// The hole is justified by returning IDS and nothing else. A version of this
+// that returned []Tenant, or took a filter argument, would be a cross-tenant
+// read primitive wearing a sweep's name — and it would look like a convenience
+// in review, which is why it is a test and not a comment.
+func TestSweepEnumeratorStaysNarrow(t *testing.T) {
+	fset, files := parsePackage(t)
+
+	seen := map[string]bool{}
+	for name, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || !sweepEnumerators[fn.Name.Name] {
+				continue
+			}
+			seen[fn.Name.Name] = true
+
+			if fn.Type.Params != nil && len(fn.Type.Params.List) != 1 {
+				t.Errorf("%s: %s takes %d parameter groups; an ADR-036 enumerator takes a "+
+					"context and nothing else. A filter argument is something to probe with.",
+					name, fn.Name.Name, len(fn.Type.Params.List))
+			}
+			if fn.Type.Results == nil || len(fn.Type.Results.List) != 2 {
+				t.Fatalf("%s: %s must return ([]TenantID, error) (ADR-036)", name, fn.Name.Name)
+			}
+			arr, ok := fn.Type.Results.List[0].Type.(*ast.ArrayType)
+			if !ok {
+				t.Fatalf("%s: %s must return []TenantID (ADR-036)", name, fn.Name.Name)
+			}
+			if id, ok := arr.Elt.(*ast.Ident); !ok || id.Name != "TenantID" {
+				t.Errorf("%s: %s returns a slice of something other than TenantID. ADR-036 is "+
+					"justified by returning ids and nothing else; widening it makes this an "+
+					"unscoped cross-tenant read.", name, fn.Name.Name)
+			}
+			for _, res := range fn.Type.Results.List {
+				if bad := typeMentions(fset, res.Type); bad != "" {
+					t.Errorf("%s: %s returns %s (ADR-036).", name, fn.Name.Name, bad)
+				}
+			}
+		}
+	}
+	for member := range sweepEnumerators {
+		if !seen[member] {
+			t.Errorf("ADR-036 names %s, but it is not in this package. Amend ADR-036 and this "+
+				"list together.", member)
 		}
 	}
 }

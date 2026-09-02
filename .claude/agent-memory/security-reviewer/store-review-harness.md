@@ -21,6 +21,19 @@ Reviewing `internal/store` or any migration is testable rather than theoretical 
   `cvap_app` is NOLOGIN with no BYPASSRLS, `cvap_app_login` is its only member, and neither
   app role has CREATE on schema `public`. Every table is `FORCE ROW LEVEL SECURITY`.
 
+Seeding a job the dispatcher will actually claim, from scratch, in one `db.Write`:
+`tenants` has no `slug`; `scan_policies` takes `(tenant_id, name)` and defaults the rest;
+`scan_target_type` is `cidr|host|url|repo|cloud_account` (no `ip`); and `Jobs.Claim` now
+requires each `scan_tasks` row to have a `target_id` pointing at a `scan_targets` row with
+`authorization_verified = true`. `internal/dispatch/dispatch_test.go` has `enrolledScanPoint`,
+`seedQueuedJob`, `peerCtx`, and `internal/dispatch/ingest_test.go` has `leased`, `chunk`,
+`runIngest` — reuse them from a throwaway `package dispatch_test` file rather than reseeding.
+Clean up with `DELETE FROM tenants WHERE name LIKE ...`; it cascades.
+
+`mapError` maps SQLSTATE 22P02 to `ErrNoTenantContext` ("query ran without a usable
+app.tenant_id"), but 22P02 is raised by *any* bad text-to-type cast — an invalid enum label or
+an invalid `jsonb` payload from a scan point included. Expect that message to be a lie.
+
 For `internal/control/enrollment` and `internal/control/ca`, PoCs go in throwaway
 `internal/control/enrollment/zz_*_test.go` with `package enrollment_test`, which already has
 `testDB` / `testCA` / `testService` / `enrolled` / `peerCtx` / `enrollRequest` helpers, and

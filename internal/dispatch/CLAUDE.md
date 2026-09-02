@@ -55,3 +55,29 @@ compromised scan point can set either and lie. They exist to catch *our* bugs: a
 without `credentials_zeroised` raises an audit event, because an invariant nothing asserts is
 one nothing notices the loss of — and `observed_rate_pps` is never read as the rate actually
 sent.
+
+## The sweep, and why it is not optional
+
+`Leases.ExpireLeases` carries ADR-012 entirely: a `reassign_safe` job whose lease ran out goes
+back to the queue, and one that is **not** `reassign_safe` fails with `lease_lost` plus an
+operator escalation, because duplicating active or intrusive work harms the target. A security
+review found it had **no caller**. The property was written, documented and unit-tested, and
+nothing in Core would ever have run it — so a scan point that died mid-job left that job
+`running` forever. `HeartbeatTimeout` was in the same state: a constant, a comment, and no
+comparison against `last_heartbeat` anywhere.
+
+`Sweeper` is that caller, and it is periodic because the event it reacts to is the **absence**
+of one. A dead scan point sends nothing, and the stream closing is not the signal either — a
+partitioned scan point holds its lease and keeps scanning while its stream is long gone.
+
+- The escalation audit event is written in the **same transaction** as the expiry. One recorded
+  afterwards is one a crash can drop, leaving a job marked `failed` and nobody told to look.
+- `Sweeper.Interval` must stay below `store.LeaseTTL`. Slower than the TTL and an expired lease
+  stays `granted` for up to an interval, delaying the escalation on a job that must not retry.
+- `Run` never returns an error. A supervisor that restarted the process on a transient database
+  failure would turn a blip into an outage of the thing enforcing ADR-012.
+- The tenant enumeration it needs is the single unscoped read in `internal/store`
+  (`DB.ActiveTenantIDs`, ADR-036). A sweep has no tenant to inherit.
+
+**Registering Dispatch without starting the sweeper reintroduces the finding.** It is listed
+with the TLS and keepalive requirements in the package doc for that reason.

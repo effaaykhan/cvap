@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -51,8 +53,20 @@ type Task struct {
 	ID         uuid.UUID
 	JobID      uuid.UUID
 	TargetID   *uuid.UUID
+	AssetID    *uuid.UUID
 	TaskTarget string
 	Status     string
+
+	// Fragile caps rate regardless of policy (ADR-024 control 3), and travels
+	// per task because fragility belongs to the DEVICE rather than to the scan:
+	// it must apply to every scan that ever touches it, including one written by
+	// someone who has never heard of that device.
+	//
+	// Derived from assets.fragile through scan_tasks.asset_id. A task with no
+	// asset is not fragile — the permissive direction, chosen because treating
+	// unknown as fragile would throttle every discovery scan to 10 pps, and a
+	// device known to be fragile is one Core has already seen.
+	Fragile bool
 }
 
 type Jobs struct{}
@@ -95,14 +109,46 @@ func (Jobs) Claim(ctx context.Context, c *Conn, scanPointID uuid.UUID, engines [
 		names[i] = string(e)
 	}
 
+	// Two predicates beyond "queued and an engine you can run", and both are
+	// safety controls rather than optimisations.
+	//
+	// authorization_verified: migration 0005 says outright that dispatch must
+	// refuse to decompose a target where this is false, and execution-plan §8
+	// risk 6 calls an unauthorised scan legal exposure, potentially criminal.
+	// Dispatch is the last Core-side component before a target leaves Core, so
+	// if the check is not here it is nowhere. A task with a NULL target_id has
+	// no authorisation record at all and is refused for the same reason.
+	//
+	// A live kill switch stops assignment. Without this, propagateKills halts
+	// the fleet's in-flight work and offerWork hands out fresh jobs two seconds
+	// later, forever — which is not a kill switch.
 	const q = `
 		WITH claimed AS (
-		    SELECT job_id
-		      FROM scan_jobs
-		     WHERE tenant_id = $1
-		       AND status = 'queued'
-		       AND engine = ANY($2::engine_kind[])
-		     ORDER BY created_at
+		    SELECT j.job_id
+		      FROM scan_jobs j
+		     WHERE j.tenant_id = $1
+		       AND j.status = 'queued'
+		       AND j.engine = ANY($2::engine_kind[])
+		       AND j.attempt < $5
+		       AND NOT EXISTS (
+		           SELECT 1 FROM kill_switches k
+		            WHERE k.tenant_id = j.tenant_id
+		              AND k.resolved_at IS NULL
+		              AND (k.scope = 'tenant'
+		                   OR (k.scope = 'scan' AND k.scope_scan_id = j.scan_id))
+		       )
+		       AND EXISTS (
+		           SELECT 1 FROM scan_tasks t
+		            WHERE t.tenant_id = j.tenant_id AND t.job_id = j.job_id
+		       )
+		       AND NOT EXISTS (
+		           SELECT 1 FROM scan_tasks t
+		            LEFT JOIN scan_targets tg
+		                   ON tg.tenant_id = t.tenant_id AND tg.target_id = t.target_id
+		            WHERE t.tenant_id = j.tenant_id AND t.job_id = j.job_id
+		              AND (t.target_id IS NULL OR tg.authorization_verified IS NOT TRUE)
+		       )
+		     ORDER BY j.created_at
 		     LIMIT $4
 		     FOR UPDATE SKIP LOCKED
 		)
@@ -116,7 +162,7 @@ func (Jobs) Claim(ctx context.Context, c *Conn, scanPointID uuid.UUID, engines [
 		          j.attempt, j.reassign_safe, j.termination_reason,
 		          j.created_at, j.completed_at`
 
-	rows, err := c.Query(ctx, q, c.Tenant().UUID(), names, scanPointID, limit)
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), names, scanPointID, limit, MaxAttempts)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -152,15 +198,44 @@ func (Jobs) GetByID(ctx context.Context, c *Conn, id uuid.UUID) (*Job, error) {
 	return &j, nil
 }
 
+// MaxTasksPerAssignment bounds what one JobAssignment can carry.
+//
+// The whole task set goes into one message and the wire cap is 4MB
+// (execution-plan §5), so an unbounded read here produces a Send that fails
+// AFTER the job is marked assigned and leased: undeliverable, and stuck until
+// the sweeper expires it.
+const MaxTasksPerAssignment = 1000
+
+// ErrTooManyTasks means a job cannot be expressed as one assignment.
+//
+// Returned rather than silently truncating, and the difference matters more than
+// it looks. A LIMIT that quietly returned the first 1000 tasks would hand the
+// scan point a job it could complete successfully while never touching the
+// remaining targets — the scan reports done, coverage is short, and nothing
+// anywhere says so. Under-scanning that looks like a clean run is the worst
+// failure this system has, because the customer acts on it.
+//
+// Failing here rolls back the caller's transaction, which un-claims the job: it
+// returns to 'queued' and dispatch logs the error on every poll. Noisy on
+// purpose. The fix is to decompose the job at planning time (ADR-011 sizes a job
+// at roughly minutes of work), not to raise this constant.
+var ErrTooManyTasks = errors.New("store: job has more tasks than one assignment can carry")
+
 // Tasks returns a job's tasks, which is what the assignment carries.
 func (Jobs) Tasks(ctx context.Context, c *Conn, jobID uuid.UUID) ([]Task, error) {
 	const q = `
-		SELECT task_id, job_id, target_id, task_target, status
-		  FROM scan_tasks
-		 WHERE tenant_id = $1 AND job_id = $2
-		 ORDER BY task_id`
+		SELECT t.task_id, t.job_id, t.target_id, t.asset_id, t.task_target, t.status,
+		       coalesce(a.fragile, false)
+		  FROM scan_tasks t
+		  LEFT JOIN assets a
+		         ON a.tenant_id = t.tenant_id AND a.asset_id = t.asset_id
+		 WHERE t.tenant_id = $1 AND t.job_id = $2
+		 ORDER BY t.task_id
+		 LIMIT $3`
 
-	rows, err := c.Query(ctx, q, c.Tenant().UUID(), jobID)
+	// One more than the cap, so a job that is over it is DETECTED rather than
+	// trimmed to fit.
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), jobID, MaxTasksPerAssignment+1)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -169,21 +244,31 @@ func (Jobs) Tasks(ctx context.Context, c *Conn, jobID uuid.UUID) ([]Task, error)
 	var out []Task
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.JobID, &t.TargetID, &t.TaskTarget, &t.Status); err != nil {
+		if err := rows.Scan(&t.ID, &t.JobID, &t.TargetID, &t.AssetID,
+			&t.TaskTarget, &t.Status, &t.Fragile); err != nil {
 			return nil, mapError(err)
 		}
 		out = append(out, t)
 	}
-	return out, mapError(rows.Err())
+	if err := rows.Err(); err != nil {
+		return nil, mapError(err)
+	}
+	if len(out) > MaxTasksPerAssignment {
+		return nil, fmt.Errorf("%w: job %s has more than %d tasks",
+			ErrTooManyTasks, jobID, MaxTasksPerAssignment)
+	}
+	return out, nil
 }
 
 // MarkRunning records that the scan point started work.
-func (Jobs) MarkRunning(ctx context.Context, c *Conn, jobID uuid.UUID) error {
+//
+// scanPointID is in the predicate. See Terminate for why.
+func (Jobs) MarkRunning(ctx context.Context, c *Conn, jobID, scanPointID uuid.UUID) error {
 	const q = `
 		UPDATE scan_jobs SET status = 'running'
-		 WHERE tenant_id = $1 AND job_id = $2 AND status = 'assigned'`
+		 WHERE tenant_id = $1 AND job_id = $2 AND scan_point_id = $3 AND status = 'assigned'`
 
-	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), jobID)
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), jobID, scanPointID)
 	if err != nil {
 		return mapError(err)
 	}
@@ -195,12 +280,27 @@ func (Jobs) MarkRunning(ctx context.Context, c *Conn, jobID uuid.UUID) error {
 
 // Terminate records how a job ended.
 //
-// The status is derived from the reason rather than taken from the scan point:
-// a scan point reports what happened to it, and Core decides what that means for
-// the job. `completed` for a clean finish; `failed` for everything else, which
-// keeps "did this job produce trustworthy results" answerable without reading
-// the reason.
-func (Jobs) Terminate(ctx context.Context, c *Conn, jobID uuid.UUID, reason TerminationReason) error {
+// ============================================================================
+// scanPointID is in the predicate, and its absence was an IDOR.
+// ============================================================================
+//
+// job_id arrives on JobTerminal from the scan point. Without a holder clause the
+// predicate is "this tenant, this job, currently running" — which any scan point
+// in the tenant satisfies for any other scan point's job. A security review
+// proved it: scan point B terminated a job leased to A, A's next renewal then
+// found nothing and A self-aborted and zeroised per ADR-012, and because the job
+// was terminal no sweep would ever recover it. One compromised scan point
+// silently kills every other scan point's in-flight work in the tenant.
+//
+// Leases.Renew was the counter-example done right all along: it takes the holder
+// from the resolved session and puts it in the predicate. This does the same.
+// Identity being correctly resolved is not the same as the OBJECT being
+// authorised, and that gap is what the review found.
+//
+// The status is derived from the reason rather than taken from the scan point: a
+// scan point reports what happened to it, and Core decides what that means for
+// the job.
+func (Jobs) Terminate(ctx context.Context, c *Conn, jobID, scanPointID uuid.UUID, reason TerminationReason) error {
 	status := JobFailed
 	switch reason {
 	case TerminationCompleted:
@@ -213,11 +313,11 @@ func (Jobs) Terminate(ctx context.Context, c *Conn, jobID uuid.UUID, reason Term
 
 	const q = `
 		UPDATE scan_jobs
-		   SET status = $3, termination_reason = $4, completed_at = now()
-		 WHERE tenant_id = $1 AND job_id = $2
+		   SET status = $4, termination_reason = $5, completed_at = now()
+		 WHERE tenant_id = $1 AND job_id = $2 AND scan_point_id = $3
 		   AND status IN ('assigned', 'running')`
 
-	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), jobID, string(status), string(reason))
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), jobID, scanPointID, string(status), string(reason))
 	if err != nil {
 		return mapError(err)
 	}
@@ -226,6 +326,15 @@ func (Jobs) Terminate(ctx context.Context, c *Conn, jobID uuid.UUID, reason Term
 	}
 	return nil
 }
+
+// MaxAttempts bounds how often one job may be re-queued.
+//
+// attempt was incremented and never read, so a reassign_safe job that kept
+// losing its lease could be re-claimed forever — unbounded repeated scanning of
+// a customer's target, driven by a Core-side loop rather than by anything an
+// operator asked for. ADR-024 is about blast radius, and an infinite retry is
+// blast radius spread over time.
+const MaxAttempts = 5
 
 // ExpiredLease is one job whose lease has run out, and what should happen to it.
 type ExpiredLease struct {

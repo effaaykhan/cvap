@@ -247,7 +247,7 @@ func TestSupersededEpochIsQuarantinedNotDropped(t *testing.T) {
 
 	// Supersede: the scan point still holds `epoch`, Core has issued epoch+1.
 	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
-		if err := (store.Leases{}).Release(ctx, c, jobID, epoch, store.LeaseLost); err != nil {
+		if err := (store.Leases{}).ReleaseAny(ctx, c, jobID, epoch, store.LeaseLost); err != nil {
 			return err
 		}
 		_, err := (store.Leases{}).Grant(ctx, c, jobID, spID, store.LeaseTTL)
@@ -354,7 +354,7 @@ func TestSupersessionMidUploadQuarantinesEverything(t *testing.T) {
 	}
 
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		if err := (store.Leases{}).Release(ctx, c, jobID, epoch, store.LeaseLost); err != nil {
+		if err := (store.Leases{}).ReleaseAny(ctx, c, jobID, epoch, store.LeaseLost); err != nil {
 			return err
 		}
 		_, err := (store.Leases{}).Grant(ctx, c, jobID, spID, store.LeaseTTL)
@@ -520,7 +520,7 @@ func TestIngestStateIsARatchet(t *testing.T) {
 	qSub := "sub-" + uuid.NewString()
 	qJob, qTask, qZone, qEpoch := leased(t, db, tenant, spID)
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		if err := (store.Leases{}).Release(ctx, c, qJob, qEpoch, store.LeaseLost); err != nil {
+		if err := (store.Leases{}).ReleaseAny(ctx, c, qJob, qEpoch, store.LeaseLost); err != nil {
 			return err
 		}
 		_, err := (store.Leases{}).Grant(ctx, c, qJob, spID, store.LeaseTTL)
@@ -539,5 +539,88 @@ func TestIngestStateIsARatchet(t *testing.T) {
 	if err == nil {
 		t.Fatal("quarantined -> accepted was permitted. The finding pipeline could clear " +
 			"the flag it filters on, which means it enforces nothing (ADR-026)")
+	}
+}
+
+// TestSubmissionIdCollisionAcrossTenantsIsNotADuplicate is the M1 fix from the
+// security review, and the reason migration 0022 exists.
+//
+// submission_id is generated at the scan point, so it is attacker-chosen. While
+// it was the global primary key, tenant B submitting an id tenant A had already
+// used hit a unique violation, which mapError turns into ErrConflict and ingest
+// answers REJECTED_DUPLICATE. Two things wrong with that at once: B is told to
+// clear a buffer whose contents were never stored — a result discarded, which
+// ADR-026 says never happens — and the answer is a blind existence oracle for
+// another tenant's submission ids.
+//
+// Sabotage-checked by putting a global unique index back on submission_id, which
+// fails this test. Worth knowing for next time: the reinstated index was not
+// named result_submissions_pkey, so ingest's constraint-name discrimination did
+// not recognise it and the ack came back RETRY_LATER rather than
+// REJECTED_DUPLICATE — an infinite retry instead of a discard. The collision is
+// wrong for B either way; only which wrong answer it gets depends on the name.
+func TestSubmissionIdCollisionAcrossTenantsIsNotADuplicate(t *testing.T) {
+	db := testDB(t)
+	svc := newIngestService(t, db)
+
+	tenantA, leafA, spA := enrolledScanPoint(t, db)
+	tenantB, leafB, spB := enrolledScanPoint(t, db)
+	if tenantA == tenantB {
+		t.Fatal("fixture gave both scan points the same tenant; this test proves nothing")
+	}
+
+	jobA, taskA, zoneA, epochA := leased(t, db, tenantA, spA)
+	jobB, taskB, zoneB, epochB := leased(t, db, tenantB, spB)
+
+	// The same string, chosen by both. Nothing stops a scan point picking it.
+	subID := "sub-collision-" + uuid.NewString()
+
+	// This test leaves its rows behind, and cannot do otherwise.
+	//
+	// A t.Cleanup deleting them fails with "permission denied for table
+	// result_submissions": cvap_app holds SELECT, INSERT and UPDATE and no
+	// DELETE, because ADR-026 says results are always stored. The refusal is the
+	// invariant working, so it is recorded here rather than worked around.
+	//
+	// The consequence lands on the dev loop, not on CI. After this test runs,
+	// the database holds the one state 0022's DOWN migration refuses to roll
+	// back through — a submission_id held by two tenants — so `make
+	// migrate-verify` on that same database fails inside `down -all` with a
+	// message about rollback safety. It is right to fail; it is confusing to
+	// meet. Reset the dev database (`make down && make up && make migrate-up`)
+	// before verifying migrations after a test run. CI starts from a fresh
+	// Postgres and never sees it.
+
+	fsA := runIngest(t, svc, leafA, chunk(subID, jobA, epochA, 0, true, taskA, zoneA, 2))
+	if got := fsA.lastAck(t).GetStatus(); got != scanpointv1.SubmitStatus_ACCEPTED {
+		t.Fatalf("tenant A ack %v, want ACCEPTED", got)
+	}
+
+	fsB := runIngest(t, svc, leafB, chunk(subID, jobB, epochB, 0, true, taskB, zoneB, 3))
+	if got := fsB.lastAck(t).GetStatus(); got != scanpointv1.SubmitStatus_ACCEPTED {
+		t.Fatalf("tenant B ack %v, want ACCEPTED. A submission id another tenant happens to "+
+			"have used is not a duplicate; answering REJECTED_DUPLICATE discards B's results "+
+			"and tells B something true about A.", got)
+	}
+
+	// Both tenants' observations landed, and each sees only its own.
+	for _, tc := range []struct {
+		name   string
+		tenant store.TenantID
+		task   uuid.UUID
+		want   int
+	}{{"A", tenantA, taskA, 2}, {"B", tenantB, taskB, 3}} {
+		if err := db.Read(context.Background(), tc.tenant, func(ctx context.Context, c *store.Conn) error {
+			got, err := (store.Observations{}).ListByTask(ctx, c, tc.task, 100)
+			if err != nil {
+				return err
+			}
+			if len(got) != tc.want {
+				t.Errorf("tenant %s sees %d observations, want %d", tc.name, len(got), tc.want)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

@@ -226,6 +226,19 @@ func seedQueuedJob(t *testing.T, db *store.DB, tenant store.TenantID, reassignSa
 			tid, policyID).Scan(&scanID); err != nil {
 			return err
 		}
+		// An AUTHORISED target, because Jobs.Claim now refuses a job whose tasks
+		// do not trace to one. That refusal is the point — migration 0005 says
+		// dispatch must not decompose an unauthorised target, and the old seed
+		// created a task with a NULL target_id, so the test was demonstrating
+		// the gap rather than the behaviour.
+		var targetID uuid.UUID
+		if err := c.QueryRow(ctx,
+			`INSERT INTO scan_targets (tenant_id, scan_id, target_type, target_value,
+			                           authorization_verified, verified_at)
+			 VALUES ($1,$2,'cidr','192.0.2.0/24',true,now()) RETURNING target_id`,
+			tid, scanID).Scan(&targetID); err != nil {
+			return err
+		}
 		if err := c.QueryRow(ctx,
 			`INSERT INTO scan_jobs (tenant_id, scan_id, engine, reassign_safe)
 			 VALUES ($1,$2,'discovery',$3) RETURNING job_id`,
@@ -233,8 +246,9 @@ func seedQueuedJob(t *testing.T, db *store.DB, tenant store.TenantID, reassignSa
 			return err
 		}
 		_, err := c.Exec(ctx,
-			`INSERT INTO scan_tasks (tenant_id, job_id, task_target) VALUES ($1,$2,'10.0.0.7')`,
-			tid, jobID)
+			`INSERT INTO scan_tasks (tenant_id, job_id, target_id, task_target)
+			 VALUES ($1,$2,$3,'192.0.2.7')`,
+			tid, jobID, targetID)
 		return err
 	}); err != nil {
 		t.Fatalf("seed job: %v", err)
@@ -443,7 +457,7 @@ func TestConnectAssignsWorkAndFencesTheLease(t *testing.T) {
 
 	// Supersede out of band, exactly as a reassignment would.
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		if err := (store.Leases{}).Release(ctx, c, jobID, epoch, store.LeaseLost); err != nil {
+		if err := (store.Leases{}).ReleaseAny(ctx, c, jobID, epoch, store.LeaseLost); err != nil {
 			return err
 		}
 		_, err := (store.Leases{}).Grant(ctx, c, jobID, spID, store.LeaseTTL)

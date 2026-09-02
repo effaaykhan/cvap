@@ -127,13 +127,23 @@ func mapError(err error) error {
 			return fmt.Errorf("%w: %s", ErrTenantIsolation, pgErr.Message)
 		}
 		return fmt.Errorf("%w: %s", ErrNotPermitted, pgErr.Message)
-	case pgUndefinedObject, pgInvalidTextRepr:
-		// A policy evaluated current_setting('app.tenant_id') with nothing set,
-		// or with something that is not a uuid. Reaching this means a query ran
-		// outside Read/Write, which should not be possible from this package —
-		// so it is worth an error that says so rather than a bare pg code.
+	case pgUndefinedObject:
+		// A policy evaluated current_setting('app.tenant_id') with nothing set.
+		// Reaching this means a query ran outside Read/Write, which should not
+		// be possible from this package.
 		return fmt.Errorf("%w: query ran without a usable app.tenant_id (%s)",
 			ErrNoTenantContext, pgErr.Message)
+	case pgInvalidTextRepr:
+		// 22P02 is ANY bad text-to-type cast, not only a bad app.tenant_id. It
+		// was mapped to ErrNoTenantContext, so a scan point sending a malformed
+		// jsonb payload made Core log "query ran without a usable app.tenant_id"
+		// — an attacker-triggerable, alarming and wrong message. Only claim the
+		// tenant-context reading when the message actually names the setting.
+		if strings.Contains(pgErr.Message, "app.tenant_id") {
+			return fmt.Errorf("%w: query ran without a usable app.tenant_id (%s)",
+				ErrNoTenantContext, pgErr.Message)
+		}
+		return fmt.Errorf("%w: %s", ErrCheckViolation, pgErr.Message)
 	}
 	return err
 }

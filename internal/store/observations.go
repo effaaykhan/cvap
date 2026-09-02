@@ -118,8 +118,12 @@ var errBadObservationType = errors.New("store: unknown observation_type")
 //
 // submissionID is required and is a real FK to result_submissions: an
 // observation with no submission cannot be deduplicated, and idempotency has to
-// be at the boundary (ADR-026). ingestState is set here at INSERT and is never
-// updated afterwards.
+// be at the boundary (ADR-026). ingestState is set here at INSERT — normally
+// IngestPending, promoted once by the terminal ack. It is a ratchet, not an
+// immutable column: migration 0020's trigger permits pending -> accepted or
+// quarantined and refuses every transition out of a terminal state. An earlier
+// version of this comment said the column was never updated, which was true
+// before 0020 and is the kind of stale invariant a reader trusts.
 func (Observations) Insert(ctx context.Context, c *Conn, o Observation, state IngestState) error {
 	if !ValidObservationType(string(o.Type)) {
 		return fmt.Errorf("%w: %q", errBadObservationType, o.Type)

@@ -102,12 +102,20 @@ func (Leases) Grant(ctx context.Context, c *Conn, jobID, holderID uuid.UUID, ttl
 //	                        another's lease — a fencing bypass that looks like
 //	                        an ordinary liveness message.
 //	state = 'granted'       a lease already marked lost or expired does not come
-//	                        back. This is also what makes the race against
-//	                        reassignment safe: reassignment marks the old row
-//	                        non-granted and inserts the higher epoch in ONE
-//	                        transaction, so a renewal that blocks on the row
-//	                        lock re-evaluates this clause afterwards and matches
+//	                        back. This is what makes reassignment safe against a
+//	                        concurrent renewal: ExpireLeases marks the row
+//	                        'expired', and a renewal that blocks on the row lock
+//	                        re-evaluates this clause afterwards and matches
 //	                        nothing.
+//
+//	                        Note what this does NOT say. Expiry and the new
+//	                        grant are separate transactions — ExpireLeases
+//	                        expires, and a later offerWork grants. An earlier
+//	                        version of this comment claimed they were one, which
+//	                        was a tidier story and false. The property holds
+//	                        anyway, from this clause and the expiry clause
+//	                        below, and it is verified under forced interleaving
+//	                        in TestRenewalRefusedAfterSupersession.
 //	expires_at > now()      an expired lease is not renewable. A reassignment may
 //	                        already be in flight, and extending it would put two
 //	                        scan points on one job.
@@ -147,6 +155,26 @@ func (Leases) Renew(ctx context.Context, c *Conn, jobID uuid.UUID, epoch int64, 
 	return &l, nil
 }
 
+// ReleaseAny ends a lease without a holder check.
+//
+// For Core-side callers only — an operator action or a sweep, where there is no
+// scan point identity to check against. Never reachable from a scan point
+// message: if a wire handler needs this, it needs Release instead.
+func (Leases) ReleaseAny(ctx context.Context, c *Conn, jobID uuid.UUID, epoch int64, state LeaseState) error {
+	const q = `
+		UPDATE job_leases SET state = $4
+		 WHERE tenant_id = $1 AND job_id = $2 AND epoch = $3 AND state = 'granted'`
+
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), jobID, epoch, string(state))
+	if err != nil {
+		return mapError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Current returns the highest epoch for a job, whatever its state.
 //
 // This is what ingest compares a submission's epoch against (ADR-026). It
@@ -173,12 +201,21 @@ func (Leases) Current(ctx context.Context, c *Conn, jobID uuid.UUID) (*Lease, er
 }
 
 // Release ends a lease normally, when its job terminates.
-func (Leases) Release(ctx context.Context, c *Conn, jobID uuid.UUID, epoch int64, state LeaseState) error {
+//
+// holderID is in the predicate for the same reason it is in Renew: job_id and
+// epoch both arrive from the scan point, and without the holder any scan point
+// in the tenant could release another's lease — which fences that scan point off
+// its own job. Renew had this clause from the start; Release and Terminate did
+// not, and a security review proved the gap was reachable.
+//
+// ReleaseAny is the Core-side variant for a caller that is not a scan point.
+func (Leases) Release(ctx context.Context, c *Conn, jobID uuid.UUID, epoch int64, holderID uuid.UUID, state LeaseState) error {
 	const q = `
-		UPDATE job_leases SET state = $4
-		 WHERE tenant_id = $1 AND job_id = $2 AND epoch = $3 AND state = 'granted'`
+		UPDATE job_leases SET state = $5
+		 WHERE tenant_id = $1 AND job_id = $2 AND epoch = $3
+		   AND holder_scan_point = $4 AND state = 'granted'`
 
-	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), jobID, epoch, string(state))
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), jobID, epoch, holderID, string(state))
 	if err != nil {
 		return mapError(err)
 	}

@@ -2,10 +2,12 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
@@ -24,8 +26,25 @@ import (
 // fails and the scan point is told RETRY_LATER for something that will never
 // succeed.
 var (
-	errDuplicate = errors.New("ingest: submission_id already ingested")
-	errMalformed = errors.New("ingest: malformed chunk")
+	errDuplicate      = errors.New("ingest: submission_id already ingested")
+	errMalformed      = errors.New("ingest: malformed chunk")
+	errConflictResume = errors.New("ingest: submission already exists; resume or reject")
+)
+
+// Bounds on wire values that reach typed columns.
+//
+// observed_at is the PARTITION KEY. An unbounded value from the wire chooses the
+// partition, and a row in the default partition blocks creation of the real
+// partition for that month — for the whole deployment, since partitions are not
+// tenant-scoped. Migration 0009 names the failure: "a missing future partition
+// is an ingest outage". One scan point in one tenant could cause it.
+//
+// Rows in the default partition also escape retention-by-partition-drop
+// (ADR-016) and fall outside every bounded read window, so they are never
+// correlated either.
+const (
+	maxObservationAge  = 90 * 24 * time.Hour // matches the retention window
+	maxObservationSkew = time.Hour           // tolerate a scan point's clock drift
 )
 
 // maxObservationsPerChunk bounds one chunk. The wire cap is 4 MB
@@ -73,6 +92,9 @@ type submission struct {
 	quarantined bool
 	reason      string
 
+	// finished is set by the terminal chunk. See the check in handleChunk.
+	finished bool
+
 	// incomplete arrives on EVERY chunk rather than only the final one, because
 	// with resumption Core may process chunks before it ever sees final, and a
 	// flag that arrives last cannot stop the finding pipeline from having
@@ -97,13 +119,16 @@ func (s *IngestService) SubmitResults(stream scanpointv1.Ingest_SubmitResultsSer
 		return status.Error(codes.Internal, "ingest unavailable")
 	}
 
-	var spID uuid.UUID
+	var spID, enrolledZone uuid.UUID
 	if err := s.db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 		sp, err := (store.ScanPoints{}).GetByFingerprint(ctx, c, fingerprint)
 		if err != nil {
 			return err
 		}
 		spID = sp.ID
+		// The zone this scan point was ENROLLED into. Observation.zone_id is
+		// self-asserted and must be validated against it — see toObservations.
+		enrolledZone = sp.ZoneID
 		return nil
 	}); err != nil {
 		return status.Error(codes.Unauthenticated, "certificate is not enrolled")
@@ -129,7 +154,7 @@ func (s *IngestService) SubmitResults(stream scanpointv1.Ingest_SubmitResultsSer
 			return err
 		}
 
-		ack, err := s.handleChunk(ctx, tenant, spID, &sub, chunk)
+		ack, err := s.handleChunk(ctx, tenant, spID, enrolledZone, &sub, chunk)
 		if err != nil {
 			return err
 		}
@@ -140,7 +165,7 @@ func (s *IngestService) SubmitResults(stream scanpointv1.Ingest_SubmitResultsSer
 }
 
 // handleChunk is one chunk, one transaction, one ack.
-func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, spID uuid.UUID, subp **submission, chunk *scanpointv1.ResultChunk) (*scanpointv1.SubmitAck, error) {
+func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, spID, enrolledZone uuid.UUID, subp **submission, chunk *scanpointv1.ResultChunk) (*scanpointv1.SubmitAck, error) {
 	// NOTE: chunk is never logged or formatted. Observation payloads are
 	// customer data and the message is large; logging.Proto is the only path
 	// (ADR-034).
@@ -169,8 +194,28 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 		// from.
 		return malformed(submissionID, "a stream carries one submission"), nil
 	}
+	if sub.finished {
+		// `final` must mean final. Without this the receive loop accepts more
+		// chunks after a terminal ack: the submission is completed twice, and
+		// later chunks land pending and are promoted by the second Complete —
+		// so one submission ends with some observations accepted and some
+		// quarantined. An operator triaging the quarantine queue would see a
+		// quarantined submission whose earlier half is already in the finding
+		// pipeline, which is precisely the split the pending state exists to
+		// prevent.
+		return malformed(submissionID, "the submission already received a final chunk"), nil
+	}
 	if chunk.GetIncomplete() {
 		sub.incomplete = true
+	}
+
+	// M4: every chunk must agree with the first about which job and which epoch
+	// it belongs to. sub.jobID was captured on chunk 0 and never compared, so a
+	// later chunk could name a different job — checkEpoch would evaluate that
+	// one while the ledger row kept the first.
+	if jobID != sub.jobID || chunk.GetLeaseEpoch() != sub.epoch {
+		return malformed(submissionID,
+			"job_id and lease_epoch must not change within a submission"), nil
 	}
 
 	var ack *scanpointv1.SubmitAck
@@ -190,9 +235,38 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 		// earlier chunks passed, and every observation is promoted together at
 		// the terminal ack — which is why they land pending rather than accepted.
 		if !sub.quarantined {
-			if reason := s.checkEpoch(ctx, c, spID, jobID, chunk.GetLeaseEpoch()); reason != "" {
+			reason, err := s.checkEpoch(ctx, c, spID, jobID, chunk.GetLeaseEpoch())
+			if err != nil {
+				return err
+			}
+			if reason != "" {
 				sub.quarantined = true
 				sub.reason = reason
+			}
+		}
+
+		// ====================================================================
+		// The zone MUST, from ingest.proto and from the column comment on
+		// scan_points.zone_id.
+		// ====================================================================
+		//
+		// zone_id is self-asserted, and it is the field on this message where
+		// that matters most: exposure is DERIVED from which vantage points saw
+		// what (ADR-008), so a scan point free to name its own zone could
+		// rewrite the derived exposure of every asset it reports — making an
+		// internet-facing service look internal, or the reverse.
+		//
+		// Quarantined, not dropped and not silently re-zoned. Re-zoning would
+		// hide the attempt; dropping would lose the record. The contract
+		// prescribes exactly this handling, and it is the same reasoning
+		// checkEpoch uses for its own reasons.
+		if !sub.quarantined {
+			for _, o := range chunk.GetObservations() {
+				if o.GetZoneId() != enrolledZone.String() {
+					sub.quarantined = true
+					sub.reason = "observation names a zone this scan point was not enrolled into"
+					break
+				}
 			}
 		}
 
@@ -209,14 +283,46 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 			if _, err := (store.Submissions{}).Begin(ctx, c, submissionID, jobID,
 				chunk.GetLeaseEpoch(), st, sub.incomplete, reason); err != nil {
 				if errors.Is(err, store.ErrConflict) {
-					// Return the sentinel rather than setting the ack and
-					// returning nil. A unique violation ABORTS the transaction,
-					// so committing after one fails — and the scan point would
-					// be told RETRY_LATER, keep its buffer, and retry a
-					// submission that is already ingested, forever.
-					return errDuplicate
+					// ============================================================
+					// A conflict is not automatically a duplicate. It is usually
+					// a RESUMPTION.
+					// ============================================================
+					//
+					// The contract is explicitly resumable: SubmitAck carries
+					// last_chunk_accepted so a scan point that loses its
+					// connection reconnects and continues from there. That new
+					// stream has fresh in-memory state, so chunks == 0 and this
+					// runs — and answering REJECTED_DUPLICATE told the scan point
+					// to clear a buffer for a submission that was never
+					// completed. Its already-stored observations then sat pending
+					// forever: not in the finding pipeline, not on the quarantine
+					// queue, not reachable by anything. Results discarded, which
+					// ADR-026 says never happens, and not surfaced either.
+					//
+					// So: rehydrate from the ledger row and continue. Only a
+					// submission that actually COMPLETED is a duplicate.
+					//
+					// This also makes quarantine sticky ACROSS streams, which it
+					// was not — it merely looked sticky because this path was
+					// unreachable.
+					return errConflictResume
 				}
 				return err
+			}
+		}
+
+		// task_id is constrained by its FK to the TENANT, not to the job, so a
+		// scan point could otherwise attribute observations to another scan
+		// point's job — corrupting the "what did this job touch" record that
+		// ADR-012's operator escalation depends on.
+		if !sub.quarantined {
+			ok, err := s.tasksBelongToJob(ctx, c, jobID, chunk)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				sub.quarantined = true
+				sub.reason = "observation attributed to a task outside the submitted job"
 			}
 		}
 
@@ -293,6 +399,7 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 			}
 		}
 
+		sub.finished = true
 		ack = &scanpointv1.SubmitAck{
 			SubmissionId:      submissionID,
 			LastChunkAccepted: chunk.GetChunkIndex(),
@@ -301,6 +408,13 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 		}
 		return nil
 	})
+
+	// A conflict means the ledger row exists. Whether that is a duplicate or a
+	// resumption is a question about the EXISTING row, and it has to be asked in
+	// a fresh transaction because the unique violation aborted this one.
+	if errors.Is(err, errConflictResume) {
+		return s.resume(ctx, tenant, spID, enrolledZone, sub, chunk)
+	}
 
 	// The two rejections travel as sentinels so their transactions roll back.
 	// Both tell the scan point to CLEAR its buffer without retrying, which is
@@ -340,6 +454,79 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 	return ack, nil
 }
 
+// resume continues a submission whose ledger row already exists.
+//
+// A completed submission is a genuine duplicate: the scan point lost the final
+// ack and retried, and it should clear its buffer. An incomplete one is a
+// resumption, and its state is rehydrated from the row so the stream continues
+// where the previous one stopped.
+func (s *IngestService) resume(ctx context.Context, tenant store.TenantID, spID, enrolledZone uuid.UUID, sub *submission, chunk *scanpointv1.ResultChunk) (*scanpointv1.SubmitAck, error) {
+	var existing *store.Submission
+	if err := s.db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		var err error
+		existing, err = (store.Submissions{}).Get(ctx, c, sub.id)
+		return err
+	}); err != nil {
+		s.log.ErrorContext(ctx, "could not read the existing submission",
+			slog.String("submission_id", sub.id), slog.Any("error", err))
+		return &scanpointv1.SubmitAck{
+			SubmissionId: sub.id,
+			Status:       scanpointv1.SubmitStatus_RETRY_LATER,
+			RetryAfterMs: 2000,
+		}, nil
+	}
+
+	if existing.CompletedAt != nil {
+		return &scanpointv1.SubmitAck{
+			SubmissionId:      sub.id,
+			LastChunkAccepted: chunk.GetChunkIndex(),
+			Status:            scanpointv1.SubmitStatus_REJECTED_DUPLICATE,
+			Detail:            "this submission has already been completed",
+		}, nil
+	}
+
+	// Rehydrate. Quarantine carries across streams: a submission quarantined on
+	// a previous connection stays quarantined, whatever this chunk's epoch says.
+	sub.chunks = existing.ChunksReceived
+	sub.incomplete = existing.Incomplete
+	if existing.Status == store.SubmitAcceptedQuarantined {
+		sub.quarantined = true
+		if existing.QuarantineReason != nil {
+			sub.reason = *existing.QuarantineReason
+		}
+	}
+	if existing.LastChunkAccepted != nil {
+		// The ledger column is a plain integer, so the conversion back to the
+		// wire's uint32 has to be checked rather than asserted. A wrapped value
+		// here is not cosmetic: lastAccepted is what tells a resuming scan point
+		// which chunks it need not re-send, so a negative row read as a huge
+		// uint32 would acknowledge chunks that were never stored and the
+		// observations in them would be lost silently.
+		v := *existing.LastChunkAccepted
+		if v < 0 || v > math.MaxUint32 {
+			return nil, fmt.Errorf("submission ledger holds last_chunk_accepted=%d, "+
+				"which is not a chunk index", v)
+		}
+		sub.lastAccepted = uint32(v)
+		sub.hasAccepted = true
+
+		// Already ingested. Acknowledge rather than re-store: re-inserting would
+		// hit the observation primary key and abort, and the scan point is
+		// resuming from what we told it.
+		if chunk.GetChunkIndex() <= sub.lastAccepted {
+			return &scanpointv1.SubmitAck{
+				SubmissionId:      sub.id,
+				LastChunkAccepted: sub.lastAccepted,
+				Status:            scanpointv1.SubmitStatus_ACCEPTED,
+				Detail:            "already ingested; resume from the next chunk",
+			}, nil
+		}
+	}
+
+	// chunks is now non-zero, so the retry does not re-enter Begin.
+	return s.handleChunk(ctx, tenant, spID, enrolledZone, &sub, chunk)
+}
+
 // checkEpoch returns a quarantine reason, or "" if the submission may proceed.
 //
 // Three ways to be quarantined, and all three are "stored, withheld, surfaced"
@@ -354,28 +541,65 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 //	              holder's job would corrupt that record, and dropping it would
 //	              lose the evidence — the same handling ingest.proto prescribes
 //	              for a zone the scan point was not enrolled into.
-func (s *IngestService) checkEpoch(ctx context.Context, c *store.Conn, spID, jobID uuid.UUID, epoch int64) string {
+func (s *IngestService) checkEpoch(ctx context.Context, c *store.Conn, spID, jobID uuid.UUID, epoch int64) (string, error) {
 	lease, err := (store.Leases{}).Current(ctx, c, jobID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return "no lease has ever been issued for this job"
+			return "no lease has ever been issued for this job", nil
 		}
-		// A read failure is not a quarantine verdict. Returning "" here would
-		// accept on a database error, which is the wrong direction; the caller's
-		// transaction fails and the scan point is told RETRY_LATER.
+		// A read failure is not a quarantine verdict, and it is not an
+		// acceptance either.
+		//
+		// This returned a bare string. The comment claimed a read failure meant
+		// "the caller's transaction fails and the scan point is told
+		// RETRY_LATER" — but the caller only ever tested `reason != ""`, so a
+		// database error read as "epoch fine, carry on" and the submission was
+		// accepted with its fencing check silently skipped. That is the exact
+		// shape of failure ADR-012 exists to prevent, reachable by anything that
+		// makes one read fail while the transaction can still commit.
+		//
+		// The error is returned so it cannot be mistaken for a verdict. The
+		// caller rolls back and answers RETRY_LATER, which is the conservative
+		// direction: a scan point retries, and ADR-026 keeps the results.
 		s.log.ErrorContext(ctx, "epoch check read failed", slog.Any("error", err))
-		return ""
+		return "", fmt.Errorf("epoch check: %w", err)
 	}
 
 	switch {
 	case epoch < lease.Epoch:
-		return fmt.Sprintf("superseded lease epoch: submitted %d, current %d", epoch, lease.Epoch)
+		return fmt.Sprintf("superseded lease epoch: submitted %d, current %d", epoch, lease.Epoch), nil
 	case epoch > lease.Epoch:
-		return fmt.Sprintf("lease epoch %d was never issued (current %d)", epoch, lease.Epoch)
+		return fmt.Sprintf("lease epoch %d was never issued (current %d)", epoch, lease.Epoch), nil
 	case lease.HolderID != spID:
-		return "the job's lease is held by a different scan point"
+		return "the job's lease is held by a different scan point", nil
 	}
-	return ""
+	return "", nil
+}
+
+// tasksBelongToJob checks every task_id in the chunk against the job.
+func (s *IngestService) tasksBelongToJob(ctx context.Context, c *store.Conn, jobID uuid.UUID, chunk *scanpointv1.ResultChunk) (bool, error) {
+	seen := map[string]bool{}
+	for _, o := range chunk.GetObservations() {
+		seen[o.GetTaskId()] = true
+	}
+	if len(seen) == 0 {
+		return true, nil
+	}
+
+	tasks, err := (store.Jobs{}).Tasks(ctx, c, jobID)
+	if err != nil {
+		return false, err
+	}
+	valid := make(map[string]bool, len(tasks))
+	for _, t := range tasks {
+		valid[t.ID.String()] = true
+	}
+	for id := range seen {
+		if !valid[id] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // toObservations converts a chunk, validating the open observation_type string
@@ -403,10 +627,29 @@ func (s *IngestService) toObservations(spID uuid.UUID, submissionID string, chun
 			return nil, fmt.Errorf("observation %d: malformed zone_id", i)
 		}
 
+		// Every one of these has a typed column behind it with a constraint. A
+		// value that fails there kills the whole transaction and the scan point
+		// is told RETRY_LATER — "keep your buffer and retry" for input that can
+		// never succeed, forever. REJECTED_MALFORMED is the correct answer and
+		// the path already exists; it just was not reached.
 		conf := float64(o.GetConfidence())
-		observed := time.Unix(o.GetObservedAtUnix(), 0).UTC()
-		if o.GetObservedAtUnix() == 0 {
-			observed = s.now().UTC()
+		if math.IsNaN(conf) || math.IsInf(conf, 0) || conf < 0 || conf > 1 {
+			return nil, fmt.Errorf("observation %d: confidence out of range", i)
+		}
+
+		if len(o.GetPayload()) == 0 || !json.Valid(o.GetPayload()) {
+			// payload is jsonb NOT NULL, and an unset bytes field is "" — which
+			// is not valid JSON.
+			return nil, fmt.Errorf("observation %d: payload is not valid JSON", i)
+		}
+
+		observed := s.now().UTC()
+		if ts := o.GetObservedAtUnix(); ts != 0 {
+			observed = time.Unix(ts, 0).UTC()
+			now := s.now().UTC()
+			if observed.Before(now.Add(-maxObservationAge)) || observed.After(now.Add(maxObservationSkew)) {
+				return nil, fmt.Errorf("observation %d: observed_at outside the retention window", i)
+			}
 		}
 
 		out = append(out, store.Observation{

@@ -1,0 +1,2 @@
+- [Engine import guard bypasses](bypass_engine_import_guard.md) — six confirmed ways an engine reaches the network past `internal/engines/import_policy_test.go`
+- [Dispatch scope and kill gaps](dispatch_scope_and_kill_gaps.md) — zero scope-enforcement sites, droppable kill switch, `Task.fragile` never set; check first on dispatch/scanpoint diffs

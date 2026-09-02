@@ -72,25 +72,53 @@ connects — `internal/store/testdata/app_role.sql` in dev and CI, provisioning 
 `APP_DATABASE_URL` is that connection string; `DATABASE_URL` is the migration role and must
 never be used by the running application.
 
-## Deliberate exceptions, both narrow
+## Deliberate exceptions, all narrow
 
 - **`DB.resolveTenant`** (ADR-031) maps a scan point certificate fingerprint to a tenant with
   no tenant context, because deriving the tenant is its whole job. It is unexported, returns
   only a `TenantID`, and must never return a connection. The narrowness lives in the database:
   `tenant_for_scan_point` is `SECURITY DEFINER`, returns one uuid, resolves only enrollable
   statuses, and returns NULL rather than raising so it is not an enrolment oracle.
-- **There is no unscoped path**, deliberately. The knowledge tables carry no `tenant_id`, so
-  they would need one — but nothing in this package reads them yet, and an escape hatch with
-  no caller is how escape hatches get misused. The session that needs `rules` on the finding
-  read path should make the case then.
+- **`DB.ActiveTenantIDs`** (ADR-036) lists active tenant ids for the dispatch sweeper, and is
+  the only unscoped read in the package. A sweep has no tenant to inherit — the thing it reacts
+  to is a scan point that stopped talking — and `ExpireLeases` had no caller at all until it
+  existed, so ADR-012's at-most-once rule was written down and never enforced. It returns
+  `[]TenantID` and nothing wider, takes no filter, and is Core-side only: nothing reachable
+  from a wire handler may call it. The narrowness is in the database — `active_tenant_ids()` is
+  `SECURITY DEFINER`, `STABLE`, parameterless and returns `SETOF uuid`.
+
+There is no *general* unscoped path, deliberately. The knowledge tables carry no `tenant_id`,
+so they would need one — but nothing in this package reads them yet, and an escape hatch with
+no caller is how escape hatches get misused. The session that needs `rules` on the finding read
+path should make the case then, the way ADR-036 made it for the sweep.
 
 ## Observations
 
-`ingest_state` is written at INSERT and never updated; migration 0016 grants
-`UPDATE (asset_id)` and nothing wider, so the column the finding pipeline filters on cannot
-be cleared by the pipeline. Every read path filters `ingest_state = 'accepted'` in the query
-rather than leaving it to the caller — a filter the caller can forget is one that will be
-forgotten. `ListQuarantined` is the single deliberate exception, named so.
+`ingest_state` is written at INSERT as `pending` and promoted **once** — to `accepted` or
+`quarantined` — by the terminal ack, in the same transaction as the final epoch check. It is a
+**ratchet**, not a flag: migration 0020 grants `UPDATE (asset_id, ingest_state)` and installs a
+`BEFORE UPDATE` trigger that permits `pending → anything` and refuses every transition out of a
+terminal state. A grant cannot express "ingest may set this and the pipeline may not" — both
+run as `cvap_app` — but a ratchet can, because un-quarantining is not an operation anything
+legitimately performs.
+
+Landing `pending` rather than `accepted` is what closes the mid-upload window: a submission
+arrives in chunks and its epoch can be superseded partway, so with rows landing `accepted`
+chunk 0 is readable before chunk 5 reveals the supersession. The pipeline filters `accepted`,
+so an in-flight submission is invisible to it *without the pipeline knowing submissions exist*.
+
+An abandoned upload leaves rows `pending` forever. That is correct — the results were never
+attested complete — and it needs a **metric**, not a cleanup: `Observations.PendingOlderThan`
+is that query.
+
+Every read path filters `ingest_state = 'accepted'` in the query rather than leaving it to the
+caller — a filter the caller can forget is one that will be forgotten. `ListQuarantined` and
+`PendingOlderThan` are the two deliberate exceptions, named so.
+
+`submission_id` comes from the wire and is therefore attacker-chosen. It is unique **per
+tenant** (migration 0022), never globally: a global unique let one tenant collide with
+another's id, which both discarded results ADR-026 says are always stored and answered a
+cross-tenant existence question.
 
 Reads over `observations` require a bounded time window. It is partitioned by `observed_at`,
 so a query without one scans every live partition.

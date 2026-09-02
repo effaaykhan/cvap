@@ -104,7 +104,7 @@ BEGIN
         RETURNING zone_id INTO v_zone;
 
     INSERT INTO network_ranges (tenant_id, zone_id, cidr, is_authorized)
-        VALUES (p_tenant, v_zone, '10.0.0.0/24', true);
+        VALUES (p_tenant, v_zone, '192.0.2.0/24', true);
 
     INSERT INTO scan_points (tenant_id, zone_id, hostname, agent_version,
                              protocol_version, status, cert_fingerprint, last_heartbeat)
@@ -120,7 +120,7 @@ BEGIN
         RETURNING policy_id INTO v_policy;
 
     INSERT INTO policy_scope_rules (tenant_id, policy_id, effect, match_type, match_value)
-        VALUES (p_tenant, v_policy, 'allow', 'cidr', '10.0.0.0/24');
+        VALUES (p_tenant, v_policy, 'allow', 'cidr', '192.0.2.0/24');
 
     INSERT INTO credential_profiles (tenant_id, name, cred_type, secret_ref)
         VALUES (p_tenant, 'fixture-cred-' || p_tag, 'ssh', 'vault://fixture/' || p_tag)
@@ -135,7 +135,7 @@ BEGIN
 
     INSERT INTO scan_targets (tenant_id, scan_id, target_type, target_value,
                               authorization_verified, verified_at)
-        VALUES (p_tenant, v_scan, 'cidr', '10.0.0.0/24', true, now())
+        VALUES (p_tenant, v_scan, 'cidr', '192.0.2.0/24', true, now())
         RETURNING target_id INTO v_target;
 
     INSERT INTO scan_jobs (tenant_id, scan_id, scan_point_id, engine, status, reassign_safe)
@@ -146,7 +146,7 @@ BEGIN
         VALUES (p_tenant, v_job, 1, v_point, 'released', now() + interval '1 minute');
 
     INSERT INTO scan_tasks (tenant_id, job_id, target_id, task_target, status, progress_pct)
-        VALUES (p_tenant, v_job, v_target, '10.0.0.5', 'completed', 100)
+        VALUES (p_tenant, v_job, v_target, '192.0.2.5', 'completed', 100)
         RETURNING task_id INTO v_task;
 
     INSERT INTO credential_grants (tenant_id, credential_profile_id, job_id, cred_kind,
@@ -165,7 +165,7 @@ BEGIN
         RETURNING asset_id INTO v_asset2;
 
     INSERT INTO asset_addresses (tenant_id, asset_id, ip_address, mac_address)
-        VALUES (p_tenant, v_asset, '10.0.0.5', '02:00:00:00:00:01');
+        VALUES (p_tenant, v_asset, '192.0.2.5', '02:00:00:00:00:01');
 
     INSERT INTO asset_identity_keys (tenant_id, asset_id, key_type, key_value, strength,
                                      merge_evidence_observation, merge_evidence_payload)
@@ -182,8 +182,11 @@ BEGIN
                                      relationship_type, confidence)
         VALUES (p_tenant, v_asset, v_asset2, 'routes_to', 0.700);
 
-    -- Result submission, then observations. One accepted, one quarantined, so
-    -- the ingest_state filter has something to filter in both directions.
+    -- Result submission, then observations. One in each ingest_state, so the
+    -- RLS sweep covers all three and the ingest_state filter has something to
+    -- filter in every direction. pending is the state a row LANDS in and the one
+    -- the finding pipeline must not see; a fixture set without it would let a
+    -- read path that forgot its filter still look correct.
     INSERT INTO result_submissions (submission_id, tenant_id, job_id, lease_epoch,
                                     status, chunks_received, last_chunk_accepted, incomplete,
                                     termination_reason)
@@ -200,6 +203,15 @@ BEGIN
                               observed_at, ingest_state)
         VALUES (gen_random_uuid(), p_tenant, v_sub, v_task, v_point, v_zone, NULL,
                 'banner', '{"banner":"fixture"}'::jsonb, 0.500, now(), 'quarantined');
+
+    -- Still pending: an upload that never sent its terminal chunk. Invisible to
+    -- every accepted-filtered read, and what Observations.PendingOlderThan
+    -- counts for the health surface.
+    INSERT INTO observations (observation_id, tenant_id, submission_id, task_id, scan_point_id,
+                              zone_id, asset_id, observation_type, payload, confidence,
+                              observed_at, ingest_state)
+        VALUES (gen_random_uuid(), p_tenant, v_sub, v_task, v_point, v_zone, NULL,
+                'service', '{"port":22}'::jsonb, 0.250, now(), 'pending');
 
     -- Findings and everything hanging off them.
     INSERT INTO findings (tenant_id, asset_id, rule_id, vuln_def_id, source, dedup_key,
@@ -257,8 +269,11 @@ BEGIN
 
     -- Kill switch and one acknowledgement. Both tenant-scoped, so both must
     -- carry rows or case 1's sweep proves nothing for them (ADR-024).
-    INSERT INTO kill_switches (tenant_id, scope, issued_by, reason)
-        VALUES (p_tenant, 'tenant', v_user, 'fixture: halt everything')
+    -- RESOLVED. A live kill in the fixtures is not a fixture, it is a fleet
+    -- outage: Live() would return it on every reconnect and Jobs.Claim would
+    -- refuse to assign anything for the life of any database loaded with these.
+    INSERT INTO kill_switches (tenant_id, scope, issued_by, reason, resolved_at)
+        VALUES (p_tenant, 'tenant', v_user, 'fixture: already resolved', now())
         RETURNING kill_id INTO v_kill;
 
     INSERT INTO kill_acks (tenant_id, kill_id, scan_point_id, tasks_halted)

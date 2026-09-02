@@ -18,6 +18,34 @@
 //
 // Results go to Ingest and rule pack bodies go to RulePacks. Both are bulk, and
 // bulk on this stream head-of-line blocks job assignment behind it (ADR-005).
+//
+// # Registration requirements
+//
+// When this service is registered on a gRPC server, three things are mandatory
+// and none has a safe default:
+//
+//	tls.RequireAndVerifyClientCert   PeerFingerprint hashes the peer's leaf, and
+//	                                 a certificate is PUBLIC. Under
+//	                                 RequireAnyClientCert anyone who has seen a
+//	                                 scan point's certificate can present it and
+//	                                 become that scan point.
+//	keepalive.ServerParameters       MaxConnectionAge and MaxConnectionAgeGrace.
+//	                                 A peer that answers PINGs but never reads
+//	                                 its stream cannot be released by anything
+//	                                 else; sendLoop returning frees the handler,
+//	                                 and only the transport can free the socket.
+//	Sweeper.Run in a goroutine        NOT optional, and not a background nicety.
+//	                                 ExpireLeases is where ADR-012's at-most-once
+//	                                 rule lives, and a security review found it
+//	                                 had no caller: a scan point that died left
+//	                                 its job 'running' forever, never retried when
+//	                                 retry was safe and never escalated when it
+//	                                 was not. Registering Dispatch without the
+//	                                 sweeper puts that back. Same for
+//	                                 HeartbeatTimeout, which nothing else
+//	                                 compares against.
+//
+// cmd/cvap-core registers nothing yet. When it does, all three go in together.
 package dispatch
 
 import (
@@ -85,11 +113,15 @@ type session struct {
 	// flow control at all.
 	backpressure scanpointv1.BackpressureState
 
-	// leases maps job id to the epoch this stream believes it holds, so a
-	// renewal can be answered without trusting the message's own claim about
-	// which job it is renewing.
-	mu     sync.Mutex
-	leases map[uuid.UUID]int64
+	// mu guards backpressure, which the receive loop writes and the pump reads.
+	//
+	// There was a leases map here, documented as existing "so a renewal can be
+	// answered without trusting the message's own claim". It was written and
+	// deleted and never read: the actual defence is the holder_scan_point
+	// predicate in Leases.Renew, which is sound. A comment describing a defence
+	// the code does not implement is worse than no comment, because the next
+	// author trusts it.
+	mu sync.Mutex
 }
 
 // Connect is the long-lived bidirectional stream.
@@ -114,7 +146,7 @@ func (s *Service) Connect(stream scanpointv1.Dispatch_ConnectServer) error {
 		return status.Error(codes.Internal, "dispatch unavailable")
 	}
 
-	sess := &session{tenant: tenant, leases: map[uuid.UUID]int64{}}
+	sess := &session{tenant: tenant}
 
 	// The handshake must be first. A scan point that starts sending heartbeats
 	// before Hello has not negotiated a version, and ADR-022 wants an
@@ -131,55 +163,86 @@ func (s *Service) Connect(stream scanpointv1.Dispatch_ConnectServer) error {
 		return err
 	}
 
-	// One writer. gRPC streams are not safe for concurrent Send, and the
-	// alternative — a mutex around every send site — is the kind of thing that
-	// is correct until someone adds a send site.
+	// ========================================================================
+	// The send loop runs on the HANDLER goroutine. That inversion is the fix
+	// for a proven deadlock, not a style choice.
+	// ========================================================================
+	//
+	// Previously the writer was a child goroutine and the handler ran receive,
+	// then cancel(), then wg.Wait(). A scan point that half-closes and stops
+	// reading wedges that permanently: the transport window fills, the writer
+	// parks inside stream.Send, receive returns io.EOF, and cancel() does
+	// nothing to a goroutine already blocked in Send — because grpc-go's write
+	// quota waits on the STREAM's done channel, which closes when the handler
+	// returns. The handler is in wg.Wait(). Circular, and it leaks two
+	// goroutines, the session and the RPC per connection, with markOffline never
+	// running. N connections from one enrolled scan point is a control-plane DoS.
+	//
+	// With the send loop on the handler, returning from it IS what unblocks
+	// Send, so there is no cycle. receive runs in the child and is unblocked by
+	// cancelling its context, which does work: Recv selects on the context.
+	//
+	// A transport-level backstop is still required when this service is
+	// registered — keepalive.ServerParameters{MaxConnectionAge,
+	// MaxConnectionAgeGrace} is the only thing that force-closes a peer that
+	// answers PINGs but never reads. Noted in the package doc.
 	out := make(chan *scanpointv1.CoreMessage, sendQueue)
+	urgent := make(chan *scanpointv1.CoreMessage, sendQueue)
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	sendErr := make(chan error, 1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-streamCtx.Done():
-				return
-			case msg := <-out:
-				if err := stream.Send(msg); err != nil {
-					select {
-					case sendErr <- err:
-					default:
-					}
-					cancel()
-					return
-				}
-			}
-		}
-	}()
+	recvErr := make(chan error, 1)
+	go func() { recvErr <- s.receive(streamCtx, stream, sess, out) }()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		s.pump(streamCtx, sess, out)
-	}()
+	go s.pump(streamCtx, sess, out, urgent)
 
-	err = s.receive(streamCtx, stream, sess, out)
+	err = s.sendLoop(streamCtx, stream, out, urgent, recvErr)
 	cancel()
-	wg.Wait()
-
-	select {
-	case serr := <-sendErr:
-		if err == nil {
-			err = serr
-		}
-	default:
-	}
 
 	s.markOffline(context.WithoutCancel(ctx), sess)
 	return err
+}
+
+// sendLoop is the single writer, and it owns the handler goroutine.
+//
+// It returns when receive reports the stream ended, when a Send fails, or when
+// the context is cancelled — and returning is what releases a peer that has
+// stopped reading.
+func (s *Service) sendLoop(ctx context.Context, stream scanpointv1.Dispatch_ConnectServer, out, urgent <-chan *scanpointv1.CoreMessage, recvErr <-chan error) error {
+	send := func(msg *scanpointv1.CoreMessage) error { return stream.Send(msg) }
+
+	for {
+		// Drain urgent to empty first. A kill behind a queue of assignments is
+		// a kill that misses ADR-024's bound.
+		select {
+		case msg := <-urgent:
+			if err := send(msg); err != nil {
+				return err
+			}
+			continue
+		default:
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+
+		case err := <-recvErr:
+			// The scan point closed, or the receive side failed. Returning
+			// here is what unblocks any peer that has stopped reading.
+			return err
+
+		case msg := <-urgent:
+			if err := send(msg); err != nil {
+				return err
+			}
+
+		case msg := <-out:
+			if err := send(msg); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 // handshake answers Hello and records what the scan point declared.
@@ -331,9 +394,6 @@ func (s *Service) onLeaseRenewal(ctx context.Context, sess *session, r *scanpoin
 		return nil
 	})
 	if err == nil {
-		sess.mu.Lock()
-		sess.leases[jobID] = granted.Epoch
-		sess.mu.Unlock()
 		s.send(ctx, out, leaseGrant(r.GetJobId(), granted.Epoch, granted.ExpiresAt.Unix(),
 			scanpointv1.LeaseState_LEASE_STATE_GRANTED, ""))
 		return
@@ -364,10 +424,6 @@ func (s *Service) onLeaseRenewal(ctx context.Context, sess *session, r *scanpoin
 		return nil
 	})
 
-	sess.mu.Lock()
-	delete(sess.leases, jobID)
-	sess.mu.Unlock()
-
 	s.send(ctx, out, leaseGrant(r.GetJobId(), r.GetLeaseEpoch(), 0, state, detail))
 }
 
@@ -377,7 +433,7 @@ func (s *Service) onProgress(ctx context.Context, sess *session, p *scanpointv1.
 		return
 	}
 	if err := s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
-		return (store.Jobs{}).MarkRunning(ctx, c, jobID)
+		return (store.Jobs{}).MarkRunning(ctx, c, jobID, sess.spID)
 	}); err != nil && !errors.Is(err, store.ErrNotFound) {
 		s.log.WarnContext(ctx, "progress write failed", slog.Any("error", err))
 	}
@@ -392,11 +448,11 @@ func (s *Service) onTerminal(ctx context.Context, sess *session, t *scanpointv1.
 
 	reason := terminationReason(t.GetReason())
 	err = s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
-		if err := (store.Jobs{}).Terminate(ctx, c, jobID, reason); err != nil &&
+		if err := (store.Jobs{}).Terminate(ctx, c, jobID, sess.spID, reason); err != nil &&
 			!errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-		if err := (store.Leases{}).Release(ctx, c, jobID, t.GetLeaseEpoch(), store.LeaseReleased); err != nil &&
+		if err := (store.Leases{}).Release(ctx, c, jobID, t.GetLeaseEpoch(), sess.spID, store.LeaseReleased); err != nil &&
 			!errors.Is(err, store.ErrNotFound) {
 			return err
 		}
@@ -428,9 +484,6 @@ func (s *Service) onTerminal(ctx context.Context, sess *session, t *scanpointv1.
 		s.log.ErrorContext(ctx, "terminal write failed", slog.Any("error", err))
 	}
 
-	sess.mu.Lock()
-	delete(sess.leases, jobID)
-	sess.mu.Unlock()
 }
 
 func (s *Service) onBackpressure(ctx context.Context, sess *session, b *scanpointv1.Backpressure) {
@@ -457,7 +510,7 @@ func (s *Service) onKillAck(ctx context.Context, sess *session, a *scanpointv1.K
 }
 
 // pump is the outbound loop: offer work, propagate kills.
-func (s *Service) pump(ctx context.Context, sess *session, out chan<- *scanpointv1.CoreMessage) {
+func (s *Service) pump(ctx context.Context, sess *session, out, urgent chan<- *scanpointv1.CoreMessage) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
@@ -472,7 +525,7 @@ func (s *Service) pump(ctx context.Context, sess *session, out chan<- *scanpoint
 
 		// Kills first, always. A kill switch queued behind job assignment is a
 		// kill switch that misses its 10-second bound (ADR-024).
-		s.propagateKills(ctx, sess, out, sentKills)
+		s.propagateKills(ctx, sess, urgent, sentKills)
 
 		sess.mu.Lock()
 		bp := sess.backpressure
@@ -493,7 +546,7 @@ func (s *Service) pump(ctx context.Context, sess *session, out chan<- *scanpoint
 	}
 }
 
-func (s *Service) propagateKills(ctx context.Context, sess *session, out chan<- *scanpointv1.CoreMessage, sent map[uuid.UUID]bool) {
+func (s *Service) propagateKills(ctx context.Context, sess *session, urgent chan<- *scanpointv1.CoreMessage, sent map[uuid.UUID]bool) {
 	var kills []store.KillSwitch
 	if err := s.db.Read(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
@@ -507,12 +560,22 @@ func (s *Service) propagateKills(ctx context.Context, sess *session, out chan<- 
 		if sent[k.ID] {
 			continue
 		}
-		sent[k.ID] = true
-		s.send(ctx, out, &scanpointv1.CoreMessage{
+		// Mark sent only if it was actually QUEUED. Marking before the attempt
+		// meant a kill dropped by a full queue was never re-offered on that
+		// stream — and the scan point with a full outbound queue is by
+		// definition the one not draining messages, which is the one that most
+		// needs halting. Left unmarked, the next tick tries again.
+		if s.trySend(urgent, &scanpointv1.CoreMessage{
 			Msg: &scanpointv1.CoreMessage_Kill{
 				Kill: &scanpointv1.KillSwitch{KillId: k.ID.String()},
 			},
-		})
+		}) {
+			sent[k.ID] = true
+			continue
+		}
+		s.log.WarnContext(ctx, "kill switch could not be queued; will retry next tick",
+			slog.String("scan_point_id", sess.spID.String()),
+			slog.String("kill_id", k.ID.String()))
 	}
 }
 
@@ -568,13 +631,15 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 				wire.Tasks = append(wire.Tasks, &scanpointv1.Task{
 					TaskId: t.ID.String(),
 					Target: t.TaskTarget,
+					// ADR-024 control 3. Without this the runtime is told
+					// fragile_rate_pps on the constraints and never told which
+					// task it applies to, so a fragile device is scanned at the
+					// per-target rate — a ceiling with no subject.
+					Fragile: t.Fragile,
 				})
 			}
 			assignments = append(assignments, wire)
 
-			sess.mu.Lock()
-			sess.leases[j.ID] = lease.Epoch
-			sess.mu.Unlock()
 		}
 		return nil
 	})
@@ -611,15 +676,30 @@ func (s *Service) markOffline(ctx context.Context, sess *session) {
 // the goroutine that also propagates kill switches, and a full queue already
 // means this scan point is not acting on what it has been sent.
 func (s *Service) send(ctx context.Context, out chan<- *scanpointv1.CoreMessage, msg *scanpointv1.CoreMessage) {
+	// No ctx.Done() case: Go picks uniformly among ready cases, so a select with
+	// both `out <- msg` and `<-ctx.Done()` can take the cancellation branch and
+	// drop a message even when the queue has room. `default` already makes this
+	// non-blocking, which is all it needed.
 	select {
 	case out <- msg:
-	case <-ctx.Done():
 	default:
 		// logging.Proto, never slog.Any: CoreMessage's oneof can carry a
 		// CredentialGrant, whose generated String() renders the material in
 		// full (ADR-034, internal/logging/CLAUDE.md).
 		s.log.WarnContext(ctx, "outbound queue full; message dropped",
 			logging.ProtoAttr("dropped", msg))
+	}
+}
+
+// trySend queues without blocking and reports whether it succeeded, so a caller
+// that must retry — the kill switch — can tell the difference between sent and
+// dropped. send() cannot: it drops silently by design.
+func (s *Service) trySend(ch chan<- *scanpointv1.CoreMessage, msg *scanpointv1.CoreMessage) bool {
+	select {
+	case ch <- msg:
+		return true
+	default:
+		return false
 	}
 }
 

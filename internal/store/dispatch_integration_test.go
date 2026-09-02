@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -30,15 +31,32 @@ func seedJob(t *testing.T, db *store.DB, tenant store.TenantID, scanPointID uuid
 			 RETURNING scan_id`, tid, policyID).Scan(&scanID); err != nil {
 			return err
 		}
+		// An AUTHORISED target, because Jobs.Claim now refuses a job whose tasks
+		// do not trace to one. That refusal is the point — migration 0005 says
+		// dispatch must not decompose an unauthorised target, and the old seed
+		// created a task with a NULL target_id, so the test was demonstrating
+		// the gap rather than the behaviour.
+		var targetID uuid.UUID
+		if err := c.QueryRow(ctx,
+			`INSERT INTO scan_targets (tenant_id, scan_id, target_type, target_value,
+			                           authorization_verified, verified_at)
+			 VALUES ($1,$2,'cidr','192.0.2.0/24',true,now()) RETURNING target_id`,
+			tid, scanID).Scan(&targetID); err != nil {
+			return err
+		}
 		if err := c.QueryRow(ctx,
 			`INSERT INTO scan_jobs (tenant_id, scan_id, engine, reassign_safe)
 			 VALUES ($1,$2,'discovery',$3) RETURNING job_id`,
 			tid, scanID, reassignSafe).Scan(&jobID); err != nil {
 			return err
 		}
+		// 192.0.2.0/24 is TEST-NET-1: reserved for documentation, never routed,
+		// and already in lab/scope.txt. A fixture target outside lab scope is
+		// inert today and a live target the moment a runtime exists.
 		_, err := c.Exec(ctx,
-			`INSERT INTO scan_tasks (tenant_id, job_id, task_target) VALUES ($1,$2,'10.0.0.1')`,
-			tid, jobID)
+			`INSERT INTO scan_tasks (tenant_id, job_id, target_id, task_target)
+			 VALUES ($1,$2,$3,'192.0.2.1')`,
+			tid, jobID, targetID)
 		return err
 	}); err != nil {
 		t.Fatalf("seed job: %v", err)
@@ -60,7 +78,11 @@ func seedScanPoint(t *testing.T, db *store.DB, tenant store.TenantID) uuid.UUID 
 			return err
 		}
 		spID = sp.ID
-		if err := (store.ScanPoints{}).SetStatus(ctx, c, sp.ID, store.ScanPointOnline); err != nil {
+		// Heartbeat rather than SetStatus: it sets last_heartbeat as well as
+		// status, and Unacknowledged keys on the heartbeat. A scan point with a
+		// status of 'online' and no heartbeat has never actually been reachable,
+		// which is exactly the case that query now excludes.
+		if err := (store.ScanPoints{}).Heartbeat(ctx, c, sp.ID, time.Now()); err != nil {
 			return err
 		}
 		_, err = (store.ScanPoints{}).DeclareCapability(ctx, c, sp.ID, store.EngineDiscovery, "0.1.0", true)
@@ -297,7 +319,7 @@ func TestRenewalRefusedAfterSupersession(t *testing.T) {
 	// transaction — which is what makes a concurrent renewal fail.
 	var epoch2 int64
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		if err := (store.Leases{}).Release(ctx, c, jobID, epoch1, store.LeaseLost); err != nil {
+		if err := (store.Leases{}).ReleaseAny(ctx, c, jobID, epoch1, store.LeaseLost); err != nil {
 			return err
 		}
 		l, err := (store.Leases{}).Grant(ctx, c, jobID, spB, store.LeaseTTL)
@@ -398,7 +420,7 @@ func TestEpochsAreMonotonic(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 			if last > 0 {
-				if err := (store.Leases{}).Release(ctx, c, jobID, last, store.LeaseExpired); err != nil {
+				if err := (store.Leases{}).ReleaseAny(ctx, c, jobID, last, store.LeaseExpired); err != nil {
 					return err
 				}
 			}
@@ -496,4 +518,290 @@ func TestKillAcknowledgementIsMeasurable(t *testing.T) {
 		t.Fatal(err)
 	}
 
+}
+
+// ============================================================================
+// Regressions from the scan-safety audit.
+// ============================================================================
+
+// A live kill switch stops job assignment.
+//
+// Without this, propagateKills halts the fleet's in-flight work and offerWork
+// hands out fresh jobs two seconds later, forever — Core telling scan points to
+// stop and then giving them something new to do. Found by scan-safety-auditor.
+func TestLiveKillSwitchStopsAssignment(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	tenant := newTenant(t, db, "killstop-"+uuid.NewString()[:8])
+	spID := seedScanPoint(t, db, tenant)
+	seedJob(t, db, tenant, spID, true)
+
+	var killID uuid.UUID
+	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		k, err := (store.KillSwitches{}).Issue(ctx, c, store.KillTenant, nil, nil, nil, "halt")
+		if err != nil {
+			return err
+		}
+		killID = k.ID
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10)
+		if err != nil {
+			return err
+		}
+		if len(jobs) != 0 {
+			t.Errorf("claimed %d jobs while a kill switch was live", len(jobs))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// And resolving it lets work flow again — a control with no off switch is
+	// an outage with extra steps.
+	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		return (store.KillSwitches{}).Resolve(ctx, c, killID)
+	}); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10)
+		if err != nil {
+			return err
+		}
+		if len(jobs) != 1 {
+			t.Errorf("claimed %d jobs after the kill was resolved, want 1", len(jobs))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Dispatch refuses a job whose target is not authorised.
+//
+// Migration 0005 says outright that dispatch must not decompose a target where
+// authorization_verified is false, and execution-plan §8 risk 6 calls an
+// unauthorised scan legal exposure. Dispatch is the last Core-side component
+// before a target leaves Core, so if the check is not here it is nowhere.
+func TestUnauthorisedTargetsAreNeverAssigned(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	tenant := newTenant(t, db, "authz-"+uuid.NewString()[:8])
+	spID := seedScanPoint(t, db, tenant)
+
+	var unverified, orphan uuid.UUID
+	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		tid := c.Tenant().UUID()
+		var policyID, scanID uuid.UUID
+		if err := c.QueryRow(ctx,
+			`INSERT INTO scan_policies (tenant_id, name) VALUES ($1,$2) RETURNING policy_id`,
+			tid, "authz-"+uuid.NewString()[:8]).Scan(&policyID); err != nil {
+			return err
+		}
+		if err := c.QueryRow(ctx,
+			`INSERT INTO scans (tenant_id, policy_id, scan_type) VALUES ($1,$2,'discovery')
+			 RETURNING scan_id`, tid, policyID).Scan(&scanID); err != nil {
+			return err
+		}
+
+		// A target explicitly NOT authorised.
+		var targetID uuid.UUID
+		if err := c.QueryRow(ctx,
+			`INSERT INTO scan_targets (tenant_id, scan_id, target_type, target_value,
+			                           authorization_verified)
+			 VALUES ($1,$2,'cidr','192.0.2.0/24',false) RETURNING target_id`,
+			tid, scanID).Scan(&targetID); err != nil {
+			return err
+		}
+		if err := c.QueryRow(ctx,
+			`INSERT INTO scan_jobs (tenant_id, scan_id, engine, reassign_safe)
+			 VALUES ($1,$2,'discovery',true) RETURNING job_id`,
+			tid, scanID).Scan(&unverified); err != nil {
+			return err
+		}
+		if _, err := c.Exec(ctx,
+			`INSERT INTO scan_tasks (tenant_id, job_id, target_id, task_target)
+			 VALUES ($1,$2,$3,'192.0.2.9')`, tid, unverified, targetID); err != nil {
+			return err
+		}
+
+		// A task with no target at all: no authorisation record exists, so
+		// there is nothing that could have been verified.
+		if err := c.QueryRow(ctx,
+			`INSERT INTO scan_jobs (tenant_id, scan_id, engine, reassign_safe)
+			 VALUES ($1,$2,'discovery',true) RETURNING job_id`,
+			tid, scanID).Scan(&orphan); err != nil {
+			return err
+		}
+		_, err := c.Exec(ctx,
+			`INSERT INTO scan_tasks (tenant_id, job_id, task_target) VALUES ($1,$2,'192.0.2.10')`,
+			tid, orphan)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10)
+		if err != nil {
+			return err
+		}
+		for _, j := range jobs {
+			if j.ID == unverified {
+				t.Error("assigned a job whose target has authorization_verified = false")
+			}
+			if j.ID == orphan {
+				t.Error("assigned a job whose task traces to no target at all")
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fragile reaches the wire. ADR-024 control 3 caps rate on a fragile device
+// regardless of policy, and fragile_rate_pps on the constraints is decorative
+// unless the runtime is told which task it applies to.
+func TestFragileTravelsFromAssetToTask(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	tenant := newTenant(t, db, "fragile-"+uuid.NewString()[:8])
+	spID := seedScanPoint(t, db, tenant)
+	jobID := seedJob(t, db, tenant, spID, true)
+
+	// Before: no asset, so not fragile — the permissive default, chosen because
+	// treating unknown as fragile would throttle every discovery scan.
+	if err := db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		tasks, err := (store.Jobs{}).Tasks(ctx, c, jobID)
+		if err != nil {
+			return err
+		}
+		if len(tasks) != 1 || tasks[0].Fragile {
+			t.Errorf("a task with no asset reports fragile=%v, want false", tasks[0].Fragile)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Attach a fragile asset, as correlation would.
+	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		a, err := (store.Assets{}).Create(ctx, c, store.Asset{Hostname: "delicate", Fragile: true})
+		if err != nil {
+			return err
+		}
+		tasks, err := (store.Jobs{}).Tasks(ctx, c, jobID)
+		if err != nil {
+			return err
+		}
+		_, err = c.Exec(ctx,
+			`UPDATE scan_tasks SET asset_id = $3 WHERE tenant_id = $1 AND task_id = $2`,
+			c.Tenant().UUID(), tasks[0].ID, a.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		tasks, err := (store.Jobs{}).Tasks(ctx, c, jobID)
+		if err != nil {
+			return err
+		}
+		if !tasks[0].Fragile {
+			t.Error("a task targeting a fragile asset reports fragile=false; the rate cap " +
+				"would never reach the send path")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The kill bound is measured, not just observed. ADR-024: "a 10-second bound
+// Core cannot measure is not a control" — a set of who is missing does not
+// measure a bound.
+func TestKillAckLatencyIsMeasured(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	tenant := newTenant(t, db, "latency-"+uuid.NewString()[:8])
+	spID := seedScanPoint(t, db, tenant)
+
+	var killID uuid.UUID
+	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		k, err := (store.KillSwitches{}).Issue(ctx, c, store.KillTenant, nil, nil, nil, "halt")
+		if err != nil {
+			return err
+		}
+		killID = k.ID
+		return (store.KillSwitches{}).Ack(ctx, c, killID, spID, 1)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		lat, err := (store.KillSwitches{}).AckLatency(ctx, c, killID)
+		if err != nil {
+			return err
+		}
+		if len(lat) != 1 {
+			t.Fatalf("%d latencies, want 1", len(lat))
+		}
+		if lat[0].ScanPointID != spID {
+			t.Errorf("latency reported for %s, want %s", lat[0].ScanPointID, spID)
+		}
+		if lat[0].Latency > 10*time.Second {
+			t.Errorf("ack latency %s exceeds ADR-024's 10s bound", lat[0].Latency)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTasksRefusesAJobTooLargeForOneAssignment covers the direction that would
+// otherwise be invisible.
+//
+// A LIMIT that trimmed the task set would produce a job the scan point completes
+// successfully while never touching the remaining targets: the scan reports done
+// and coverage is short, with nothing anywhere saying so. That is under-scanning
+// that looks like a clean run, and the customer acts on it.
+func TestTasksRefusesAJobTooLargeForOneAssignment(t *testing.T) {
+	db := testDB(t)
+	tenant := newTenant(t, db, "oversize")
+	spID := seedScanPoint(t, db, tenant)
+	jobID := seedJob(t, db, tenant, spID, true)
+
+	// seedJob leaves one task. Add enough to cross the cap, reusing its target so
+	// the job stays authorised and Claim's refusal is not what fails the test.
+	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		_, err := c.Exec(ctx, `
+			INSERT INTO scan_tasks (tenant_id, job_id, target_id, task_target)
+			SELECT $1, $2,
+			       (SELECT target_id FROM scan_tasks WHERE tenant_id = $1 AND job_id = $2 LIMIT 1),
+			       '192.0.2.' || (g % 254 + 1)
+			  FROM generate_series(1, $3) AS g`,
+			c.Tenant().UUID(), jobID, store.MaxTasksPerAssignment)
+		return err
+	}); err != nil {
+		t.Fatalf("seed tasks: %v", err)
+	}
+
+	if err := db.Read(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		tasks, err := (store.Jobs{}).Tasks(ctx, c, jobID)
+		if !errors.Is(err, store.ErrTooManyTasks) {
+			t.Errorf("Tasks on a %d-task job returned %d tasks and error %v; want ErrTooManyTasks. "+
+				"Silently returning the first %d is a job that completes with targets it never "+
+				"reached.", store.MaxTasksPerAssignment+1, len(tasks), err,
+				store.MaxTasksPerAssignment)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }

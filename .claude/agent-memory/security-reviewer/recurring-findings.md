@@ -121,6 +121,64 @@ so the schema clearly expects deletion to work.
 **How to apply:** whenever a referential action mutates a column, check every `CHECK` that
 mentions that column, and actually run the DELETE.
 
+**11. Identity is resolved correctly and then the OBJECT is not bound to it.** Distinct
+from #1 and worth its own sweep, because the code that gets #1 right often gets this wrong in
+the same file. Dispatch resolves the scan point from the TLS peer certificate and refuses a
+mismatched `Hello.scan_point_id` — and then passes `JobTerminal.job_id` / `JobProgress.job_id`
+straight into `Jobs.Terminate` / `Jobs.MarkRunning` / `Leases.Release`, whose predicates are
+`tenant_id = $1 AND job_id = $2` with no `scan_point_id` / `holder_scan_point` clause. Proven:
+scan point B marks a job held by A `completed` and releases A's lease, so A self-aborts and the
+scan silently under-reports. `Leases.Renew` is the counter-example done right — it takes the
+holder from the session and puts it in the predicate.
+**Why:** RLS bounds the *tenant*, and within a tenant every scan point sees the same rows, so
+tenant scoping reads like authorisation and is not.
+**How to apply:** for every store method reachable from a wire message, list the WHERE clause
+and ask which of (tenant, actor, object state) it constrains. Anything that constrains only
+tenant + object id is an intra-tenant IDOR.
+
+**12. A normative MUST written into the contract AND the schema comment, and unimplemented in
+the one function that could honour it.** `Observation.zone_id` carries "Core MUST validate this
+against the zones assigned to the authenticated scan point ... MUST be quarantined" in
+`ingest.proto`, and the same sentence again on `COMMENT ON COLUMN scan_points.zone_id` — and
+`IngestService.toObservations` only `uuid.Parse`s it. The FK is `(tenant_id, zone_id)`, so any
+zone in the tenant passes, and ADR-008's exposure derivation is rewritable by the scan point.
+The enrolled zone was already in hand: `GetByFingerprint` returns `sp.ZoneID` and the caller
+discarded it.
+**Why:** in this repo the prose is written before the code, so a MUST in a comment reads as
+implemented to the next reviewer.
+**How to apply:** grep the proto and the migration comments for "MUST" and check each one has a
+call site. Do it for the whole message, not just the fields the diff touched.
+
+**13. Attacker-chosen values reaching a partition key, a typed column, or a global unique
+index. Verified on the dev DB, all three.** `observed_at_unix` from the wire becomes the
+`observations` partition key: one observation dated inside a future month lands in
+`observations_default` and then `CREATE TABLE observations_2027_03 PARTITION OF observations`
+fails with "updated partition constraint for default partition would be violated" — a
+deployment-wide ingest outage from one field. `confidence` (CHECK 0..1, `numeric(4,3)`) and
+`payload` (`jsonb`, so `""` is invalid) fail the whole chunk, and the handler answers
+RETRY_LATER "keep the buffer", so an unparseable value becomes an infinite retry loop instead of
+REJECTED_MALFORMED. `result_submissions_pkey` is `PRIMARY KEY (submission_id)` — **global**,
+not per tenant, despite a sibling `UNIQUE (tenant_id, submission_id)` — so a scan-point-chosen
+string collides across tenants and the loser is told REJECTED_DUPLICATE, clear your buffer.
+**Why:** ingest is the first place untrusted input reaches typed columns; the store layer maps
+every failure to a sentinel and the handler picks the ack from the sentinel, so a validation gap
+becomes a wrong instruction to the scan point rather than a visible error.
+**How to apply:** for each wire field, name the column, its type, its CHECK, whether it is a
+partition key, and whether any unique index over it omits `tenant_id`. Validate in Go before the
+INSERT so the failure is REJECTED_MALFORMED.
+
+**14. A teardown that waits on a goroutine whose only exit the teardown blocks.**
+`dispatch.Connect` runs `cancel(); wg.Wait()`, where the writer goroutine's exit is
+`stream.Send` returning — and grpc-go's `writeQuota.get` selects on the *stream's* done channel,
+which closes only when the RPC handler returns. Client calls `CloseSend()` and stops reading:
+`receive` returns io.EOF, the writer is parked in `Send`, `wg.Wait()` never returns, the handler
+never returns, the stream never closes. Demonstrated: `Connect` still had not returned 15 s
+after half-close. The package's `fakeStream.Send` returns nil unconditionally, so the tests
+cannot see it.
+**Why:** cancelling a context *derived from* `stream.Context()` does not cancel the RPC.
+**How to apply:** on any streaming handler, ask what unblocks each goroutine and whether the
+handler returning is on that path. A test double whose Send never blocks is not evidence.
+
 **Constraint on fixes:** `proto/` is frozen additive-only within a major version (ADR-022),
 enforced by `buf breaking` with the FILE category and a baseline established at bd0e4f9.
 So a proto finding almost never gets fixed by removing or retyping a field. Acceptable fixes
