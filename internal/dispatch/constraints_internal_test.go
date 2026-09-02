@@ -1,0 +1,201 @@
+package dispatch
+
+import (
+	"testing"
+
+	"github.com/effaaykhan/cvap/internal/store"
+)
+
+func ptr(i int) *int { return &i }
+
+// TestConstraintsTakeTheMinimumOfPlatformAndPolicy is ADR-024 control 2.
+//
+// The case that matters is "policy lowers": that is what was broken, and it was
+// broken in the dangerous direction — a policy asking for 50 pps was handed
+// 1,000, against an estate its operator had reason to be careful with.
+func TestConstraintsTakeTheMinimumOfPlatformAndPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		policy                   *store.Policy
+		rate, perTarget, fragile uint32
+		mode                     string
+	}{
+		{
+			name:   "no policy at all falls back to the platform table",
+			policy: nil,
+			rate:   1000, perTarget: 50, fragile: 10, mode: "safe",
+		},
+		{
+			name:   "NULL max_rate_pps means the platform default",
+			policy: &store.Policy{SafetyMode: store.SafetySafe},
+			rate:   1000, perTarget: 50, fragile: 10, mode: "safe",
+		},
+		{
+			name:   "a policy that lowers is honoured",
+			policy: &store.Policy{SafetyMode: store.SafetySafe, MaxRatePPS: ptr(50)},
+			rate:   50, perTarget: 50, fragile: 10, mode: "safe",
+		},
+		{
+			// The per-target ceiling must come down with it. A runtime told it
+			// may send 50 pps at one host while the scan point's whole budget is
+			// 5 has been authorised to exceed the policy tenfold at the single
+			// place that matters most.
+			name:   "per-target and fragile clamp beneath a very low policy rate",
+			policy: &store.Policy{SafetyMode: store.SafetySafe, MaxRatePPS: ptr(5)},
+			rate:   5, perTarget: 5, fragile: 5,
+			mode: "safe",
+		},
+		{
+			// ADR-024 control 2 is lower-only. The column's CHECK bounds this
+			// too; Core does not rely on it, because the place that must never
+			// be wrong is the one deciding what goes on the wire.
+			name:   "a policy that tries to raise is ignored",
+			policy: &store.Policy{SafetyMode: store.SafetySafe, MaxRatePPS: ptr(5000)},
+			rate:   1000, perTarget: 50, fragile: 10, mode: "safe",
+		},
+		{
+			// Not a quantity, so not minimised. Hardcoding "safe" meant an
+			// intrusive policy silently ran safe — the failure that looks like
+			// everything working.
+			name:   "safety_mode passes through",
+			policy: &store.Policy{SafetyMode: store.SafetyIntrusive},
+			rate:   1000, perTarget: 50, fragile: 10, mode: "intrusive",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := constraintsFor(tc.policy, nil)
+			if err != nil {
+				t.Fatalf("constraintsFor: %v", err)
+			}
+			if got.GetMaxRatePps() != tc.rate {
+				t.Errorf("max_rate_pps = %d, want %d", got.GetMaxRatePps(), tc.rate)
+			}
+			if got.GetMaxRatePerTarget() != tc.perTarget {
+				t.Errorf("max_rate_per_target = %d, want %d", got.GetMaxRatePerTarget(), tc.perTarget)
+			}
+			if got.GetFragileRatePps() != tc.fragile {
+				t.Errorf("fragile_rate_pps = %d, want %d", got.GetFragileRatePps(), tc.fragile)
+			}
+			if got.GetSafetyMode() != tc.mode {
+				t.Errorf("safety_mode = %q, want %q", got.GetSafetyMode(), tc.mode)
+			}
+			// Never adjustable by policy today; asserted so that adding a column
+			// for either has to come here and think about the direction.
+			if got.GetMaxConcurrentPerTarget() != platformMaxConcurrentPerTarget {
+				t.Errorf("max_concurrent_per_target = %d, want %d",
+					got.GetMaxConcurrentPerTarget(), platformMaxConcurrentPerTarget)
+			}
+			if got.GetConnectTimeoutMs() != platformConnectTimeoutMs {
+				t.Errorf("connect_timeout_ms = %d, want %d",
+					got.GetConnectTimeoutMs(), platformConnectTimeoutMs)
+			}
+		})
+	}
+}
+
+// TestScopePlanSplitsAllowsFromDenies covers the field whose empty value is now
+// load-bearing: allowed_targets empty means DENY ALL.
+func TestScopePlanSplitsAllowsFromDenies(t *testing.T) {
+	rules := []store.ScopeRule{
+		{Effect: store.ScopeDeny, MatchType: store.MatchCIDR, MatchValue: "10.10.0.5/32"},
+		{Effect: store.ScopeAllow, MatchType: store.MatchCIDR, MatchValue: "10.10.0.0/24"},
+		{Effect: store.ScopeAllow, MatchType: store.MatchHostname, MatchValue: "lab.internal"},
+	}
+
+	allowed, exclusions, err := scopePlan(rules)
+	if err != nil {
+		t.Fatalf("scopePlan: %v", err)
+	}
+	if len(allowed) != 2 || allowed[0] != "10.10.0.0/24" || allowed[1] != "lab.internal" {
+		t.Errorf("allowed_targets = %v, want both allows", allowed)
+	}
+	if len(exclusions) != 1 || exclusions[0] != "10.10.0.5/32" {
+		t.Errorf("exclusions = %v, want the one deny", exclusions)
+	}
+}
+
+// TestUnexpressibleRulesFailTheJobRatherThanVanish is the fix for a fail-open
+// asymmetry a safety audit found.
+//
+// The first version skipped `tag` rules before looking at their effect. Dropping
+// a tag ALLOW fails closed — the allowlist shrinks. Dropping a tag DENY fails
+// OPEN: "allow 10.10.0.0/24, deny tag medical" produced a non-empty allowlist,
+// so the job dispatched with no warning at all, and the exclusion protecting the
+// medical devices inside that range reached neither enforcement site. ADR-024
+// says exclusions take precedence over allows, and a precedence that can be
+// deleted by choosing a match type is not one.
+func TestUnexpressibleRulesFailTheJobRatherThanVanish(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rules []store.ScopeRule
+	}{
+		{"a tag deny cannot silently vanish", []store.ScopeRule{
+			{Effect: store.ScopeAllow, MatchType: store.MatchCIDR, MatchValue: "10.10.0.0/24"},
+			{Effect: store.ScopeDeny, MatchType: store.MatchTag, MatchValue: "medical"},
+		}},
+		{"a tag allow fails the same way, for symmetry", []store.ScopeRule{
+			{Effect: store.ScopeAllow, MatchType: store.MatchTag, MatchValue: "production"},
+		}},
+		{"an unparseable deny CIDR is a rule nothing can evaluate", []store.ScopeRule{
+			{Effect: store.ScopeDeny, MatchType: store.MatchCIDR, MatchValue: "10.0.0.0/33"},
+		}},
+		{"an unparseable allow CIDR too", []store.ScopeRule{
+			{Effect: store.ScopeAllow, MatchType: store.MatchCIDR, MatchValue: "not-a-cidr"},
+		}},
+		{"an empty hostname", []store.ScopeRule{
+			{Effect: store.ScopeDeny, MatchType: store.MatchHostname, MatchValue: "  "},
+		}},
+		{"a match type nobody taught this switch about", []store.ScopeRule{
+			{Effect: store.ScopeAllow, MatchType: store.ScopeMatchType("geo"), MatchValue: "eu"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := scopePlan(tc.rules); err == nil {
+				t.Error("scopePlan accepted a rule it cannot express on the wire; a rule that " +
+					"reaches neither enforcement site must fail the job, not disappear")
+			}
+			if _, err := constraintsFor(&store.Policy{SafetyMode: store.SafetySafe}, tc.rules); err == nil {
+				t.Error("constraintsFor built an assignment from unexpressible rules")
+			}
+		})
+	}
+}
+
+// TestPermitsIsExclusionFirstAndEmptyDeniesAll is the Core-side half of ADR-024
+// control 1. Until it existed, the allowlist Core computed was compared against
+// nothing.
+func TestPermitsIsExclusionFirstAndEmptyDeniesAll(t *testing.T) {
+	allowed := []string{"10.10.0.0/24", "lab.internal"}
+	exclusions := []string{"10.10.0.5/32"}
+
+	for _, tc := range []struct {
+		target string
+		want   bool
+		why    string
+	}{
+		{"10.10.0.11", true, "inside the allowed range"},
+		{"10.10.0.5", false, "excluded, even though the allow covers it"},
+		{"10.10.1.11", false, "outside every allow"},
+		{"8.8.8.8", false, "not covered by any allow rule"},
+		{"lab.internal", true, "exact hostname allow"},
+		{"LAB.INTERNAL", true, "hostname comparison is case-insensitive"},
+		{"other.internal", false, "a different hostname"},
+		// The oldest way past an address denylist. Without Unmap these are two
+		// different strings naming one host.
+		{"::ffff:10.10.0.5", false, "the v4-mapped form of an excluded address"},
+		{"::ffff:10.10.0.11", true, "the v4-mapped form of an allowed address"},
+		{"10.10.0.5/32", false, "an excluded address written as a host prefix"},
+		{"", false, "an empty target"},
+	} {
+		got, why := permits(tc.target, allowed, exclusions)
+		if got != tc.want {
+			t.Errorf("permits(%q) = %v (%s), want %v — %s", tc.target, got, why, tc.want, tc.why)
+		}
+	}
+
+	// Empty allowlist denies everything, including a target no exclusion names.
+	if got, _ := permits("10.10.0.11", nil, nil); got {
+		t.Error("an empty allowlist permitted a target. Empty and absent are indistinguishable " +
+			"in proto3, so they must mean the same thing, and the other reading is 'scan anything'")
+	}
+}

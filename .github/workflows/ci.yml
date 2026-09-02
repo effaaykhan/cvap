@@ -170,8 +170,16 @@ jobs:
 
       # up, down -all, up again. The second up is what catches a down migration
       # that left an object behind — a summary "verify passed" would not.
+      #
+      # This runs against a THROWAWAY database, not $DATABASE_URL, so it proves
+      # the migrations apply from nothing rather than from whatever the target
+      # happened to hold. That is why the step below exists: verify no longer
+      # leaves a schema behind for the rest of the job to use.
       - name: Migrations apply, reverse and reapply
         run: make migrate-verify
+
+      - name: Apply migrations to the job database
+        run: make migrate-up
 
       # cvap_app is NOLOGIN by design: it is a group role carrying the grants,
       # with no password to leak or rotate. What connects is a LOGIN member of

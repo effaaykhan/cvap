@@ -81,3 +81,69 @@ partitioned scan point holds its lease and keeps scanning while its stream is lo
 
 **Registering Dispatch without starting the sweeper reintroduces the finding.** It is listed
 with the TLS and keepalive requirements in the package doc for that reason.
+
+## Constraints are min(platform, policy)
+
+ADR-024 control 2 is "a policy may LOWER the ceiling and may never RAISE it".
+`defaultConstraints()` returned the platform table verbatim, so a policy asking for 50 pps was
+handed 1,000 — twenty times what its operator asked for, against an estate they had reason to
+be careful with. `constraintsFor(policy, rules)` takes the minimum, which honours both halves
+in one expression and ignores rather than trusts a policy value above the ceiling.
+
+The per-target limits clamp beneath the per-scan-point rate. A `max_rate_per_target` above the
+whole scan point's budget is not merely meaningless — it tells a runtime it may send ten times
+the policy rate at a single host, which is the one place it matters most. `fragile_rate_pps`
+clamps again beneath that, since control 3 caps rate *regardless* of what the policy permits.
+
+`safety_mode` is passed through, not minimised: it is not a quantity, and it is the field an
+operator sets deliberately to authorise intrusive checks (ADR-021). Hardcoding `safe` meant an
+intrusive policy silently ran safe — the failure that looks like everything working.
+
+**`allowed_targets: []` means DENY ALL.** Empty and absent are indistinguishable in proto3, so
+they must mean the same thing, and for a field whose other reading is "scan anything" the safe
+reading is the only defensible one. Core therefore has to populate it: `scopeLists` fills it
+from `policy_scope_rules`, and both wire fields were previously left empty.
+
+**Anything that cannot travel fails the job — allows and denies share no drop path.** The
+first version skipped `tag` rules before looking at their effect, which a safety audit showed
+was fail-closed for an allow and fail-**open** for a deny: `allow 10.10.0.0/24, deny tag
+medical` produced a non-empty allowlist, so the job dispatched with no warning at all and the
+exclusion protecting the medical devices inside that range reached neither enforcement site.
+ADR-024 says exclusions take precedence over allows, and a precedence you can delete by
+choosing a match type is not one. `scopePlan` now returns an error for a tag rule, an
+unparseable CIDR, an empty hostname or an unknown match type, and `refuseJob` ends the job with
+`scope_violation_halt` and a `job.scope_refused` audit event.
+
+**Core checks the targets too — that is site one of control 1, and it was empty.** Core
+computed the allowlist, put it on the wire, and compared nothing against it, so enforcement
+rested entirely on a scan point runtime that does not exist yet. That is the
+"enforce at the Scan Point only" alternative ADR-024 explicitly rejected, arrived at by
+omission. `permits` evaluates every `task_target` before the assignment is built: exclusions
+first and they win outright, then the allowlist, with addresses compared after `Unmap()` so
+`10.10.0.5` also excludes `::ffff:10.10.0.5`. Nothing resolves DNS on either side — a
+resolution done at planning is a different answer from the one the scan point would get, and an
+allowlist that depends on which side asked is not an allowlist.
+
+The refusal is terminal and audited rather than logged. A job Core refuses is refused
+identically on every poll, so leaving it claimable is a two-second loop that goes quiet after
+`MaxAttempts` and takes the reason with it — and an operator reads the audit log, not Core's
+stdout.
+
+## Cancellation is the narrow half of control 4
+
+A kill switch halts the fleet. `CancelJob` stops one runaway scan and leaves everything else
+running, and the difference matters: a stop button that costs every other customer's scan is
+one people negotiate with rather than press.
+
+The trigger is `scans.status = 'cancelled'` — no new column and no second source of truth. Both
+halves are needed and either alone is not a cancellation:
+
+- `propagateCancellations` sends `CancelJob` for in-flight jobs, on the **urgent** channel ahead
+  of any assignment, marking sent only when the message was actually queued (a scan point with a
+  full outbound queue is the one not draining messages, and therefore the one whose runaway job
+  most needs stopping).
+- `Jobs.Claim` refuses to dispatch a cancelled scan's remaining queued jobs. Without it, Core
+  halts the in-flight work and hands out the rest two seconds later, forever.
+
+`CancelJob` carries the lease epoch so it names the incarnation Core means, not whatever is
+running under that job id after a reassignment.

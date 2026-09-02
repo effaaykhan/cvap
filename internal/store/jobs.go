@@ -130,6 +130,17 @@ func (Jobs) Claim(ctx context.Context, c *Conn, scanPointID uuid.UUID, engines [
 		       AND j.status = 'queued'
 		       AND j.engine = ANY($2::engine_kind[])
 		       AND j.attempt < $5
+		       -- A cancelled scan stops being dispatched, not just stopped.
+		       -- Without this, propagateCancellations halts the in-flight jobs
+		       -- of a cancelled scan and offerWork hands out its remaining
+		       -- queued ones two seconds later, forever. That is not a
+		       -- cancellation; it is the same shape as the kill-switch clause
+		       -- below, for the same reason.
+		       AND NOT EXISTS (
+		           SELECT 1 FROM scans s
+		            WHERE s.tenant_id = j.tenant_id AND s.scan_id = j.scan_id
+		              AND s.status IN ('cancelled', 'killed')
+		       )
 		       AND NOT EXISTS (
 		           SELECT 1 FROM kill_switches k
 		            WHERE k.tenant_id = j.tenant_id
@@ -343,4 +354,69 @@ type ExpiredLease struct {
 	Epoch        int64
 	ReassignSafe bool
 	Requeued     bool
+}
+
+// CancellableJob is one in-flight job whose scan an operator has cancelled.
+type CancellableJob struct {
+	JobID  uuid.UUID
+	Epoch  int64
+	ScanID uuid.UUID
+}
+
+// CancellableFor lists jobs this scan point is running under a cancelled scan.
+//
+// ============================================================================
+// ADR-024 control 4, and the half that is not the kill switch.
+// ============================================================================
+//
+// A kill switch halts the fleet. Per-scan cancellation stops one runaway scan
+// and leaves everything else running, and the difference matters because an
+// operator with only the fleet-wide control will hesitate to use it — a stop
+// button that costs every other customer's scan is a stop button people
+// negotiate with rather than press.
+//
+// The trigger is scans.status = 'cancelled', which already exists: an operator
+// cancels a SCAN, and every job under it that some scan point is still holding
+// gets a CancelJob. No new column, and no second source of truth about whether
+// something is cancelled.
+//
+// The lease epoch travels because CancelJob must name the incarnation Core
+// means. A job reassigned after the operator hit cancel is running under a
+// higher epoch on a different scan point, and cancelling "job X" without the
+// epoch would let a stale message stop work Core never meant to touch.
+//
+// Only 'assigned' and 'running' jobs appear. A job already terminal needs no
+// message, and re-sending one would ask a scan point to cancel work it has
+// already reported on.
+func (Jobs) CancellableFor(ctx context.Context, c *Conn, scanPointID uuid.UUID) ([]CancellableJob, error) {
+	const q = `
+		SELECT j.job_id, l.epoch, j.scan_id
+		  FROM scan_jobs j
+		  JOIN scans s ON s.tenant_id = j.tenant_id AND s.scan_id = j.scan_id
+		  JOIN LATERAL (
+		       SELECT epoch FROM job_leases
+		        WHERE tenant_id = j.tenant_id AND job_id = j.job_id
+		        ORDER BY epoch DESC LIMIT 1
+		  ) l ON true
+		 WHERE j.tenant_id = $1
+		   AND j.scan_point_id = $2
+		   AND j.status IN ('assigned', 'running')
+		   AND s.status = 'cancelled'
+		 ORDER BY j.created_at`
+
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), scanPointID)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+
+	var out []CancellableJob
+	for rows.Next() {
+		var j CancellableJob
+		if err := rows.Scan(&j.JobID, &j.Epoch, &j.ScanID); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, j)
+	}
+	return out, mapError(rows.Err())
 }

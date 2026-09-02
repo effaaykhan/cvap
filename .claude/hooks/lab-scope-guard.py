@@ -44,17 +44,52 @@ DEFAULT_SCOPE = [
 ]
 
 # Binaries that can put packets on the wire at a target.
+#
+# The bare token "cvap" is deliberately NOT here, and its removal is the third
+# false positive this guard has produced. There is no binary called `cvap` --
+# the binaries are cvap-core, cvap-scanpoint and cvap-cli (CLAUDE.md) -- so the
+# bare token never matched an invocation. What it did match was the database
+# role, which is also called cvap, so `psql -U cvap -d cvap` was blocked as a
+# scan of an unverifiable target. Each time, the workaround was to phrase the
+# command differently, and a guard people route around has stopped being a
+# guard. If a `cvap` binary is ever built, add it back as an exact name.
+#
+# The prefix class accepts quotes, = and backtick as well as / and . A safety
+# audit walked past the guard with bash -c "nmap <ip>", CMD=nmap, and
+# `nmap <ip>` -- none of which were preceded by a character the old class
+# allowed. The block message tells the reader not to encode the address
+# differently, so leaving the INVOCATION trivially re-spellable was the wrong
+# half to be strict about. False-positive cost is near zero: these characters
+# only ever precede a word where a command can start.
+#
+# Still open and deliberately so, because closing them costs false positives a
+# guard cannot absorb: a hostname with no IP token (nmap scanme.example.org),
+# and integer-encoded addresses (nmap 3323068417, nmap 0xC6120001). Recorded
+# here rather than left implied, given this file's history of being routed
+# around.
+#
+# The prefix class accepts / and . so that ./cvap-cli and /usr/bin/nmap match.
+# Without them the guard missed the most natural way to run a locally built
+# binary, which is a far larger hole than the false positive above: a path
+# separator is not a word boundary. The suffix stays \s|$, so a path that merely
+# CONTAINS a tool name -- docs/cvap-cli.md, internal/nmap/parser.go -- still does
+# not match, because the name is followed by . or / rather than by a separator.
 SCAN_TOOLS = re.compile(
-    r"(?:^|[\s;&|(])"
-    r"(cvap-scanpoint|cvap-cli|cvap|nmap|masscan|zmap|zgrab\w*|nuclei|"
+    r"(?:^|[\s;&|(/.'\"`=])"
+    r"(cvap-scanpoint|cvap-cli|cvap-core|nmap|masscan|zmap|zgrab\w*|nuclei|"
     r"hping3?|nping|arp-scan|fping|netcat|ncat|nc|telnet|ssh|"
     r"sslscan|testssl(?:\.sh)?|sqlmap|nikto|gobuster|ffuf|dirb|hydra|medusa)"
-    r"(?:\s|$)"
+    # The suffix class mirrors the prefix for the same reason: CMD=nmap; leaves
+    # the tool name followed by a semicolon, not whitespace. Widening it is
+    # nearly free, because matching a tool name is not on its own enough to
+    # block -- an out-of-scope target has to be present too, which is why
+    # `git commit -m "add nmap parser"` stays allowed.
+    r"(?:[\s;&|)'\"`]|$)"
 )
 
 # Commands that reach the network but are routine in development. For these we
 # only object to a literal out-of-scope IP, not to hostnames.
-SOFT_TOOLS = re.compile(r"(?:^|[\s;&|(])(curl|wget|http|https)(?:\s|$)")
+SOFT_TOOLS = re.compile(r"(?:^|[\s;&|(/.'\"`=])(curl|wget|http|https)(?:[\s;&|)'\"`]|$)")
 
 IP_TOKEN = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})(/\d{1,2})?\b")
 V6_TOKEN = re.compile(r"\b([0-9a-fA-F]{0,4}(?::[0-9a-fA-F]{0,4}){2,7})(/\d{1,3})?\b")

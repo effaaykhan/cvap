@@ -60,6 +60,36 @@ CASES: list[tuple[str, str, str]] = [
     # --- new: sanitising must not open a hole ---
     ("variable target survives sanitising", "TARGET=8.8.8.8; cvap-cli scan $TARGET", BLOCK),
     ("redirect does not launder the target", "nmap 8.8.8.8 > /tmp/out.txt", BLOCK),
+    # --- new: the database role is not a scan tool ---
+    #
+    # The false positive that prompted narrowing SCAN_TOOLS. `cvap` is the
+    # database role as well as the module name; it is not a binary. Blocking
+    # this taught people to phrase psql differently, which is how a guard stops
+    # being one.
+    ("psql as the cvap role", "psql -U cvap -d cvap -c 'SELECT 1'", ALLOW),
+    ("psql long-form, same thing", "psql --username=cvap --dbname=cvap", ALLOW),
+    ("go module path mentions cvap", "go test github.com/effaaykhan/cvap/...", ALLOW),
+    # --- new: a path separator is not a word boundary ---
+    #
+    # These are the hole the narrowing exposed. A locally built binary is run as
+    # ./cvap-cli, and the old prefix class ([\s;&|(]) did not accept the slash,
+    # so the most natural invocation was never matched at all.
+    ("locally built binary, out of scope", "./cvap-cli scan 8.8.8.8", BLOCK),
+    ("absolute path to a scan tool", "/usr/bin/nmap 8.8.8.8", BLOCK),
+    ("in-scope via a path", "./cvap-cli scan 10.10.0.11", ALLOW),
+    ("path that merely contains a tool name", "cat docs/cvap-cli.md", ALLOW),
+    ("directory named after a tool", "ls internal/nmap/parser.go", ALLOW),
+    ("cvap-core is a binary and does dispatch", "cvap-core --target 8.8.8.8", BLOCK),
+    # --- new: quoting and assignment are not a disguise ---
+    #
+    # A safety audit walked past the guard with each of these. 198.18.0.0/15 is
+    # RFC 2544 benchmarking space: reserved, not routed, and not in lab scope,
+    # so these are out-of-scope literals that send nothing if the guard leaks.
+    ("double-quoted invocation", 'bash -c "nmap 198.18.0.1"', BLOCK),
+    ("single-quoted invocation", "sh -c 'nmap 198.18.0.1'", BLOCK),
+    ("command substitution", "echo `nmap 198.18.0.1`", BLOCK),
+    ("tool name assigned to a variable", "CMD=nmap; $CMD 198.18.0.1", BLOCK),
+    ("quoting does not launder an in-scope target", 'bash -c "nmap 10.10.0.11"', ALLOW),
 ]
 
 

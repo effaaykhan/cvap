@@ -120,6 +120,11 @@ tenant** (migration 0022), never globally: a global unique let one tenant collid
 another's id, which both discarded results ADR-026 says are always stored and answered a
 cross-tenant existence question.
 
+`Policies.ForJob` and `Policies.ScopeRules` exist for the dispatch path only. ADR-024's
+ceilings are LOWER-ONLY, and `max_rate_pps` has a CHECK bounding it at the platform default —
+but Core compares again when it builds the constraints, because a ceiling enforced in one place
+is decorative and the place that must never be wrong is the one deciding what goes on the wire.
+
 Reads over `observations` require a bounded time window. It is partitioned by `observed_at`,
 so a query without one scans every live partition.
 

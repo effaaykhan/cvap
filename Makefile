@@ -168,24 +168,59 @@ migrate-down: ## Roll back the most recent migration
 		$(MIGRATE_IMAGE) \
 		-path=/migrations -database "$(DATABASE_URL)" down 1
 
-migrate-verify: ## Apply every migration, roll it all back, apply again
+# migrate-verify runs against a THROWAWAY database, never the dev one.
+#
+# It used to run up / down -all / up against DATABASE_URL directly, which made
+# the verification destructive to whatever you were working on. Two costs, and
+# the second was the one that bit:
+#
+#   * `down -all` dropped cvap_app, taking cvap_app_login's membership with it,
+#     so every store test failed until you remembered `make app-role`. That
+#     ordering wart was carried in a comment on store-test since session 6.
+#   * Some tests legitimately leave data that a down migration must refuse to
+#     roll back through. TestSubmissionIdCollisionAcrossTenantsIsNotADuplicate
+#     creates a submission_id held by two tenants, which is exactly what 0022's
+#     down refuses — correctly, because restoring the global unique would mean
+#     deleting a tenant's results. The app role holds no DELETE on
+#     result_submissions (ADR-026), so the test cannot clean up after itself and
+#     should not be able to. The dev loop is what has to bend.
+#
+# A fresh database also makes the verification honest: it proves the migrations
+# apply from nothing, rather than from whatever this database happened to hold.
+VERIFY_DB ?= cvap_migrate_verify
+# Swap the database name, keeping user, host, port and query string.
+VERIFY_URL = $(shell echo "$(DATABASE_URL)" | sed -E 's,(://[^/]*)/[^?]*,\1/$(VERIFY_DB),')
+
+# psql as the migration role, for the create and drop either side of a run.
+define verify_psql
+docker run --rm --network host postgres:16-alpine \
+	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c
+endef
+
+migrate-verify: ## Apply every migration, roll it all back, apply again — on a throwaway database
 	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
+	@echo "==> creating throwaway database $(VERIFY_DB)"
+	@$(verify_psql) 'DROP DATABASE IF EXISTS $(VERIFY_DB) WITH (FORCE)'
+	@$(verify_psql) 'CREATE DATABASE $(VERIFY_DB)'
 	@echo "==> up"
 	@docker run --rm --network host \
 		-v "$(CURDIR)/$(MIGRATIONS_DIR):/migrations" \
 		$(MIGRATE_IMAGE) \
-		-path=/migrations -database "$(DATABASE_URL)" up
+		-path=/migrations -database "$(VERIFY_URL)" up
 	@echo "==> down (all)"
 	@docker run --rm --network host \
 		-v "$(CURDIR)/$(MIGRATIONS_DIR):/migrations" \
 		$(MIGRATE_IMAGE) \
-		-path=/migrations -database "$(DATABASE_URL)" down -all
+		-path=/migrations -database "$(VERIFY_URL)" down -all
 	@echo "==> up again"
 	@docker run --rm --network host \
 		-v "$(CURDIR)/$(MIGRATIONS_DIR):/migrations" \
 		$(MIGRATE_IMAGE) \
-		-path=/migrations -database "$(DATABASE_URL)" up
-	@echo "up / down / up all succeeded"
+		-path=/migrations -database "$(VERIFY_URL)" up
+	@# Dropped on success only. A failed run leaves the database for inspection,
+	@# and the DROP IF EXISTS above clears it next time.
+	@$(verify_psql) 'DROP DATABASE IF EXISTS $(VERIFY_DB) WITH (FORCE)'
+	@echo "up / down / up all succeeded (on $(VERIFY_DB), now dropped)"
 
 rls-test: ## Prove tenant isolation as cvap_app: reads, unset context, writes, composite FK
 	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
@@ -213,9 +248,6 @@ app-role: ## Create the LOGIN role the application connects as (dev and CI)
 GOTEST_FLAGS ?=
 
 store-test: ## Run internal/store against the dev database as the application role
-	@# Run `make app-role` first if you have just run migrate-verify: its
-	@# `down -all` drops cvap_app, and the role membership that makes
-	@# cvap_app_login useful goes with it. The CI schema job orders them that way.
 	@test -n "$(APP_DATABASE_URL)" || { echo "APP_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
 	CVAP_TEST_DATABASE_URL="$(APP_DATABASE_URL)" go test ./internal/store/... -count=1 $(GOTEST_FLAGS)
 

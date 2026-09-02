@@ -805,3 +805,123 @@ func TestTasksRefusesAJobTooLargeForOneAssignment(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestCancelledScanIsNeitherDispatchedNorLeftRunning is ADR-024 control 4.
+//
+// Both halves, because either alone is not a cancellation. Stopping the
+// in-flight jobs while offerWork hands out the scan's remaining queued ones two
+// seconds later is the same failure the kill switch had; refusing to dispatch
+// while the running job continues is the other half of it.
+func TestCancelledScanIsNeitherDispatchedNorLeftRunning(t *testing.T) {
+	db := testDB(t)
+	tenant := newTenant(t, db, "cancel")
+	spID := seedScanPoint(t, db, tenant)
+
+	running := seedJob(t, db, tenant, spID, true)
+	var scanID uuid.UUID
+	var epoch int64
+
+	// Take one job and lease it, then queue a second under the SAME scan so the
+	// dispatch half has something to refuse.
+	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		if _, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10); err != nil {
+			return err
+		}
+		l, err := (store.Leases{}).Grant(ctx, c, running, spID, store.LeaseTTL)
+		if err != nil {
+			return err
+		}
+		epoch = l.Epoch
+
+		j, err := (store.Jobs{}).GetByID(ctx, c, running)
+		if err != nil {
+			return err
+		}
+		scanID = j.ScanID
+
+		var queued uuid.UUID
+		if err := c.QueryRow(ctx,
+			`INSERT INTO scan_jobs (tenant_id, scan_id, engine, reassign_safe)
+			 VALUES ($1,$2,'discovery',true) RETURNING job_id`,
+			c.Tenant().UUID(), scanID).Scan(&queued); err != nil {
+			return err
+		}
+		_, err = c.Exec(ctx,
+			`INSERT INTO scan_tasks (tenant_id, job_id, target_id, task_target)
+			 SELECT $1, $2, target_id, '192.0.2.2' FROM scan_tasks
+			  WHERE tenant_id = $1 AND job_id = $3 LIMIT 1`,
+			c.Tenant().UUID(), queued, running)
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Nothing is cancellable yet, and the queued job is claimable.
+	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		pending, err := (store.Jobs{}).CancellableFor(ctx, c, spID)
+		if err != nil {
+			return err
+		}
+		if len(pending) != 0 {
+			t.Errorf("control: %d cancellable jobs before the scan was cancelled, want 0", len(pending))
+		}
+		claimed, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10)
+		if err != nil {
+			return err
+		}
+		if len(claimed) != 1 {
+			t.Errorf("control: claimed %d jobs from a live scan, want 1 — if this is 0 the "+
+				"test below proves nothing", len(claimed))
+		}
+		// Put it back so the post-cancellation claim has something to refuse.
+		_, err = c.Exec(ctx, `UPDATE scan_jobs SET status = 'queued', scan_point_id = NULL
+		                       WHERE tenant_id = $1 AND scan_id = $2 AND job_id <> $3`,
+			c.Tenant().UUID(), scanID, running)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		_, err := c.Exec(ctx, `UPDATE scans SET status = 'cancelled'
+		                        WHERE tenant_id = $1 AND scan_id = $2`,
+			c.Tenant().UUID(), scanID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		// Half one: the in-flight job is cancellable, and carries the epoch, so
+		// CancelJob names the incarnation Core means rather than whatever is
+		// running under that job id after a reassignment.
+		pending, err := (store.Jobs{}).CancellableFor(ctx, c, spID)
+		if err != nil {
+			return err
+		}
+		if len(pending) != 1 {
+			t.Fatalf("cancellable jobs = %d, want 1", len(pending))
+		}
+		if pending[0].JobID != running {
+			t.Errorf("cancellable job = %v, want the leased one %v", pending[0].JobID, running)
+		}
+		if pending[0].Epoch != epoch {
+			t.Errorf("cancellable job epoch = %d, want the current lease epoch %d",
+				pending[0].Epoch, epoch)
+		}
+
+		// Half two: the scan's remaining queued work stops being handed out.
+		claimed, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10)
+		if err != nil {
+			return err
+		}
+		if len(claimed) != 0 {
+			t.Errorf("claimed %d jobs from a cancelled scan, want 0. Halting in-flight work "+
+				"while dispatching the rest two seconds later is not a cancellation.",
+				len(claimed))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

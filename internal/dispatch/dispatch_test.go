@@ -216,9 +216,23 @@ func seedQueuedJob(t *testing.T, db *store.DB, tenant store.TenantID, reassignSa
 	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
 		tid := c.Tenant().UUID()
 		var policyID, scanID uuid.UUID
+		// max_rate_pps is LOWER than the platform default on purpose. A seed at
+		// the ceiling would pass whether constraintsFor took the minimum or
+		// ignored the policy entirely, which is the bug it is meant to catch.
 		if err := c.QueryRow(ctx,
-			`INSERT INTO scan_policies (tenant_id, name) VALUES ($1,$2) RETURNING policy_id`,
+			`INSERT INTO scan_policies (tenant_id, name, max_rate_pps)
+			 VALUES ($1,$2,120) RETURNING policy_id`,
 			tid, "p-"+uuid.NewString()[:8]).Scan(&policyID); err != nil {
+			return err
+		}
+		// An allow rule, because allowed_targets is now load-bearing: empty
+		// means DENY ALL and the runtime refuses the task. A seed without one
+		// produces an assignment no scan point would act on.
+		if _, err := c.Exec(ctx,
+			`INSERT INTO policy_scope_rules (tenant_id, policy_id, effect, match_type, match_value)
+			 VALUES ($1,$2,'allow','cidr','192.0.2.0/24'),
+			        ($1,$2,'deny','cidr','192.0.2.99/32')`,
+			tid, policyID); err != nil {
 			return err
 		}
 		if err := c.QueryRow(ctx,
@@ -432,10 +446,30 @@ func TestConnectAssignsWorkAndFencesTheLease(t *testing.T) {
 		t.Errorf("assignment carries %d tasks, want 1", len(assign.GetTasks()))
 	}
 	// ADR-024's ceilings must reach the component that sends packets. A ceiling
-	// that does not travel is decorative.
-	if c := assign.GetConstraints(); c == nil || c.GetMaxRatePps() == 0 ||
-		c.GetFragileRatePps() == 0 || c.GetConnectTimeoutMs() == 0 {
-		t.Errorf("assignment carries incomplete constraints: %v", assign.GetConstraints())
+	// that does not travel is decorative — and one that travels at the platform
+	// default when the policy lowered it is worse than decorative, because it
+	// reads as enforcement while authorising more than the operator asked for.
+	c := assign.GetConstraints()
+	if c == nil {
+		t.Fatal("assignment carries no constraints")
+	}
+	if c.GetMaxRatePps() != 120 {
+		t.Errorf("max_rate_pps = %d, want the policy's 120 rather than the platform 1000",
+			c.GetMaxRatePps())
+	}
+	if c.GetMaxRatePerTarget() != 50 || c.GetFragileRatePps() != 10 ||
+		c.GetConnectTimeoutMs() != 3000 || c.GetMaxConcurrentPerTarget() != 20 {
+		t.Errorf("constraints below the policy rate are wrong: per_target=%d fragile=%d "+
+			"timeout=%d concurrent=%d", c.GetMaxRatePerTarget(), c.GetFragileRatePps(),
+			c.GetConnectTimeoutMs(), c.GetMaxConcurrentPerTarget())
+	}
+	// allowed_targets empty means DENY ALL, so an assignment whose allowlist did
+	// not travel is one the scan point must refuse entirely.
+	if got := c.GetAllowedTargets(); len(got) != 1 || got[0] != "192.0.2.0/24" {
+		t.Errorf("allowed_targets = %v, want the policy's one allow rule", got)
+	}
+	if got := c.GetExclusions(); len(got) != 1 || got[0] != "192.0.2.99/32" {
+		t.Errorf("exclusions = %v, want the policy's one deny rule", got)
 	}
 
 	epoch := assign.GetLeaseEpoch()
@@ -561,4 +595,115 @@ func TestMissingZeroisationAttestationIsAudited(t *testing.T) {
 	fs.closeInbound()
 	cancel()
 	<-done
+}
+
+// TestOutOfScopeTaskIsRefusedRatherThanDispatched is ADR-024 control 1, site
+// one, end to end.
+//
+// A safety audit found the allowlist Core computed was advisory: put on the
+// wire, compared against nothing, and enforced only by a scan point runtime that
+// does not exist yet. That is exactly the "enforce at the Scan Point only"
+// alternative ADR-024 rejected, arrived at by omission. scan_tasks.task_target
+// is free text and Jobs.Claim authorises the parent scan_targets row rather than
+// the decomposed value, so a planning bug puts a target on the wire that no
+// policy rule covers.
+func TestOutOfScopeTaskIsRefusedRatherThanDispatched(t *testing.T) {
+	db := testDB(t)
+	tenant, leaf, spID := enrolledScanPoint(t, db)
+	jobID := seedQueuedJob(t, db, tenant, true)
+
+	// The seed's policy allows 192.0.2.0/24. Move the task outside it, the way a
+	// planning defect would: the authorised target_id is untouched.
+	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		_, err := c.Exec(ctx,
+			`UPDATE scan_tasks SET task_target = '198.51.100.9'
+			  WHERE tenant_id = $1 AND job_id = $2`, c.Tenant().UUID(), jobID)
+		return err
+	}); err != nil {
+		t.Fatalf("move the task out of scope: %v", err)
+	}
+
+	svc := newService(t, db)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fs := newFakeStream(peerCtx(ctx, leaf))
+
+	done := make(chan error, 1)
+	go func() { done <- svc.Connect(fs) }()
+
+	fs.push(&scanpointv1.ScanPointMessage{
+		Msg: &scanpointv1.ScanPointMessage_Hello{Hello: &scanpointv1.Hello{
+			ScanPointId:     spID.String(),
+			ProtocolVersion: testVersion,
+			AgentVersion:    "0.1.0",
+			Capabilities: []*scanpointv1.Capability{
+				{Engine: "discovery", EngineVersion: "0.1.0", Enabled: true},
+			},
+		}},
+	})
+	fs.waitFor(t, "ServerHello", func(m *scanpointv1.CoreMessage) bool {
+		return m.GetServerHello() != nil
+	})
+
+	// Give the pump time to poll, refuse and not assign.
+	deadline := time.Now().Add(10 * time.Second)
+	var terminal *store.Job
+	for time.Now().Before(deadline) {
+		if err := db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+			j, err := (store.Jobs{}).GetByID(ctx, c, jobID)
+			if err != nil {
+				return err
+			}
+			if j.Status == store.JobFailed {
+				terminal = j
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if terminal != nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if terminal == nil {
+		t.Fatal("the job was never refused. Core computed an allowlist and dispatched a task " +
+			"outside it, which makes the allowlist advisory and leaves ADR-024 control 1 with " +
+			"one enforcement site instead of two")
+	}
+	if terminal.TerminationReason == nil ||
+		*terminal.TerminationReason != store.TerminationScopeViolationHalt {
+		t.Errorf("termination_reason = %v, want scope_violation_halt", terminal.TerminationReason)
+	}
+
+	fs.mu.Lock()
+	outbound := append([]*scanpointv1.CoreMessage(nil), fs.outbound...)
+	fs.mu.Unlock()
+	for _, m := range outbound {
+		if m.GetJob() != nil {
+			t.Errorf("an out-of-scope job was put on the wire: %v", m.GetJob())
+		}
+	}
+
+	// The audit event, not just the state change. An operator reads the audit
+	// log and the UI, never Core's stdout, so a scan that stopped for a scope
+	// defect would otherwise look like a scan that stalled.
+	if err := db.Read(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		events, err := (store.AuditEvents{}).ListByResource(ctx, c, "scan_job", jobID, 10)
+		if err != nil {
+			return err
+		}
+		for _, e := range events {
+			if e.Action == "job.scope_refused" {
+				return nil
+			}
+		}
+		t.Errorf("no job.scope_refused audit event; got %d events", len(events))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
