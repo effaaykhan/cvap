@@ -87,22 +87,89 @@ with the TLS and keepalive requirements in the package doc for that reason.
 ADR-024 control 2 is "a policy may LOWER the ceiling and may never RAISE it".
 `defaultConstraints()` returned the platform table verbatim, so a policy asking for 50 pps was
 handed 1,000 — twenty times what its operator asked for, against an estate they had reason to
-be careful with. `constraintsFor(policy, rules)` takes the minimum, which honours both halves
-in one expression and ignores rather than trusts a policy value above the ceiling.
+be careful with. `constraintsFor(policy, rules, now)` takes the minimum, which honours both
+halves in one expression and ignores rather than trusts a policy value above the ceiling.
 
 The per-target limits clamp beneath the per-scan-point rate. A `max_rate_per_target` above the
 whole scan point's budget is not merely meaningless — it tells a runtime it may send ten times
 the policy rate at a single host, which is the one place it matters most. `fragile_rate_pps`
 clamps again beneath that, since control 3 caps rate *regardless* of what the policy permits.
 
-`safety_mode` is passed through, not minimised: it is not a quantity, and it is the field an
-operator sets deliberately to authorise intrusive checks (ADR-021). Hardcoding `safe` meant an
-intrusive policy silently ran safe — the failure that looks like everything working.
+`max_concurrent_per_target` is the second lever, added in migration 0024, and it is not a
+derivative of the rate: a host answering 20 simultaneous connects at 5 pps is under more
+pressure than one answering a single connection at 50 pps, and connection count is what tips a
+printer over. An operator who lowered `max_rate_pps` to protect a fragile estate was still
+being handed 20 concurrent connections per host. Lower-only, like the rest of the table.
+
+`safety_mode` is not a quantity, so it is not minimised arithmetically — but it is still
+reduced, on ADR-021's other axis. **The policy sets the ceiling and the scan opts in beneath
+it**, and `intrusive` travels only when `scan_policies.safety_mode` and `scans.safety_mode`
+both say so. Before `scans.safety_mode` existed there was nothing to opt in with, so one policy
+flipped to intrusive standing-authorised every scan bound to it, including scheduled ones
+nobody looked at again — the failure ADR-021 was written against. Hardcoding `safe` was the
+opposite failure and looked like everything working.
+
+`store.Scans.SetSafetyMode` is the writer: it refuses an opt-in above the policy, refuses one
+after the scan has started, and records the ADR-021 audit event in the same transaction.
+Nothing calls it yet — the operator API is a later session. `offerWork` writes a second event,
+`job.intrusive_dispatched`, when intrusive work actually goes out. The two are different facts:
+the first records what an operator authorised, the second what Core dispatched and to which
+scan point. **Neither can fire today** — the second needs `scans.safety_mode = 'intrusive'`, and
+nothing in production writes the `scans` table at all. Intrusive is currently unreachable,
+which is the safe direction and is not the same as the control working.
+
+## Maintenance windows are evaluated at Core, and only their end travels
+
+`scan_policies.time_windows` was read by nothing, while `ScanConstraints.window_ends_unix` and
+`TerminationReason.WINDOW_EXPIRED` both existed — a policy could carry a window, the wire could
+carry its end, a scan point could report hitting it, and no code connected the three.
+
+The recurring schedule never leaves Core. `internal/dispatch/windows.go` evaluates it and puts
+one instant on the wire, so a scan point's clock drifting cannot widen a window and the
+encoding stays Core's business. The encoding is documented on the column in migration 0024.
+
+**A job outside its window is not claimed, rather than claimed and released.** `Claim` takes
+the currently-closed policy ids and excludes them, because releasing would increment `attempt`
+on every two-second poll and hit `MaxAttempts` inside ten seconds — the maintenance window
+would destroy the scan it was written to protect. Both the claim predicate and
+`window_ends_unix` are computed from **one** `now` per pass, so the two cannot disagree about
+whether a window is open.
+
+A window that cannot be parsed is deliberately *not* excluded: the job is claimed,
+`constraintsFor` refuses it, and `refuseJob` ends it with an audit event naming the policy. A
+scan that stops has to say so.
+
+**The window has two enforcement sites, like the target allowlist.** Core refusing to *start* a
+job is only half of it — a job claimed at 03:59 under a `22:00–04:00` window renewed its lease
+every 20 s indefinitely, and the only thing that would ever have stopped it was
+`window_ends_unix` on the wire, in a runtime that does not exist yet running a build we do not
+control. That is the "enforce at the Scan Point only" alternative ADR-024 rejected.
+`onLeaseRenewal` refuses a renewal once the window has closed, which invariant 8 and ADR-012
+turn into a self-abort with credential zeroisation — a stronger stop than asking. That check
+fails *open* on a read error, and it is the one place in this package that should: a database
+blip must not mass-revoke every lease in flight. The start-side check fails closed, because
+withholding work is not the same as stopping it.
+
+## Zones are a claim predicate, not advice
+
+`scan_policies.allowed_zones` was selected by nothing, so a scan point in a forbidden zone
+could claim the job and an operator restricting a scan to their DMZ had written a comment. It
+is now a predicate inside `Jobs.Claim`, with the zone read from `scan_points` and never from
+the stream.
+
+## Empty means the opposite thing in the two families of list (ADR-037)
+
+`allowed_targets` enumerates **permission**: empty denies everything, because the safe answer
+to "where may this scan reach" is nowhere. `allowed_zones` and `time_windows` enumerate
+**constraint**: empty is unrestricted, because an unset restriction is no restriction — and
+every policy row that exists defaults to `'[]'`, so the other reading would stop the fleet on
+the migration that enforced them. Do not normalise these to one convention; ADR-037 is why.
 
 **`allowed_targets: []` means DENY ALL.** Empty and absent are indistinguishable in proto3, so
 they must mean the same thing, and for a field whose other reading is "scan anything" the safe
-reading is the only defensible one. Core therefore has to populate it: `scopeLists` fills it
-from `policy_scope_rules`, and both wire fields were previously left empty.
+reading is the only defensible one. Core therefore has to populate it: `scopePlan` fills it
+from `policy_scope_rules`, and both wire fields were previously left empty. `scopePlan` is
+that function.
 
 **Anything that cannot travel fails the job — allows and denies share no drop path.** The
 first version skipped `tag` rules before looking at their effect, which a safety audit showed
@@ -135,8 +202,11 @@ A kill switch halts the fleet. `CancelJob` stops one runaway scan and leaves eve
 running, and the difference matters: a stop button that costs every other customer's scan is
 one people negotiate with rather than press.
 
-The trigger is `scans.status = 'cancelled'` — no new column and no second source of truth. Both
-halves are needed and either alone is not a cancellation:
+The trigger is `scans.status` — no new column and no second source of truth. **Both** stopped
+statuses, not just `cancelled`: `Jobs.Claim` has excluded `cancelled` and `killed` from the
+outset, so a killed scan stopped being handed out while its in-flight jobs were told nothing —
+the one state where the scan is most demonstrably still touching the estate. Both halves are
+needed and either alone is not a cancellation:
 
 - `propagateCancellations` sends `CancelJob` for in-flight jobs, on the **urgent** channel ahead
   of any assignment, marking sent only when the message was actually queued (a scan point with a
@@ -147,3 +217,46 @@ halves are needed and either alone is not a cancellation:
 
 `CancelJob` carries the lease epoch so it names the incarnation Core means, not whatever is
 running under that job id after a reassignment.
+
+**`CancelAck` closes it.** ADR-024 requires `KillAck` because "a 10-second bound Core cannot
+measure is not a control", and that argument does not weaken when the blast radius narrows:
+"cancellation sent" was the last thing Core knew, and a scan point that dropped the message
+looked exactly like one that halted. `cancel_acks` (migration 0025) mirrors `kill_acks`;
+`CancelAcks.Unacknowledged` is the set an operator chases and `CancelAcks.ForScan` is the
+latency. Latency is `nil` rather than zero when `scans.cancel_requested_at` is unset, because
+reporting an unmeasured bound as `0s` is a gate that silently passes.
+
+## The kill switch is narrowed by Core, never by the receiver
+
+`KillSwitches.LiveFor` replaces an unscoped read that sent every live kill to every scan point.
+A zone kill therefore halted the whole fleet, and the receiver had nothing to filter on — the
+only safe reading of a bare `kill_id` is "halt everything".
+
+Delivery is narrowed at Core because a scan point must not be able to decide that the message
+stopping it does not apply to it (ADR-020). `KillSwitch.scope` then says how much of what that
+scan point holds to halt, and `KILL_SCOPE_UNSPECIFIED` means everything — an older Core does
+not set the field, so the zero value has to be what a bare `kill_id` meant.
+
+A **scan**-scoped kill halts nothing wholesale. `KillSwitches.Issue` marks the scan `killed` in
+the same transaction, which turns its in-flight jobs into per-job `CancelJob` messages that
+name the job and the epoch, and stops its queued ones being claimed. `Jobs.Claim`'s kill clause
+covers all three scopes; `zone` was missing, so a zone kill halted the zone's running jobs and
+dispatch handed the same scan points fresh ones two seconds later.
+
+**Delivery and the acknowledgement set are one predicate** — `store.killCoversScanPoint`, used
+by `LiveFor` and `Unacknowledged`. They were written separately and immediately disagreed: a
+zone kill delivered to one scan point reported every other one in the tenant as delinquent,
+forever, for a message Core never sent them. That is worse than no measurement, because a scan
+point that genuinely dropped the kill becomes indistinguishable from the ones never covered.
+
+**Both that predicate and `CancellableFor` key on the LEASE, not on `scan_jobs.scan_point_id`.**
+`ExpireLeases` nulls `scan_point_id`, so a scan point that partitioned while scanning stopped
+matching at the exact moment it became the thing an operator most needs to stop. Bounded by
+`store.StillHoldingGrace`, because `Release` and `ReleaseAny` both require `granted` — once a
+lease has expired, *nothing* can mark it released, so an unbounded test would chase that job
+for the life of the tenant.
+
+The widest arm of every kill predicate is `scope NOT IN ('zone','scan')` rather than
+`scope = 'tenant'`, so a `kill_scope` a later migration adds is delivered to everyone and
+blocks every claim until someone teaches the predicate about it. That matches `killScope()`'s
+documented fail-safe, whose default branch was otherwise unreachable.

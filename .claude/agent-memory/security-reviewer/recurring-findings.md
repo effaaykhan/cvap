@@ -179,6 +179,65 @@ cannot see it.
 **How to apply:** on any streaming handler, ask what unblocks each goroutine and whether the
 handler returning is on that path. A test double whose Send never blocks is not evidence.
 
+**15. A fan-out predicate narrowed without narrowing its inverse, so the measurement the
+control depends on stops being satisfiable.** Session 8e replaced `KillSwitches.Live` (every
+live kill to every scan point) with `LiveFor(scanPointID)` and left
+`KillSwitches.Unacknowledged` selecting *every* recently-heartbeating scan point in the tenant
+that has no ack row. Demonstrated: a zone kill covering 1 of 2 scan points, the covered one
+acks, and `Unacknowledged` still names the uncovered one — forever, since it was never sent
+the message it is being chased for. ADR-024's own argument is "a bound Core cannot measure is
+not a control"; narrowing delivery without narrowing the expectation converts the measurement
+into permanent noise, which is worse, because an operator learns to ignore it.
+**Why:** delivery and acknowledgement are written in different functions and often different
+sessions, and only one of them looks like "the change".
+**How to apply:** whenever a "who receives X" predicate changes, grep for the "who still owes
+X" predicate and diff the two by hand. The right fix is to define the coverage predicate ONCE
+(a SQL function over `(kill_switch_row, scan_point_id)`) and call it from delivery, from the
+claim block, and from the unacknowledged set — three copies of a scope test will drift.
+
+**16. A safety predicate keyed on the CURRENT assignment, for a control whose whole premise is
+that the current assignment is no longer trustworthy.** `LiveFor`'s scan-scope branch and
+`Jobs.CancellableFor` both require `scan_jobs.scan_point_id = $sp AND j.status IN
+('assigned','running')`. `Leases.ExpireLeases` sets `scan_point_id = NULL, status='queued'` for
+reassign_safe jobs and `status='failed'` for the rest, so both predicates stop matching the
+moment Core expires the lease. Demonstrated: `LiveFor=1 CancellableFor=1` before expiry, `0 0`
+after, while the scan point may still be executing. The durable record of who held the job is
+`job_leases.holder_scan_point`, which expiry does not clear.
+**Why:** ADR-012 says the scan point self-aborts on renewal failure, so the code reads as
+covered — but the kill switch exists precisely because self-abort cannot be relied on.
+**How to apply:** for any "stop this" predicate, ask what Core does to its own rows when it
+gives up on a job, and re-derive the predicate from a column that survives that.
+
+**17. An acknowledgement table with no precondition, so the attestation can be filed before it
+is asked for.** `CancelAcks.Record` checks only `epoch > 0`; it does not check that the job's
+scan is `cancelled`/`killed`, that this scan point holds the job, or that the epoch matches the
+live lease. `CancelAcks.Unacknowledged` keys on `(tenant, job_id, scan_point_id)` with no
+`acked_at`/`lease_epoch` term. Demonstrated: a scan point acks its own job at a fabricated
+epoch before any operator action, and when the scan is later cancelled it is already outside
+the chase set. `ForScan` renders latency `-1ms` and nothing flags negative. Three separate
+comments (proto `CancelAck.lease_epoch`, migration 0025, `internal/store/cancel.go`) promise
+the epoch makes a stale ack *visible rather than counted*; no code reads it — class 12 again.
+A foreign-job ack is also accepted, which does not hide the real holder (that join is correct)
+but writes forged rows into an append-only table `cvap_app` has no DELETE on.
+**Why:** the ack row is treated as a receipt, but nothing establishes that a request was ever
+sent, so the receipt is unilateral.
+**How to apply:** for every `*_acks` table, write the INSERT as `INSERT ... SELECT ... WHERE`
+over the rows that prove the request was issued to THIS actor, and make the "unacknowledged"
+query require `acked_at >= requested_at` and a matching epoch.
+
+**18. Operator-supplied documents parsed unbounded, per poll, inside the write transaction.**
+`dispatch.parseWindows` caps nothing (`MaxWindowedPolicies` bounds the row count, not the array
+length), `windowClosedPolicies` re-parses every windowed policy on every 2 s poll for every
+connected scan point, and it runs inside `offerWork`'s `s.db.Write` closure, so a pooled
+connection and an open transaction are held for the whole parse. Measured: 122 ms for one
+policy with 10,000 `"tz":"Europe/London"` windows; `time.LoadLocation` is ~6 µs on a hit and
+~17 µs on a miss with embedded tzdata and is NOT cached by the stdlib.
+**Why:** the sibling caps (`MaxScopeRulesPerAssignment`, `MaxWindowedPolicies`) make the file
+look bounded, and the parse is cheap for the shape anyone tests with.
+**How to apply:** for each parsed column, name the cap on the container AND on its contents,
+ask how often the parse runs and whether a DB transaction is open across it, and check whether
+an expensive resolver inside the loop (tz, regex, DNS) is memoised.
+
 **Constraint on fixes:** `proto/` is frozen additive-only within a major version (ADR-022),
 enforced by `buf breaking` with the FILE category and a baseline established at bd0e4f9.
 So a proto finding almost never gets fixed by removing or retyping a field. Acceptable fixes

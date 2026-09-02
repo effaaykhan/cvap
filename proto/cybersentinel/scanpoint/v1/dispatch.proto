@@ -30,6 +30,7 @@ message ScanPointMessage {
     Backpressure backpressure = 6;
     KillAck kill_ack = 7;
     RulePackStatus rule_pack_status = 8;
+    CancelAck cancel_ack = 9;
   }
 }
 
@@ -112,7 +113,16 @@ message Task {
 message ScanConstraints {
   uint32 max_rate_pps = 1;
   uint32 max_rate_per_target = 2;
-  string safety_mode = 3;  // safe | intrusive
+
+  // safe | intrusive. The EFFECTIVE mode, already reduced by Core.
+  //
+  // ADR-021 gives the policy a ceiling and the scan an opt-in beneath it, and
+  // what travels is the lower of the two. A scan point never sees which half
+  // produced the value, deliberately: a policy left on intrusive after a test
+  // window is exactly the failure ADR-021 was written against, and a wire field
+  // carrying the ceiling rather than the choice would put that failure back on
+  // the network.
+  string safety_mode = 3;
 
   // Enforced again scan-point side. Scope enforcement is duplicated on purpose
   // and lives at exactly two sites -- Core at planning, the scan point runtime
@@ -121,14 +131,48 @@ message ScanConstraints {
   // runtime for authorisation (ADR-024, ADR-027).
   repeated string exclusions = 4;
 
+  // When this job's authorised window closes, or 0 when the policy sets no
+  // window at all. Derived from scan_policies.time_windows, which Core
+  // evaluates; the recurring schedule never travels.
+  //
+  // Absent means UNRESTRICTED, which is the opposite convention to
+  // allowed_targets below. The asymmetry is deliberate and ADR-037 records it:
+  // this field answers "is this scan restricted in time", and an unset
+  // restriction is no restriction; allowed_targets answers "where may this scan
+  // reach", and the safe answer to an unset question is nowhere. One enumerates
+  // constraint, the other enumerates permission.
+  //
+  // A runtime that reaches this instant MUST stop sending and terminate with
+  // WINDOW_EXPIRED. Core will not have dispatched the job at all if the window
+  // was already closed when it was claimed.
   int64 window_ends_unix = 5;
 
   // Allowlist; exclusions take precedence. Without this the scan-point check
   // authorises anything not denied, which is not a scope check.
+  //
+  // EMPTY MEANS DENY ALL, and empty is the same as absent -- proto3 cannot
+  // distinguish them, so they must not mean different things. A runtime that
+  // receives no allowed targets MUST send nothing and fail the task; it MUST
+  // NOT read the absence as "no filter configured". For a field whose other
+  // reading is "scan anything", the safe reading is the only defensible one.
+  //
+  // This describes behaviour that exists rather than an intention. Core
+  // enforces the same rule at planning: every task target is compared against
+  // this list before the job is assigned, and a job whose policy has no allow
+  // rules is refused with an audit event rather than dispatched (ADR-024
+  // control 1, site one). Neither side trusts the other, which is why both
+  // sides read the empty list the same way.
   repeated string allowed_targets = 6;
 
   uint32 fragile_rate_pps = 7;
+
+  // ADR-024 control 2, lower-only: a policy may reduce this and may never raise
+  // it. A separate lever from max_rate_per_target rather than a derivative of
+  // it, because concurrent connections rather than packet rate are what tip a
+  // printer or an embedded device over -- a host answering 20 simultaneous
+  // connects at 5 pps is under more pressure than one answering 1 at 50.
   uint32 max_concurrent_per_target = 8;
+
   uint32 connect_timeout_ms = 9;
 }
 
@@ -274,6 +318,29 @@ message KillAck {
   uint32 tasks_halted = 3;
 }
 
+// The answer to CancelJob, and the same argument as KillAck.
+//
+// ADR-024 requires KillAck because "a 10-second bound Core cannot measure is
+// not a control". That argument does not weaken when the blast radius narrows:
+// an operator who cancels one runaway scan and cannot tell whether it stopped
+// has a button, not a control. Without this, "cancellation sent" was the last
+// thing Core knew, and a scan point that dropped the message looked identical
+// to one that halted.
+//
+// Idempotent at Core: a scan point that reconnects and acks again produces no
+// second row, or "how many acknowledged" stops meaning anything.
+message CancelAck {
+  string job_id = 1;
+
+  // The incarnation that was halted, echoed from CancelJob. A cancellation
+  // acknowledged under a stale epoch halted work Core was no longer asking
+  // about, and an operator needs to see that rather than count it.
+  int64 lease_epoch = 2;
+
+  int64 acked_at_unix = 3;
+  uint32 tasks_halted = 4;
+}
+
 // ---------------------------------------------------------------------------
 // Leases, cancellation and the kill switch, Core to scan point
 // ---------------------------------------------------------------------------
@@ -344,6 +411,46 @@ message CancelJob {
 
 message KillSwitch {
   string kill_id = 1;
+
+  // Mirrors kill_switches.scope: how much of what this scan point holds the
+  // operator meant to stop.
+  //
+  // Core does the narrowing and this field reports it. A kill is delivered only
+  // to the scan points it covers -- a zone kill reaches the zone, a scan kill
+  // reaches the scan points holding that scan's jobs -- so a runtime never has
+  // to decide whether a kill applies to it. What it still has to decide is how
+  // much to halt, and without this field there was no way to say: a per-scan
+  // kill and a tenant-wide kill arrived as the same message, so the only
+  // correct reading was the widest one, and a narrow kill halted the whole
+  // scan point.
+  //
+  // KILL_SCOPE_SCAN halts nothing on its own. The jobs it covers arrive
+  // individually as CancelJob, which names the job and the epoch; this message
+  // tells the runtime that a wholesale halt is NOT what was asked for.
+  //
+  // EVERY scope is still acknowledged with KillAck, including one that halts
+  // nothing. The ack measures RECEIPT, not halting: ADR-024 bounds propagation
+  // at 10 s and requires the bound to be measurable, and a scope that a runtime
+  // decides needs no answer is a scope whose propagation Core cannot measure at
+  // all. tasks_halted = 0 is the correct answer for a scan-scoped kill and is
+  // not the same as silence.
+  //
+  // UNSPECIFIED means halt everything. An older Core does not set this field,
+  // and proto3 renders that as the zero value -- so the zero value has to be
+  // the reading that was correct before the field existed (ADR-022).
+  KillScope scope = 2;
+}
+
+// Scoped kills narrow how much a runtime halts. They do NOT narrow the
+// obligation to acknowledge -- see KillSwitch.scope.
+enum KillScope {
+  // Halt everything. Also what an older Core, which does not set the field,
+  // will appear to have sent.
+  KILL_SCOPE_UNSPECIFIED = 0;
+
+  KILL_SCOPE_TENANT = 1;  // every scan point in the tenant
+  KILL_SCOPE_ZONE = 2;    // one vantage point
+  KILL_SCOPE_SCAN = 3;    // one scan's jobs; see CancelJob
 }
 
 // ---------------------------------------------------------------------------

@@ -146,6 +146,62 @@ func (LeaseState) EnumDescriptor() ([]byte, []int) {
 	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP(), []int{1}
 }
 
+// Scoped kills narrow how much a runtime halts. They do NOT narrow the
+// obligation to acknowledge -- see KillSwitch.scope.
+type KillScope int32
+
+const (
+	// Halt everything. Also what an older Core, which does not set the field,
+	// will appear to have sent.
+	KillScope_KILL_SCOPE_UNSPECIFIED KillScope = 0
+	KillScope_KILL_SCOPE_TENANT      KillScope = 1 // every scan point in the tenant
+	KillScope_KILL_SCOPE_ZONE        KillScope = 2 // one vantage point
+	KillScope_KILL_SCOPE_SCAN        KillScope = 3 // one scan's jobs; see CancelJob
+)
+
+// Enum value maps for KillScope.
+var (
+	KillScope_name = map[int32]string{
+		0: "KILL_SCOPE_UNSPECIFIED",
+		1: "KILL_SCOPE_TENANT",
+		2: "KILL_SCOPE_ZONE",
+		3: "KILL_SCOPE_SCAN",
+	}
+	KillScope_value = map[string]int32{
+		"KILL_SCOPE_UNSPECIFIED": 0,
+		"KILL_SCOPE_TENANT":      1,
+		"KILL_SCOPE_ZONE":        2,
+		"KILL_SCOPE_SCAN":        3,
+	}
+)
+
+func (x KillScope) Enum() *KillScope {
+	p := new(KillScope)
+	*p = x
+	return p
+}
+
+func (x KillScope) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (KillScope) Descriptor() protoreflect.EnumDescriptor {
+	return file_cybersentinel_scanpoint_v1_dispatch_proto_enumTypes[2].Descriptor()
+}
+
+func (KillScope) Type() protoreflect.EnumType {
+	return &file_cybersentinel_scanpoint_v1_dispatch_proto_enumTypes[2]
+}
+
+func (x KillScope) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use KillScope.Descriptor instead.
+func (KillScope) EnumDescriptor() ([]byte, []int) {
+	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP(), []int{2}
+}
+
 type CredKind int32
 
 const (
@@ -188,11 +244,11 @@ func (x CredKind) String() string {
 }
 
 func (CredKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_cybersentinel_scanpoint_v1_dispatch_proto_enumTypes[2].Descriptor()
+	return file_cybersentinel_scanpoint_v1_dispatch_proto_enumTypes[3].Descriptor()
 }
 
 func (CredKind) Type() protoreflect.EnumType {
-	return &file_cybersentinel_scanpoint_v1_dispatch_proto_enumTypes[2]
+	return &file_cybersentinel_scanpoint_v1_dispatch_proto_enumTypes[3]
 }
 
 func (x CredKind) Number() protoreflect.EnumNumber {
@@ -201,7 +257,7 @@ func (x CredKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use CredKind.Descriptor instead.
 func (CredKind) EnumDescriptor() ([]byte, []int) {
-	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP(), []int{2}
+	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP(), []int{3}
 }
 
 type ScanPointMessage struct {
@@ -216,6 +272,7 @@ type ScanPointMessage struct {
 	//	*ScanPointMessage_Backpressure
 	//	*ScanPointMessage_KillAck
 	//	*ScanPointMessage_RulePackStatus
+	//	*ScanPointMessage_CancelAck
 	Msg           isScanPointMessage_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -330,6 +387,15 @@ func (x *ScanPointMessage) GetRulePackStatus() *RulePackStatus {
 	return nil
 }
 
+func (x *ScanPointMessage) GetCancelAck() *CancelAck {
+	if x != nil {
+		if x, ok := x.Msg.(*ScanPointMessage_CancelAck); ok {
+			return x.CancelAck
+		}
+	}
+	return nil
+}
+
 type isScanPointMessage_Msg interface {
 	isScanPointMessage_Msg()
 }
@@ -366,6 +432,10 @@ type ScanPointMessage_RulePackStatus struct {
 	RulePackStatus *RulePackStatus `protobuf:"bytes,8,opt,name=rule_pack_status,json=rulePackStatus,proto3,oneof"`
 }
 
+type ScanPointMessage_CancelAck struct {
+	CancelAck *CancelAck `protobuf:"bytes,9,opt,name=cancel_ack,json=cancelAck,proto3,oneof"`
+}
+
 func (*ScanPointMessage_Hello) isScanPointMessage_Msg() {}
 
 func (*ScanPointMessage_Heartbeat) isScanPointMessage_Msg() {}
@@ -381,6 +451,8 @@ func (*ScanPointMessage_Backpressure) isScanPointMessage_Msg() {}
 func (*ScanPointMessage_KillAck) isScanPointMessage_Msg() {}
 
 func (*ScanPointMessage_RulePackStatus) isScanPointMessage_Msg() {}
+
+func (*ScanPointMessage_CancelAck) isScanPointMessage_Msg() {}
 
 type CoreMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -857,20 +929,60 @@ type ScanConstraints struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	MaxRatePps       uint32                 `protobuf:"varint,1,opt,name=max_rate_pps,json=maxRatePps,proto3" json:"max_rate_pps,omitempty"`
 	MaxRatePerTarget uint32                 `protobuf:"varint,2,opt,name=max_rate_per_target,json=maxRatePerTarget,proto3" json:"max_rate_per_target,omitempty"`
-	SafetyMode       string                 `protobuf:"bytes,3,opt,name=safety_mode,json=safetyMode,proto3" json:"safety_mode,omitempty"` // safe | intrusive
+	// safe | intrusive. The EFFECTIVE mode, already reduced by Core.
+	//
+	// ADR-021 gives the policy a ceiling and the scan an opt-in beneath it, and
+	// what travels is the lower of the two. A scan point never sees which half
+	// produced the value, deliberately: a policy left on intrusive after a test
+	// window is exactly the failure ADR-021 was written against, and a wire field
+	// carrying the ceiling rather than the choice would put that failure back on
+	// the network.
+	SafetyMode string `protobuf:"bytes,3,opt,name=safety_mode,json=safetyMode,proto3" json:"safety_mode,omitempty"`
 	// Enforced again scan-point side. Scope enforcement is duplicated on purpose
 	// and lives at exactly two sites -- Core at planning, the scan point runtime
 	// on the send path. Never in an engine: engines receive resolved,
 	// pre-authorised targets and send anything discovered mid-scan back to the
 	// runtime for authorisation (ADR-024, ADR-027).
-	Exclusions     []string `protobuf:"bytes,4,rep,name=exclusions,proto3" json:"exclusions,omitempty"`
-	WindowEndsUnix int64    `protobuf:"varint,5,opt,name=window_ends_unix,json=windowEndsUnix,proto3" json:"window_ends_unix,omitempty"`
+	Exclusions []string `protobuf:"bytes,4,rep,name=exclusions,proto3" json:"exclusions,omitempty"`
+	// When this job's authorised window closes, or 0 when the policy sets no
+	// window at all. Derived from scan_policies.time_windows, which Core
+	// evaluates; the recurring schedule never travels.
+	//
+	// Absent means UNRESTRICTED, which is the opposite convention to
+	// allowed_targets below. The asymmetry is deliberate and ADR-037 records it:
+	// this field answers "is this scan restricted in time", and an unset
+	// restriction is no restriction; allowed_targets answers "where may this scan
+	// reach", and the safe answer to an unset question is nowhere. One enumerates
+	// constraint, the other enumerates permission.
+	//
+	// A runtime that reaches this instant MUST stop sending and terminate with
+	// WINDOW_EXPIRED. Core will not have dispatched the job at all if the window
+	// was already closed when it was claimed.
+	WindowEndsUnix int64 `protobuf:"varint,5,opt,name=window_ends_unix,json=windowEndsUnix,proto3" json:"window_ends_unix,omitempty"`
 	// Allowlist; exclusions take precedence. Without this the scan-point check
 	// authorises anything not denied, which is not a scope check.
-	AllowedTargets         []string `protobuf:"bytes,6,rep,name=allowed_targets,json=allowedTargets,proto3" json:"allowed_targets,omitempty"`
-	FragileRatePps         uint32   `protobuf:"varint,7,opt,name=fragile_rate_pps,json=fragileRatePps,proto3" json:"fragile_rate_pps,omitempty"`
-	MaxConcurrentPerTarget uint32   `protobuf:"varint,8,opt,name=max_concurrent_per_target,json=maxConcurrentPerTarget,proto3" json:"max_concurrent_per_target,omitempty"`
-	ConnectTimeoutMs       uint32   `protobuf:"varint,9,opt,name=connect_timeout_ms,json=connectTimeoutMs,proto3" json:"connect_timeout_ms,omitempty"`
+	//
+	// EMPTY MEANS DENY ALL, and empty is the same as absent -- proto3 cannot
+	// distinguish them, so they must not mean different things. A runtime that
+	// receives no allowed targets MUST send nothing and fail the task; it MUST
+	// NOT read the absence as "no filter configured". For a field whose other
+	// reading is "scan anything", the safe reading is the only defensible one.
+	//
+	// This describes behaviour that exists rather than an intention. Core
+	// enforces the same rule at planning: every task target is compared against
+	// this list before the job is assigned, and a job whose policy has no allow
+	// rules is refused with an audit event rather than dispatched (ADR-024
+	// control 1, site one). Neither side trusts the other, which is why both
+	// sides read the empty list the same way.
+	AllowedTargets []string `protobuf:"bytes,6,rep,name=allowed_targets,json=allowedTargets,proto3" json:"allowed_targets,omitempty"`
+	FragileRatePps uint32   `protobuf:"varint,7,opt,name=fragile_rate_pps,json=fragileRatePps,proto3" json:"fragile_rate_pps,omitempty"`
+	// ADR-024 control 2, lower-only: a policy may reduce this and may never raise
+	// it. A separate lever from max_rate_per_target rather than a derivative of
+	// it, because concurrent connections rather than packet rate are what tip a
+	// printer or an embedded device over -- a host answering 20 simultaneous
+	// connects at 5 pps is under more pressure than one answering 1 at 50.
+	MaxConcurrentPerTarget uint32 `protobuf:"varint,8,opt,name=max_concurrent_per_target,json=maxConcurrentPerTarget,proto3" json:"max_concurrent_per_target,omitempty"`
+	ConnectTimeoutMs       uint32 `protobuf:"varint,9,opt,name=connect_timeout_ms,json=connectTimeoutMs,proto3" json:"connect_timeout_ms,omitempty"`
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
 }
@@ -1525,6 +1637,88 @@ func (x *KillAck) GetTasksHalted() uint32 {
 	return 0
 }
 
+// The answer to CancelJob, and the same argument as KillAck.
+//
+// ADR-024 requires KillAck because "a 10-second bound Core cannot measure is
+// not a control". That argument does not weaken when the blast radius narrows:
+// an operator who cancels one runaway scan and cannot tell whether it stopped
+// has a button, not a control. Without this, "cancellation sent" was the last
+// thing Core knew, and a scan point that dropped the message looked identical
+// to one that halted.
+//
+// Idempotent at Core: a scan point that reconnects and acks again produces no
+// second row, or "how many acknowledged" stops meaning anything.
+type CancelAck struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	JobId string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	// The incarnation that was halted, echoed from CancelJob. A cancellation
+	// acknowledged under a stale epoch halted work Core was no longer asking
+	// about, and an operator needs to see that rather than count it.
+	LeaseEpoch    int64  `protobuf:"varint,2,opt,name=lease_epoch,json=leaseEpoch,proto3" json:"lease_epoch,omitempty"`
+	AckedAtUnix   int64  `protobuf:"varint,3,opt,name=acked_at_unix,json=ackedAtUnix,proto3" json:"acked_at_unix,omitempty"`
+	TasksHalted   uint32 `protobuf:"varint,4,opt,name=tasks_halted,json=tasksHalted,proto3" json:"tasks_halted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelAck) Reset() {
+	*x = CancelAck{}
+	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelAck) ProtoMessage() {}
+
+func (x *CancelAck) ProtoReflect() protoreflect.Message {
+	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelAck.ProtoReflect.Descriptor instead.
+func (*CancelAck) Descriptor() ([]byte, []int) {
+	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *CancelAck) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+func (x *CancelAck) GetLeaseEpoch() int64 {
+	if x != nil {
+		return x.LeaseEpoch
+	}
+	return 0
+}
+
+func (x *CancelAck) GetAckedAtUnix() int64 {
+	if x != nil {
+		return x.AckedAtUnix
+	}
+	return 0
+}
+
+func (x *CancelAck) GetTasksHalted() uint32 {
+	if x != nil {
+		return x.TasksHalted
+	}
+	return 0
+}
+
 // Core's answer to a LeaseRenewal, and the vehicle for revoking a lease
 // unsolicited.
 //
@@ -1545,7 +1739,7 @@ type LeaseGrant struct {
 
 func (x *LeaseGrant) Reset() {
 	*x = LeaseGrant{}
-	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[13]
+	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1557,7 +1751,7 @@ func (x *LeaseGrant) String() string {
 func (*LeaseGrant) ProtoMessage() {}
 
 func (x *LeaseGrant) ProtoReflect() protoreflect.Message {
-	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[13]
+	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1570,7 +1764,7 @@ func (x *LeaseGrant) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LeaseGrant.ProtoReflect.Descriptor instead.
 func (*LeaseGrant) Descriptor() ([]byte, []int) {
-	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP(), []int{13}
+	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *LeaseGrant) GetJobId() string {
@@ -1628,7 +1822,7 @@ type CancelJob struct {
 
 func (x *CancelJob) Reset() {
 	*x = CancelJob{}
-	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[14]
+	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1640,7 +1834,7 @@ func (x *CancelJob) String() string {
 func (*CancelJob) ProtoMessage() {}
 
 func (x *CancelJob) ProtoReflect() protoreflect.Message {
-	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[14]
+	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1653,7 +1847,7 @@ func (x *CancelJob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelJob.ProtoReflect.Descriptor instead.
 func (*CancelJob) Descriptor() ([]byte, []int) {
-	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP(), []int{14}
+	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *CancelJob) GetJobId() string {
@@ -1685,15 +1879,42 @@ func (x *CancelJob) GetGraceMs() uint32 {
 }
 
 type KillSwitch struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	KillId        string                 `protobuf:"bytes,1,opt,name=kill_id,json=killId,proto3" json:"kill_id,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	KillId string                 `protobuf:"bytes,1,opt,name=kill_id,json=killId,proto3" json:"kill_id,omitempty"`
+	// Mirrors kill_switches.scope: how much of what this scan point holds the
+	// operator meant to stop.
+	//
+	// Core does the narrowing and this field reports it. A kill is delivered only
+	// to the scan points it covers -- a zone kill reaches the zone, a scan kill
+	// reaches the scan points holding that scan's jobs -- so a runtime never has
+	// to decide whether a kill applies to it. What it still has to decide is how
+	// much to halt, and without this field there was no way to say: a per-scan
+	// kill and a tenant-wide kill arrived as the same message, so the only
+	// correct reading was the widest one, and a narrow kill halted the whole
+	// scan point.
+	//
+	// KILL_SCOPE_SCAN halts nothing on its own. The jobs it covers arrive
+	// individually as CancelJob, which names the job and the epoch; this message
+	// tells the runtime that a wholesale halt is NOT what was asked for.
+	//
+	// EVERY scope is still acknowledged with KillAck, including one that halts
+	// nothing. The ack measures RECEIPT, not halting: ADR-024 bounds propagation
+	// at 10 s and requires the bound to be measurable, and a scope that a runtime
+	// decides needs no answer is a scope whose propagation Core cannot measure at
+	// all. tasks_halted = 0 is the correct answer for a scan-scoped kill and is
+	// not the same as silence.
+	//
+	// UNSPECIFIED means halt everything. An older Core does not set this field,
+	// and proto3 renders that as the zero value -- so the zero value has to be
+	// the reading that was correct before the field existed (ADR-022).
+	Scope         KillScope `protobuf:"varint,2,opt,name=scope,proto3,enum=cybersentinel.scanpoint.v1.KillScope" json:"scope,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *KillSwitch) Reset() {
 	*x = KillSwitch{}
-	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[15]
+	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1705,7 +1926,7 @@ func (x *KillSwitch) String() string {
 func (*KillSwitch) ProtoMessage() {}
 
 func (x *KillSwitch) ProtoReflect() protoreflect.Message {
-	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[15]
+	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1718,7 +1939,7 @@ func (x *KillSwitch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KillSwitch.ProtoReflect.Descriptor instead.
 func (*KillSwitch) Descriptor() ([]byte, []int) {
-	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP(), []int{15}
+	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *KillSwitch) GetKillId() string {
@@ -1726,6 +1947,13 @@ func (x *KillSwitch) GetKillId() string {
 		return x.KillId
 	}
 	return ""
+}
+
+func (x *KillSwitch) GetScope() KillScope {
+	if x != nil {
+		return x.Scope
+	}
+	return KillScope_KILL_SCOPE_UNSPECIFIED
 }
 
 // Just-in-time, scoped to this job's targets, short TTL, memory only (ADR-020).
@@ -1766,7 +1994,7 @@ type CredentialGrant struct {
 
 func (x *CredentialGrant) Reset() {
 	*x = CredentialGrant{}
-	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[16]
+	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1778,7 +2006,7 @@ func (x *CredentialGrant) String() string {
 func (*CredentialGrant) ProtoMessage() {}
 
 func (x *CredentialGrant) ProtoReflect() protoreflect.Message {
-	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[16]
+	mi := &file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1791,7 +2019,7 @@ func (x *CredentialGrant) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CredentialGrant.ProtoReflect.Descriptor instead.
 func (*CredentialGrant) Descriptor() ([]byte, []int) {
-	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP(), []int{16}
+	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *CredentialGrant) GetGrantId() string {
@@ -1840,7 +2068,7 @@ var File_cybersentinel_scanpoint_v1_dispatch_proto protoreflect.FileDescriptor
 
 const file_cybersentinel_scanpoint_v1_dispatch_proto_rawDesc = "" +
 	"\n" +
-	")cybersentinel/scanpoint/v1/dispatch.proto\x12\x1acybersentinel.scanpoint.v1\x1a'cybersentinel/scanpoint/v1/common.proto\x1a*cybersentinel/scanpoint/v1/rulepacks.proto\"\xe4\x04\n" +
+	")cybersentinel/scanpoint/v1/dispatch.proto\x12\x1acybersentinel.scanpoint.v1\x1a'cybersentinel/scanpoint/v1/common.proto\x1a*cybersentinel/scanpoint/v1/rulepacks.proto\"\xac\x05\n" +
 	"\x10ScanPointMessage\x129\n" +
 	"\x05hello\x18\x01 \x01(\v2!.cybersentinel.scanpoint.v1.HelloH\x00R\x05hello\x12E\n" +
 	"\theartbeat\x18\x02 \x01(\v2%.cybersentinel.scanpoint.v1.HeartbeatH\x00R\theartbeat\x12O\n" +
@@ -1849,7 +2077,9 @@ const file_cybersentinel_scanpoint_v1_dispatch_proto_rawDesc = "" +
 	"\bterminal\x18\x05 \x01(\v2'.cybersentinel.scanpoint.v1.JobTerminalH\x00R\bterminal\x12N\n" +
 	"\fbackpressure\x18\x06 \x01(\v2(.cybersentinel.scanpoint.v1.BackpressureH\x00R\fbackpressure\x12@\n" +
 	"\bkill_ack\x18\a \x01(\v2#.cybersentinel.scanpoint.v1.KillAckH\x00R\akillAck\x12V\n" +
-	"\x10rule_pack_status\x18\b \x01(\v2*.cybersentinel.scanpoint.v1.RulePackStatusH\x00R\x0erulePackStatusB\x05\n" +
+	"\x10rule_pack_status\x18\b \x01(\v2*.cybersentinel.scanpoint.v1.RulePackStatusH\x00R\x0erulePackStatus\x12F\n" +
+	"\n" +
+	"cancel_ack\x18\t \x01(\v2%.cybersentinel.scanpoint.v1.CancelAckH\x00R\tcancelAckB\x05\n" +
 	"\x03msg\"\xfa\x03\n" +
 	"\vCoreMessage\x12=\n" +
 	"\x03job\x18\x01 \x01(\v2).cybersentinel.scanpoint.v1.JobAssignmentH\x00R\x03job\x12>\n" +
@@ -1948,7 +2178,13 @@ const file_cybersentinel_scanpoint_v1_dispatch_proto_rawDesc = "" +
 	"\aKillAck\x12\x17\n" +
 	"\akill_id\x18\x01 \x01(\tR\x06killId\x12\"\n" +
 	"\racked_at_unix\x18\x02 \x01(\x03R\vackedAtUnix\x12!\n" +
-	"\ftasks_halted\x18\x03 \x01(\rR\vtasksHalted\"\xc8\x01\n" +
+	"\ftasks_halted\x18\x03 \x01(\rR\vtasksHalted\"\x8a\x01\n" +
+	"\tCancelAck\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1f\n" +
+	"\vlease_epoch\x18\x02 \x01(\x03R\n" +
+	"leaseEpoch\x12\"\n" +
+	"\racked_at_unix\x18\x03 \x01(\x03R\vackedAtUnix\x12!\n" +
+	"\ftasks_halted\x18\x04 \x01(\rR\vtasksHalted\"\xc8\x01\n" +
 	"\n" +
 	"LeaseGrant\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1f\n" +
@@ -1962,10 +2198,11 @@ const file_cybersentinel_scanpoint_v1_dispatch_proto_rawDesc = "" +
 	"\vlease_epoch\x18\x02 \x01(\x03R\n" +
 	"leaseEpoch\x12\x16\n" +
 	"\x06reason\x18\x03 \x01(\tR\x06reason\x12\x19\n" +
-	"\bgrace_ms\x18\x04 \x01(\rR\agraceMs\"%\n" +
+	"\bgrace_ms\x18\x04 \x01(\rR\agraceMs\"b\n" +
 	"\n" +
 	"KillSwitch\x12\x17\n" +
-	"\akill_id\x18\x01 \x01(\tR\x06killId\"\xe0\x01\n" +
+	"\akill_id\x18\x01 \x01(\tR\x06killId\x12;\n" +
+	"\x05scope\x18\x02 \x01(\x0e2%.cybersentinel.scanpoint.v1.KillScopeR\x05scope\"\xe0\x01\n" +
 	"\x0fCredentialGrant\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x15\n" +
 	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x12!\n" +
@@ -1983,7 +2220,12 @@ const file_cybersentinel_scanpoint_v1_dispatch_proto_rawDesc = "" +
 	"\x17LEASE_STATE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13LEASE_STATE_GRANTED\x10\x01\x12\x14\n" +
 	"\x10LEASE_STATE_LOST\x10\x02\x12\x1b\n" +
-	"\x17LEASE_STATE_UNKNOWN_JOB\x10\x03*\x7f\n" +
+	"\x17LEASE_STATE_UNKNOWN_JOB\x10\x03*h\n" +
+	"\tKillScope\x12\x1a\n" +
+	"\x16KILL_SCOPE_UNSPECIFIED\x10\x00\x12\x15\n" +
+	"\x11KILL_SCOPE_TENANT\x10\x01\x12\x13\n" +
+	"\x0fKILL_SCOPE_ZONE\x10\x02\x12\x13\n" +
+	"\x0fKILL_SCOPE_SCAN\x10\x03*\x7f\n" +
 	"\bCredKind\x12\x19\n" +
 	"\x15CRED_KIND_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eSESSION_HANDLE\x10\x01\x12\x13\n" +
@@ -2008,66 +2250,70 @@ func file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescGZIP() []byte {
 	return file_cybersentinel_scanpoint_v1_dispatch_proto_rawDescData
 }
 
-var file_cybersentinel_scanpoint_v1_dispatch_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_cybersentinel_scanpoint_v1_dispatch_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_cybersentinel_scanpoint_v1_dispatch_proto_goTypes = []any{
 	(BackpressureState)(0),   // 0: cybersentinel.scanpoint.v1.BackpressureState
 	(LeaseState)(0),          // 1: cybersentinel.scanpoint.v1.LeaseState
-	(CredKind)(0),            // 2: cybersentinel.scanpoint.v1.CredKind
-	(*ScanPointMessage)(nil), // 3: cybersentinel.scanpoint.v1.ScanPointMessage
-	(*CoreMessage)(nil),      // 4: cybersentinel.scanpoint.v1.CoreMessage
-	(*Hello)(nil),            // 5: cybersentinel.scanpoint.v1.Hello
-	(*ServerHello)(nil),      // 6: cybersentinel.scanpoint.v1.ServerHello
-	(*JobAssignment)(nil),    // 7: cybersentinel.scanpoint.v1.JobAssignment
-	(*Task)(nil),             // 8: cybersentinel.scanpoint.v1.Task
-	(*ScanConstraints)(nil),  // 9: cybersentinel.scanpoint.v1.ScanConstraints
-	(*Heartbeat)(nil),        // 10: cybersentinel.scanpoint.v1.Heartbeat
-	(*LeaseRenewal)(nil),     // 11: cybersentinel.scanpoint.v1.LeaseRenewal
-	(*JobProgress)(nil),      // 12: cybersentinel.scanpoint.v1.JobProgress
-	(*JobTerminal)(nil),      // 13: cybersentinel.scanpoint.v1.JobTerminal
-	(*Backpressure)(nil),     // 14: cybersentinel.scanpoint.v1.Backpressure
-	(*KillAck)(nil),          // 15: cybersentinel.scanpoint.v1.KillAck
-	(*LeaseGrant)(nil),       // 16: cybersentinel.scanpoint.v1.LeaseGrant
-	(*CancelJob)(nil),        // 17: cybersentinel.scanpoint.v1.CancelJob
-	(*KillSwitch)(nil),       // 18: cybersentinel.scanpoint.v1.KillSwitch
-	(*CredentialGrant)(nil),  // 19: cybersentinel.scanpoint.v1.CredentialGrant
-	(*RulePackStatus)(nil),   // 20: cybersentinel.scanpoint.v1.RulePackStatus
-	(*RulePackUpdate)(nil),   // 21: cybersentinel.scanpoint.v1.RulePackUpdate
-	(*Capability)(nil),       // 22: cybersentinel.scanpoint.v1.Capability
-	(*LoadedRulePack)(nil),   // 23: cybersentinel.scanpoint.v1.LoadedRulePack
-	(TerminationReason)(0),   // 24: cybersentinel.scanpoint.v1.TerminationReason
+	(KillScope)(0),           // 2: cybersentinel.scanpoint.v1.KillScope
+	(CredKind)(0),            // 3: cybersentinel.scanpoint.v1.CredKind
+	(*ScanPointMessage)(nil), // 4: cybersentinel.scanpoint.v1.ScanPointMessage
+	(*CoreMessage)(nil),      // 5: cybersentinel.scanpoint.v1.CoreMessage
+	(*Hello)(nil),            // 6: cybersentinel.scanpoint.v1.Hello
+	(*ServerHello)(nil),      // 7: cybersentinel.scanpoint.v1.ServerHello
+	(*JobAssignment)(nil),    // 8: cybersentinel.scanpoint.v1.JobAssignment
+	(*Task)(nil),             // 9: cybersentinel.scanpoint.v1.Task
+	(*ScanConstraints)(nil),  // 10: cybersentinel.scanpoint.v1.ScanConstraints
+	(*Heartbeat)(nil),        // 11: cybersentinel.scanpoint.v1.Heartbeat
+	(*LeaseRenewal)(nil),     // 12: cybersentinel.scanpoint.v1.LeaseRenewal
+	(*JobProgress)(nil),      // 13: cybersentinel.scanpoint.v1.JobProgress
+	(*JobTerminal)(nil),      // 14: cybersentinel.scanpoint.v1.JobTerminal
+	(*Backpressure)(nil),     // 15: cybersentinel.scanpoint.v1.Backpressure
+	(*KillAck)(nil),          // 16: cybersentinel.scanpoint.v1.KillAck
+	(*CancelAck)(nil),        // 17: cybersentinel.scanpoint.v1.CancelAck
+	(*LeaseGrant)(nil),       // 18: cybersentinel.scanpoint.v1.LeaseGrant
+	(*CancelJob)(nil),        // 19: cybersentinel.scanpoint.v1.CancelJob
+	(*KillSwitch)(nil),       // 20: cybersentinel.scanpoint.v1.KillSwitch
+	(*CredentialGrant)(nil),  // 21: cybersentinel.scanpoint.v1.CredentialGrant
+	(*RulePackStatus)(nil),   // 22: cybersentinel.scanpoint.v1.RulePackStatus
+	(*RulePackUpdate)(nil),   // 23: cybersentinel.scanpoint.v1.RulePackUpdate
+	(*Capability)(nil),       // 24: cybersentinel.scanpoint.v1.Capability
+	(*LoadedRulePack)(nil),   // 25: cybersentinel.scanpoint.v1.LoadedRulePack
+	(TerminationReason)(0),   // 26: cybersentinel.scanpoint.v1.TerminationReason
 }
 var file_cybersentinel_scanpoint_v1_dispatch_proto_depIdxs = []int32{
-	5,  // 0: cybersentinel.scanpoint.v1.ScanPointMessage.hello:type_name -> cybersentinel.scanpoint.v1.Hello
-	10, // 1: cybersentinel.scanpoint.v1.ScanPointMessage.heartbeat:type_name -> cybersentinel.scanpoint.v1.Heartbeat
-	11, // 2: cybersentinel.scanpoint.v1.ScanPointMessage.lease_renewal:type_name -> cybersentinel.scanpoint.v1.LeaseRenewal
-	12, // 3: cybersentinel.scanpoint.v1.ScanPointMessage.progress:type_name -> cybersentinel.scanpoint.v1.JobProgress
-	13, // 4: cybersentinel.scanpoint.v1.ScanPointMessage.terminal:type_name -> cybersentinel.scanpoint.v1.JobTerminal
-	14, // 5: cybersentinel.scanpoint.v1.ScanPointMessage.backpressure:type_name -> cybersentinel.scanpoint.v1.Backpressure
-	15, // 6: cybersentinel.scanpoint.v1.ScanPointMessage.kill_ack:type_name -> cybersentinel.scanpoint.v1.KillAck
-	20, // 7: cybersentinel.scanpoint.v1.ScanPointMessage.rule_pack_status:type_name -> cybersentinel.scanpoint.v1.RulePackStatus
-	7,  // 8: cybersentinel.scanpoint.v1.CoreMessage.job:type_name -> cybersentinel.scanpoint.v1.JobAssignment
-	16, // 9: cybersentinel.scanpoint.v1.CoreMessage.lease:type_name -> cybersentinel.scanpoint.v1.LeaseGrant
-	17, // 10: cybersentinel.scanpoint.v1.CoreMessage.cancel:type_name -> cybersentinel.scanpoint.v1.CancelJob
-	21, // 11: cybersentinel.scanpoint.v1.CoreMessage.rule_pack:type_name -> cybersentinel.scanpoint.v1.RulePackUpdate
-	19, // 12: cybersentinel.scanpoint.v1.CoreMessage.credential:type_name -> cybersentinel.scanpoint.v1.CredentialGrant
-	18, // 13: cybersentinel.scanpoint.v1.CoreMessage.kill:type_name -> cybersentinel.scanpoint.v1.KillSwitch
-	6,  // 14: cybersentinel.scanpoint.v1.CoreMessage.server_hello:type_name -> cybersentinel.scanpoint.v1.ServerHello
-	22, // 15: cybersentinel.scanpoint.v1.Hello.capabilities:type_name -> cybersentinel.scanpoint.v1.Capability
-	23, // 16: cybersentinel.scanpoint.v1.Hello.loaded_packs:type_name -> cybersentinel.scanpoint.v1.LoadedRulePack
-	9,  // 17: cybersentinel.scanpoint.v1.JobAssignment.constraints:type_name -> cybersentinel.scanpoint.v1.ScanConstraints
-	8,  // 18: cybersentinel.scanpoint.v1.JobAssignment.tasks:type_name -> cybersentinel.scanpoint.v1.Task
-	24, // 19: cybersentinel.scanpoint.v1.JobTerminal.reason:type_name -> cybersentinel.scanpoint.v1.TerminationReason
-	0,  // 20: cybersentinel.scanpoint.v1.Backpressure.state:type_name -> cybersentinel.scanpoint.v1.BackpressureState
-	1,  // 21: cybersentinel.scanpoint.v1.LeaseGrant.state:type_name -> cybersentinel.scanpoint.v1.LeaseState
-	2,  // 22: cybersentinel.scanpoint.v1.CredentialGrant.cred_kind:type_name -> cybersentinel.scanpoint.v1.CredKind
-	3,  // 23: cybersentinel.scanpoint.v1.Dispatch.Connect:input_type -> cybersentinel.scanpoint.v1.ScanPointMessage
-	4,  // 24: cybersentinel.scanpoint.v1.Dispatch.Connect:output_type -> cybersentinel.scanpoint.v1.CoreMessage
-	24, // [24:25] is the sub-list for method output_type
-	23, // [23:24] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	6,  // 0: cybersentinel.scanpoint.v1.ScanPointMessage.hello:type_name -> cybersentinel.scanpoint.v1.Hello
+	11, // 1: cybersentinel.scanpoint.v1.ScanPointMessage.heartbeat:type_name -> cybersentinel.scanpoint.v1.Heartbeat
+	12, // 2: cybersentinel.scanpoint.v1.ScanPointMessage.lease_renewal:type_name -> cybersentinel.scanpoint.v1.LeaseRenewal
+	13, // 3: cybersentinel.scanpoint.v1.ScanPointMessage.progress:type_name -> cybersentinel.scanpoint.v1.JobProgress
+	14, // 4: cybersentinel.scanpoint.v1.ScanPointMessage.terminal:type_name -> cybersentinel.scanpoint.v1.JobTerminal
+	15, // 5: cybersentinel.scanpoint.v1.ScanPointMessage.backpressure:type_name -> cybersentinel.scanpoint.v1.Backpressure
+	16, // 6: cybersentinel.scanpoint.v1.ScanPointMessage.kill_ack:type_name -> cybersentinel.scanpoint.v1.KillAck
+	22, // 7: cybersentinel.scanpoint.v1.ScanPointMessage.rule_pack_status:type_name -> cybersentinel.scanpoint.v1.RulePackStatus
+	17, // 8: cybersentinel.scanpoint.v1.ScanPointMessage.cancel_ack:type_name -> cybersentinel.scanpoint.v1.CancelAck
+	8,  // 9: cybersentinel.scanpoint.v1.CoreMessage.job:type_name -> cybersentinel.scanpoint.v1.JobAssignment
+	18, // 10: cybersentinel.scanpoint.v1.CoreMessage.lease:type_name -> cybersentinel.scanpoint.v1.LeaseGrant
+	19, // 11: cybersentinel.scanpoint.v1.CoreMessage.cancel:type_name -> cybersentinel.scanpoint.v1.CancelJob
+	23, // 12: cybersentinel.scanpoint.v1.CoreMessage.rule_pack:type_name -> cybersentinel.scanpoint.v1.RulePackUpdate
+	21, // 13: cybersentinel.scanpoint.v1.CoreMessage.credential:type_name -> cybersentinel.scanpoint.v1.CredentialGrant
+	20, // 14: cybersentinel.scanpoint.v1.CoreMessage.kill:type_name -> cybersentinel.scanpoint.v1.KillSwitch
+	7,  // 15: cybersentinel.scanpoint.v1.CoreMessage.server_hello:type_name -> cybersentinel.scanpoint.v1.ServerHello
+	24, // 16: cybersentinel.scanpoint.v1.Hello.capabilities:type_name -> cybersentinel.scanpoint.v1.Capability
+	25, // 17: cybersentinel.scanpoint.v1.Hello.loaded_packs:type_name -> cybersentinel.scanpoint.v1.LoadedRulePack
+	10, // 18: cybersentinel.scanpoint.v1.JobAssignment.constraints:type_name -> cybersentinel.scanpoint.v1.ScanConstraints
+	9,  // 19: cybersentinel.scanpoint.v1.JobAssignment.tasks:type_name -> cybersentinel.scanpoint.v1.Task
+	26, // 20: cybersentinel.scanpoint.v1.JobTerminal.reason:type_name -> cybersentinel.scanpoint.v1.TerminationReason
+	0,  // 21: cybersentinel.scanpoint.v1.Backpressure.state:type_name -> cybersentinel.scanpoint.v1.BackpressureState
+	1,  // 22: cybersentinel.scanpoint.v1.LeaseGrant.state:type_name -> cybersentinel.scanpoint.v1.LeaseState
+	2,  // 23: cybersentinel.scanpoint.v1.KillSwitch.scope:type_name -> cybersentinel.scanpoint.v1.KillScope
+	3,  // 24: cybersentinel.scanpoint.v1.CredentialGrant.cred_kind:type_name -> cybersentinel.scanpoint.v1.CredKind
+	4,  // 25: cybersentinel.scanpoint.v1.Dispatch.Connect:input_type -> cybersentinel.scanpoint.v1.ScanPointMessage
+	5,  // 26: cybersentinel.scanpoint.v1.Dispatch.Connect:output_type -> cybersentinel.scanpoint.v1.CoreMessage
+	26, // [26:27] is the sub-list for method output_type
+	25, // [25:26] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_cybersentinel_scanpoint_v1_dispatch_proto_init() }
@@ -2086,6 +2332,7 @@ func file_cybersentinel_scanpoint_v1_dispatch_proto_init() {
 		(*ScanPointMessage_Backpressure)(nil),
 		(*ScanPointMessage_KillAck)(nil),
 		(*ScanPointMessage_RulePackStatus)(nil),
+		(*ScanPointMessage_CancelAck)(nil),
 	}
 	file_cybersentinel_scanpoint_v1_dispatch_proto_msgTypes[1].OneofWrappers = []any{
 		(*CoreMessage_Job)(nil),
@@ -2101,8 +2348,8 @@ func file_cybersentinel_scanpoint_v1_dispatch_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cybersentinel_scanpoint_v1_dispatch_proto_rawDesc), len(file_cybersentinel_scanpoint_v1_dispatch_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   17,
+			NumEnums:      4,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

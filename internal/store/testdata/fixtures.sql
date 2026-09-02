@@ -279,6 +279,16 @@ BEGIN
     INSERT INTO kill_acks (tenant_id, kill_id, scan_point_id, tasks_halted)
         VALUES (p_tenant, v_kill, v_point, 2);
 
+    -- One cancellation acknowledgement, for the same reason: cancel_acks is
+    -- tenant-scoped, so case 1's sweep proves nothing for it while it is empty
+    -- (ADR-024, migration 0025). The scan above is not cancelled and v_job is
+    -- completed, which is deliberate — this row exists to be swept, not to
+    -- describe a cancellation in flight. lease_epoch matches the job_leases row
+    -- created above, because an ack naming an epoch that never existed would be
+    -- a fixture teaching the wrong shape.
+    INSERT INTO cancel_acks (tenant_id, job_id, scan_point_id, lease_epoch, tasks_halted)
+        VALUES (p_tenant, v_job, v_point, 1, 0);
+
     INSERT INTO reports (tenant_id, report_type, parameters, object_store_ref, requested_by, generated_at)
         VALUES (p_tenant, 'exposure-summary', '{"window":"30d"}'::jsonb,
                 's3://cvap-evidence/reports/fixture-' || p_tag, v_user, now());

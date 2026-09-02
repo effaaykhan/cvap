@@ -11,6 +11,8 @@ Reviewing `internal/store` or any migration is testable rather than theoretical 
   works and is how to get `DATABASE_URL` (migration role `cvap`) and `APP_DATABASE_URL`
   (application role `cvap_app_login`).
 - `psql` is on PATH; no docker needed for schema probing. Go is at `~/sdk/go1.25.14/bin/go`.
+  The dev DB is kept migrated to HEAD *including the migrations in the working tree*, so a
+  schema question about an uncommitted migration can usually just be asked of the database.
 - Go PoCs go in a throwaway `internal/store/zz_*_test.go` with `package store` (internal, so
   `db.pool` and `resolveTenant` are reachable), run with
   `CVAP_TEST_DATABASE_URL="$APP_DATABASE_URL" go test ./internal/store/ -run ...`. Delete
@@ -40,7 +42,16 @@ For `internal/control/enrollment` and `internal/control/ca`, PoCs go in throwawa
 needs `CVAP_TEST_DATABASE_URL="$APP_DATABASE_URL"`. `internal/control/ca` has no test file of
 its own, so a `package ca` scratch test reaches unexported fields directly.
 
-Quirks that cost time: `go vet` fails the build on a deliberately-wrong printf verb, so a
+Quirks that cost time: in `internal/dispatch` the Go toolchain did **not** pick up a scratch
+test file named `zz_*_test.go` — `go list -f '{{.TestGoFiles}}'` omitted it and `go test -run`
+reported "no tests to run", with no error, even on a clean GOCACHE; renaming it to
+`aacost_internal_test.go` made it compile immediately. `zz_*_test.go` works fine in
+`internal/store`. Name scratch files in `internal/dispatch` something else. Also: a
+`scan-safety-auditor` may be running in the same session and writing its own `zz_*_test.go`
+probes into `internal/store` — check `git status` before assuming a stray `zz_` file is yours,
+and do not delete another agent's.
+
+Quirks that cost time:  `go vet` fails the build on a deliberately-wrong printf verb, so a
 leak PoC must launder the argument through an `any`-typed helper. Hand-seeding the schema in
 `psql` needs `deployment_mode = 'onprem'` (not `on_prem`) and `scan_zones.trust_level` is
 NOT NULL with no default. Forced interleavings are best written as one `db.Write` callback

@@ -342,6 +342,9 @@ func (s *Service) receive(ctx context.Context, stream scanpointv1.Dispatch_Conne
 		case *scanpointv1.ScanPointMessage_KillAck:
 			s.onKillAck(ctx, sess, m.KillAck)
 
+		case *scanpointv1.ScanPointMessage_CancelAck:
+			s.onCancelAck(ctx, sess, m.CancelAck)
+
 		case *scanpointv1.ScanPointMessage_RulePackStatus:
 			// RulePacks is session 8. Recorded as seen and otherwise ignored:
 			// an unknown-but-valid message must not close the stream, or every
@@ -380,6 +383,30 @@ func (s *Service) onLeaseRenewal(ctx context.Context, sess *session, r *scanpoin
 	if err != nil {
 		s.send(ctx, out, leaseGrant(r.GetJobId(), r.GetLeaseEpoch(), 0,
 			scanpointv1.LeaseState_LEASE_STATE_UNKNOWN_JOB, "malformed job id"))
+		return
+	}
+
+	// ========================================================================
+	// Site two for the time dimension of ADR-024 control 1.
+	// ========================================================================
+	//
+	// Core refuses to START a job outside its maintenance window. Nothing at
+	// Core stopped one already running: a job claimed at 03:59 under a
+	// 22:00-04:00 window renewed every 20 s indefinitely, and the only thing
+	// that would ever halt it was window_ends_unix on the wire — a runtime that
+	// does not exist yet, running a build we do not control. That is exactly the
+	// "enforce at the Scan Point only" alternative ADR-024 rejected, and the
+	// target dimension has two sites while the time dimension had one.
+	//
+	// Refusing the renewal is the lever the architecture already defines:
+	// invariant 8 and ADR-012 make a refused renewal a self-abort with
+	// credential zeroisation, which is a stronger stop than asking politely.
+	// The lease is left for the sweeper rather than released here, so the
+	// at-most-once accounting stays in one place.
+	windowClosed, why := s.windowClosedForJob(ctx, sess, jobID)
+	if windowClosed {
+		s.send(ctx, out, leaseGrant(r.GetJobId(), r.GetLeaseEpoch(), 0,
+			scanpointv1.LeaseState_LEASE_STATE_LOST, why))
 		return
 	}
 
@@ -425,6 +452,49 @@ func (s *Service) onLeaseRenewal(ctx context.Context, sess *session, r *scanpoin
 	})
 
 	s.send(ctx, out, leaseGrant(r.GetJobId(), r.GetLeaseEpoch(), 0, state, detail))
+}
+
+// windowClosedForJob reports whether this job's policy has left its maintenance
+// window, and the operator-facing reason if so.
+//
+// Fail-OPEN on a read error, deliberately, and this is the one place in the
+// change where that is right: a database blip must not mass-revoke the leases of
+// every job in flight, which would self-abort the fleet and zeroise its
+// credentials over a transient. The start-side check is the one that must fail
+// closed, and it does — it withholds work rather than stopping it. A policy that
+// cannot be read here simply keeps its lease until the next renewal.
+func (s *Service) windowClosedForJob(ctx context.Context, sess *session, jobID uuid.UUID) (bool, string) {
+	var policy *store.JobPolicy
+	if err := s.db.Read(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+		p, err := (store.Policies{}).ForJob(ctx, c, jobID)
+		if err != nil {
+			return err
+		}
+		policy = p
+		return nil
+	}); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.log.WarnContext(ctx, "could not read a policy to check its maintenance window",
+				slog.String("job_id", jobID.String()), slog.Any("error", err))
+		}
+		return false, ""
+	}
+	if len(policy.TimeWindows) == 0 {
+		return false, ""
+	}
+
+	windows, err := parseWindows(policy.TimeWindows)
+	if err != nil {
+		// The start side refuses this job with an audit event naming the policy
+		// (refuseJob). Revoking an in-flight lease for the same reason would
+		// halt work that was authorised when it started, so the running job is
+		// left alone and the scan stops at its next claim instead.
+		return false, ""
+	}
+	if _, open := windowEnd(windows, s.now()); open {
+		return false, ""
+	}
+	return true, "the policy's maintenance window has closed"
 }
 
 func (s *Service) onProgress(ctx context.Context, sess *session, p *scanpointv1.JobProgress) {
@@ -503,9 +573,47 @@ func (s *Service) onKillAck(ctx context.Context, sess *session, a *scanpointv1.K
 		return
 	}
 	if err := s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
-		return (store.KillSwitches{}).Ack(ctx, c, killID, sess.spID, int(a.GetTasksHalted()))
+		return (store.KillSwitches{}).Ack(ctx, c, killID, sess.spID, clampCount(a.GetTasksHalted()))
 	}); err != nil {
 		s.log.ErrorContext(ctx, "kill ack write failed", slog.Any("error", err))
+	}
+}
+
+// onCancelAck records that a scan point stopped a job it was told to stop.
+//
+// ADR-024 requires KillAck because "a 10-second bound Core cannot measure is not
+// a control", and the argument does not weaken when the blast radius narrows:
+// until this existed, "cancellation sent" was the last thing Core knew about a
+// runaway scan, and a scan point that dropped the message looked exactly like
+// one that halted.
+//
+// The scan point is taken from the resolved session and never from the message,
+// for the reason Jobs.Terminate carries in its own comment — an ack attributed
+// to whoever the sender named lets one scan point answer for another.
+func (s *Service) onCancelAck(ctx context.Context, sess *session, a *scanpointv1.CancelAck) {
+	jobID, err := uuid.Parse(a.GetJobId())
+	if err != nil {
+		return
+	}
+	if err := s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+		return (store.CancelAcks{}).Record(ctx, c, jobID, sess.spID,
+			a.GetLeaseEpoch(), clampCount(a.GetTasksHalted()))
+	}); err != nil {
+		// ErrNotFound means the acknowledgement was not owed: no unreleased
+		// lease on that job at that epoch held by this scan point, under a scan
+		// that is actually stopped — or the row is simply already there after a
+		// reconnect. Neither is a Core fault and neither is rare, so it is not a
+		// Warn; the operator-facing signal is CancelAcks.Unacknowledged, and a
+		// refused ack leaves the job in it, which is the conservative answer.
+		level := slog.LevelWarn
+		if errors.Is(err, store.ErrNotFound) {
+			level = slog.LevelDebug
+		}
+		s.log.Log(ctx, level, "cancel ack was not recorded",
+			slog.String("scan_point_id", sess.spID.String()),
+			slog.String("job_id", a.GetJobId()),
+			slog.Int64("lease_epoch", a.GetLeaseEpoch()),
+			slog.Any("error", err))
 	}
 }
 
@@ -556,7 +664,11 @@ func (s *Service) propagateKills(ctx context.Context, sess *session, urgent chan
 	var kills []store.KillSwitch
 	if err := s.db.Read(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
-		kills, err = (store.KillSwitches{}).Live(ctx, c)
+		// LiveFor, not an unscoped Live: Core decides which scan points a kill
+		// covers. A scan point sits in a network whose compromise the threat
+		// model assumes (ADR-020), and the one message it must never be able to
+		// talk itself out of is the one that stops it.
+		kills, err = (store.KillSwitches{}).LiveFor(ctx, c, sess.spID)
 		return err
 	}); err != nil {
 		s.log.ErrorContext(ctx, "kill switch read failed", slog.Any("error", err))
@@ -573,7 +685,16 @@ func (s *Service) propagateKills(ctx context.Context, sess *session, urgent chan
 		// needs halting. Left unmarked, the next tick tries again.
 		if s.trySend(urgent, &scanpointv1.CoreMessage{
 			Msg: &scanpointv1.CoreMessage_Kill{
-				Kill: &scanpointv1.KillSwitch{KillId: k.ID.String()},
+				Kill: &scanpointv1.KillSwitch{
+					KillId: k.ID.String(),
+					// How much of what this scan point holds to halt. Delivery
+					// is already narrowed by LiveFor; this says what the
+					// operator meant, so a per-scan kill does not read as a
+					// fleet-wide one. A scope Core cannot express halts
+					// everything, which is what a bare kill_id meant before the
+					// field existed.
+					Scope: killScope(k.Scope),
+				},
 			},
 		}) {
 			sent[k.ID] = true
@@ -625,8 +746,12 @@ func (s *Service) propagateCancellations(ctx context.Context, sess *session, urg
 					// The incarnation Core means, not whatever is running under
 					// that job id after a reassignment.
 					LeaseEpoch: j.Epoch,
-					Reason:     "scan " + j.ScanID.String() + " was cancelled",
-					GraceMs:    cancelGraceMs,
+					// Which of the two happened, not a generic word for both.
+					// An operator reading "cancelled" about a scan they killed
+					// has been told something untrue about their own action, and
+					// this string reaches the audit log.
+					Reason:  "scan " + j.ScanID.String() + " was " + string(j.ScanStatus),
+					GraceMs: cancelGraceMs,
 				},
 			},
 		}) {
@@ -635,6 +760,7 @@ func (s *Service) propagateCancellations(ctx context.Context, sess *session, urg
 				slog.String("scan_point_id", sess.spID.String()),
 				slog.String("job_id", j.JobID.String()),
 				slog.String("scan_id", j.ScanID.String()),
+				slog.String("scan_status", string(j.ScanStatus)),
 				slog.Int64("lease_epoch", j.Epoch))
 			continue
 		}
@@ -658,7 +784,7 @@ var errOutOfScope = errors.New("dispatch: job refused by the Core-side scope che
 // audit log and the UI rather than Core's stdout — so a scan that stopped
 // because of a scope defect looked like a scan that had stalled. The lease is
 // released in the same transaction so the sweeper has nothing to find.
-func (s *Service) refuseJob(ctx context.Context, c *store.Conn, jobID, spID uuid.UUID, policy *store.Policy, why string) error {
+func (s *Service) refuseJob(ctx context.Context, c *store.Conn, jobID, spID uuid.UUID, policy *store.JobPolicy, why string) error {
 	s.log.ErrorContext(ctx, "job refused by the Core-side scope check",
 		slog.String("job_id", jobID.String()),
 		slog.String("scan_point_id", spID.String()),
@@ -698,6 +824,13 @@ func (s *Service) refuseJob(ctx context.Context, c *store.Conn, jobID, spID uuid
 func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scanpointv1.CoreMessage, limit int) {
 	var assignments []*scanpointv1.JobAssignment
 
+	// One clock for the whole pass. Both the claim predicate and the
+	// window_ends_unix on the constraints are computed from it, so the two
+	// cannot disagree about whether a maintenance window is open — which is the
+	// only way a job could be claimed inside its window and then have an end
+	// already in the past put on the wire.
+	now := s.now()
+
 	err := s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
 		caps, err := (store.ScanPoints{}).Capabilities(ctx, c, sess.spID)
 		if err != nil {
@@ -715,7 +848,17 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 			return nil
 		}
 
-		jobs, err := (store.Jobs{}).Claim(ctx, c, sess.spID, engines, limit)
+		// ADR-024 in the time dimension. Jobs under a policy that is outside its
+		// maintenance window right now are not claimed at all, which leaves them
+		// QUEUED for the window to open — claiming and then releasing would burn
+		// an attempt every two seconds and hit MaxAttempts inside ten, so the
+		// window would destroy the scan it was written to protect.
+		closed, err := s.windowClosedPolicies(ctx, c, now)
+		if err != nil {
+			return err
+		}
+
+		jobs, err := (store.Jobs{}).Claim(ctx, c, sess.spID, engines, limit, closed)
 		if err != nil {
 			return err
 		}
@@ -741,7 +884,7 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 			if err != nil {
 				return err
 			}
-			constraints, cerr := constraintsFor(policy, rules)
+			constraints, cerr := constraintsFor(policy, rules, now)
 			if cerr != nil {
 				// A policy whose rules cannot be expressed on the wire produces
 				// no assignment at all. Failing the job is deliberate: the
@@ -780,6 +923,32 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 			}
 			if cerr != nil {
 				continue
+			}
+
+			// ADR-021. Recorded when intrusive work actually goes out, which is
+			// a different fact from the operator selecting it: the selection
+			// event says what was authorised, this says what was dispatched and
+			// to which scan point. The mode here is already the LOWER of the
+			// policy ceiling and the scan's opt-in, so an event appearing at all
+			// means both halves said intrusive.
+			if constraints.GetSafetyMode() == string(store.SafetyIntrusive) {
+				id := j.ID
+				if err := (store.AuditEvents{}).Record(ctx, c, store.AuditEvent{
+					ActorType:    store.ActorSystem,
+					Action:       "job.intrusive_dispatched",
+					ResourceType: "scan_job",
+					ResourceID:   &id,
+					Detail: map[string]any{
+						"policy_id":          policy.ID.String(),
+						"policy":             policy.Name,
+						"policy_safety_mode": string(policy.SafetyMode),
+						"scan_safety_mode":   string(policy.ScanSafetyMode),
+						"scan_point_id":      sess.spID.String(),
+						"scan_id":            j.ScanID.String(),
+					},
+				}); err != nil {
+					return err
+				}
 			}
 
 			wire := &scanpointv1.JobAssignment{
@@ -918,11 +1087,24 @@ const (
 // single host. Fragile is clamped again beneath that, since ADR-024 control 3
 // says it caps rate REGARDLESS of what the policy permits.
 //
-// safety_mode is passed through, not minimised. It is not a quantity, and it is
-// the field an operator sets deliberately to authorise intrusive checks under
-// ADR-021. Hardcoding "safe" meant an intrusive policy silently ran safe, which
-// is the failure that looks like everything working.
-func constraintsFor(p *store.Policy, rules []store.ScopeRule) (*scanpointv1.ScanConstraints, error) {
+// safety_mode is not a quantity, so it is not minimised arithmetically — but it
+// is still reduced, by ADR-021's other axis. The POLICY sets the ceiling and the
+// SCAN opts in beneath it, and intrusive travels only when both say so. A policy
+// left on intrusive after a test window authorises nothing on its own, which is
+// the failure ADR-021 was written against; hardcoding "safe" was the opposite
+// failure and looked like everything working.
+//
+// max_concurrent_per_target joins the minimum as of migration 0024. It is a
+// separate lever rather than a derivative of the rate: a host answering 20
+// simultaneous connects at 5 pps is under more pressure than one answering a
+// single connection at 50 pps, and connection count is what tips a printer over.
+// An operator who lowered max_rate_pps to protect a fragile estate was still
+// being handed 20 concurrent connections per host.
+//
+// now is passed rather than read, so that the maintenance-window decision made
+// here is the same one Jobs.Claim was given. Two clocks would let a job be
+// claimed inside its window and dispatched with an end already in the past.
+func constraintsFor(p *store.JobPolicy, rules []store.ScopeRule, now time.Time) (*scanpointv1.ScanConstraints, error) {
 	rate := uint32(platformMaxRatePPS)
 	if p != nil && p.MaxRatePPS != nil {
 		// Bounded as int BEFORE any conversion. The value comes from a column,
@@ -938,9 +1120,20 @@ func constraintsFor(p *store.Policy, rules []store.ScopeRule) (*scanpointv1.Scan
 	perTarget := min(uint32(platformMaxRatePerTarget), rate)
 	fragile := min(uint32(platformFragileRatePPS), perTarget)
 
+	concurrent := uint32(platformMaxConcurrentPerTarget)
+	if p != nil && p.MaxConcurrentPerTarget != nil {
+		// Bounded as int BEFORE any conversion, for the reason max_rate_pps is:
+		// a negative or oversized row converted to uint32 wraps into a huge
+		// ceiling, which is the one direction ADR-024 forbids, arrived at by an
+		// integer overflow rather than by anybody's decision.
+		if v := *p.MaxConcurrentPerTarget; v > 0 && v < platformMaxConcurrentPerTarget {
+			concurrent = uint32(v)
+		}
+	}
+
 	mode := string(store.SafetySafe)
-	if p != nil && p.SafetyMode != "" {
-		mode = string(p.SafetyMode)
+	if p != nil && p.SafetyMode == store.SafetyIntrusive && p.ScanSafetyMode == store.SafetyIntrusive {
+		mode = string(store.SafetyIntrusive)
 	}
 
 	allowed, exclusions, err := scopePlan(rules)
@@ -948,16 +1141,98 @@ func constraintsFor(p *store.Policy, rules []store.ScopeRule) (*scanpointv1.Scan
 		return nil, err
 	}
 
+	var windowEnds int64
+	if p != nil {
+		windows, werr := parseWindows(p.TimeWindows)
+		if werr != nil {
+			// Fails the job, with the audit event refuseJob writes. Same
+			// posture as an unexpressible scope rule: a restriction nobody can
+			// evaluate must not become no restriction, and it must not stop the
+			// scan silently either.
+			return nil, fmt.Errorf("policy time_windows: %w", werr)
+		}
+		end, open := windowEnd(windows, now)
+		if !open {
+			// Unreachable when the caller is offerWork: the same windows were
+			// evaluated against the same `now` to build Jobs.Claim's exclusion
+			// list, so a closed policy's jobs were never claimed. Kept as a
+			// consistency check rather than an assumption, because the cost of
+			// being wrong is packets outside a maintenance window.
+			return nil, fmt.Errorf("policy is outside its maintenance window at %s", now.UTC().Format(time.RFC3339))
+		}
+		if !end.IsZero() {
+			windowEnds = end.Unix()
+		}
+	}
+
 	return &scanpointv1.ScanConstraints{
 		MaxRatePps:             rate,
 		MaxRatePerTarget:       perTarget,
 		FragileRatePps:         fragile,
-		MaxConcurrentPerTarget: platformMaxConcurrentPerTarget,
+		MaxConcurrentPerTarget: concurrent,
 		ConnectTimeoutMs:       platformConnectTimeoutMs,
 		SafetyMode:             mode,
 		AllowedTargets:         allowed,
 		Exclusions:             exclusions,
+		// 0 when the policy sets no window: unrestricted, the opposite
+		// convention to allowed_targets and for the reason ADR-037 gives.
+		WindowEndsUnix: windowEnds,
 	}, nil
+}
+
+// windowClosedPolicies lists the tenant's policies that are outside their
+// maintenance window at now, for Jobs.Claim to exclude.
+//
+// A policy whose windows cannot be parsed is deliberately NOT excluded. Excluding
+// it would leave its jobs queued forever with nothing said about why; leaving it
+// in means the job is claimed, constraintsFor refuses it, and refuseJob
+// terminates it with an audit event naming the policy. A scan that stops has to
+// say so — the same choice scope.go makes for a rule it cannot express.
+func (s *Service) windowClosedPolicies(ctx context.Context, c *store.Conn, now time.Time) ([]uuid.UUID, error) {
+	windowed, err := (store.Policies{}).WithTimeWindows(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+
+	var closed []uuid.UUID
+	for _, w := range windowed {
+		parsed, perr := parseWindows(w.TimeWindows)
+		if perr != nil {
+			// Debug, not Error. Nothing repairs a broken policy row, so an
+			// Error here is one line per connected scan point every two
+			// seconds, forever, in the sink the kill switch and the scope
+			// refusals share. The operator-facing record is the
+			// job.scope_refused audit event refuseJob writes when the job is
+			// actually claimed and refused — once per job, not once per poll.
+			s.log.DebugContext(ctx, "policy time_windows cannot be evaluated; its jobs will be refused",
+				slog.String("policy_id", w.PolicyID.String()),
+				slog.Any("error", perr))
+			continue
+		}
+		if _, open := windowEnd(parsed, now); !open {
+			closed = append(closed, w.PolicyID)
+		}
+	}
+	return closed, nil
+}
+
+// killScope maps the stored scope onto the wire enum.
+//
+// An unknown scope becomes UNSPECIFIED, which the contract defines as "halt
+// everything". That is the fail-safe direction and it is also what a bare
+// kill_id meant before the field existed: a kill_scope value this build has not
+// been taught about must not become a narrower kill than the operator asked for.
+func killScope(k store.KillScope) scanpointv1.KillScope {
+	switch k {
+	case store.KillTenant:
+		return scanpointv1.KillScope_KILL_SCOPE_TENANT
+	case store.KillZone:
+		return scanpointv1.KillScope_KILL_SCOPE_ZONE
+	case store.KillScan:
+		return scanpointv1.KillScope_KILL_SCOPE_SCAN
+	default:
+		return scanpointv1.KillScope_KILL_SCOPE_UNSPECIFIED
+	}
 }
 
 func terminationReason(r scanpointv1.TerminationReason) store.TerminationReason {
@@ -983,6 +1258,21 @@ func terminationReason(r scanpointv1.TerminationReason) store.TerminationReason 
 		// treated accordingly.
 		return store.TerminationLeaseLost
 	}
+}
+
+// clampCount bounds a self-asserted count before it reaches an int4 column.
+//
+// tasks_halted arrives as uint32 and lands in a Postgres `int`, so any value
+// above 2^31-1 fails the INSERT — turning a scan point's arithmetic bug, or its
+// mischief, into a lost acknowledgement and a kill that reads as unacknowledged
+// forever. Clamping keeps the ack, which is the part ADR-024 needs; the number
+// beside it is an attestation either way.
+func clampCount(n uint32) int {
+	const maxInt32 = 1<<31 - 1
+	if n > maxInt32 {
+		return maxInt32
+	}
+	return int(n)
 }
 
 // clamp bounds a self-asserted string before it reaches an unbounded text

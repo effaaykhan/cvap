@@ -96,7 +96,18 @@ type Jobs struct{}
 // The engines filter is the capability ceiling from the other side: Core never
 // dispatches an engine a scan point has not declared, and the declaration can
 // only ever WITHHOLD work. It is not consulted for authorisation.
-func (Jobs) Claim(ctx context.Context, c *Conn, scanPointID uuid.UUID, engines []Engine, limit int) ([]Job, error) {
+//
+// windowClosedPolicies is how scan_policies.time_windows reaches this decision.
+// The recurring schedule is evaluated in Go — see internal/dispatch/windows.go —
+// and the policies that are outside their window right now arrive here as ids to
+// exclude. It is a predicate rather than a post-claim check on purpose: a job
+// claimed and then put back would burn an attempt on every poll and hit
+// MaxAttempts inside ten seconds, so a maintenance window would destroy the scan
+// it was written to protect. A closed window must leave the job QUEUED, not fail
+// it. An empty or nil slice means no policy is closed, which is also what a
+// tenant with no windowed policies at all looks like (ADR-037: empty means
+// unrestricted for a list that enumerates constraint).
+func (Jobs) Claim(ctx context.Context, c *Conn, scanPointID uuid.UUID, engines []Engine, limit int, windowClosedPolicies []uuid.UUID) ([]Job, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 10
 	}
@@ -107,6 +118,15 @@ func (Jobs) Claim(ctx context.Context, c *Conn, scanPointID uuid.UUID, engines [
 	names := make([]string, len(engines))
 	for i, e := range engines {
 		names[i] = string(e)
+	}
+
+	// Sent as text and cast, so the encoding of a uuid array is not left to
+	// depend on which type map the pool happens to carry. Never nil: a NULL
+	// array makes `= ANY(...)` return NULL, which is indistinguishable from
+	// "no match" here and would silently stop excluding anything.
+	closed := make([]string, 0, len(windowClosedPolicies))
+	for _, id := range windowClosedPolicies {
+		closed = append(closed, id.String())
 	}
 
 	// Two predicates beyond "queued and an engine you can run", and both are
@@ -145,8 +165,73 @@ func (Jobs) Claim(ctx context.Context, c *Conn, scanPointID uuid.UUID, engines [
 		           SELECT 1 FROM kill_switches k
 		            WHERE k.tenant_id = j.tenant_id
 		              AND k.resolved_at IS NULL
-		              AND (k.scope = 'tenant'
-		                   OR (k.scope = 'scan' AND k.scope_scan_id = j.scan_id))
+		              -- All three scopes. 'zone' was missing, and the gap had
+		              -- the same shape the comment above describes: a zone kill
+		              -- halted that zone's in-flight work through
+		              -- propagateKills and dispatch handed the same scan points
+		              -- fresh jobs two seconds later, forever.
+              -- NOT IN rather than = 'tenant' for the widest arm, so a
+		              -- kill_scope a later migration adds blocks every claim
+		              -- until someone teaches this predicate about it. The
+		              -- fail-safe direction for a kill is too wide, never too
+		              -- narrow.
+		              AND (k.scope NOT IN ('zone', 'scan')
+		                   OR (k.scope = 'scan' AND k.scope_scan_id = j.scan_id)
+		                   OR (k.scope = 'zone' AND k.scope_zone_id =
+		                       (SELECT sp.zone_id FROM scan_points sp
+		                         WHERE sp.tenant_id = $1 AND sp.scan_point_id = $3)))
+		       )
+		       -- ADR-024 control 1, in the dimension the scan point cannot
+		       -- lie about. allowed_zones names the vantage points a policy
+		       -- permits, and until this clause existed a scan point in a
+		       -- forbidden zone could claim the job: the column was selected by
+		       -- nothing, so an operator restricting a scan to their DMZ had
+		       -- written a comment. Zone comes from scan_points, never from the
+		       -- stream.
+		       --
+		       -- An EMPTY allowed_zones is UNRESTRICTED, the opposite of
+		       -- ScanConstraints.allowed_targets, and ADR-037 records why: this
+		       -- list answers "is this scan restricted", and an unset
+		       -- restriction is no restriction. Every policy row that exists
+		       -- today defaults to '[]', so the other reading would have
+		       -- stopped the fleet on the migration that enforced it.
+		       --
+		       -- jsonb_array_elements_text with lower() rather than the ?
+		       -- operator or jsonb_exists. Two reasons, and both were real
+		       -- defects. ? is a placeholder in several drivers, and a query
+		       -- that changes meaning with the driver is not one to put an
+		       -- authorisation decision in. And byte-exact matching means an
+		       -- allowlist holding an UPPERCASE uuid matches nothing, because
+		       -- zone_id::text renders lowercase canonical — an operator's zone
+		       -- restriction silently becoming a restriction to no zone at all.
+		       --
+		       -- No ::uuid cast on the elements, deliberately: one malformed
+		       -- entry would then raise and fail every claim in the TENANT
+		       -- rather than just this policy's. Shape is validated at write
+		       -- time instead, by a trigger in migration 0024.
+		       --
+		       -- The coalesce is fail-closed — a scan point with no resolvable
+		       -- zone matches no allowlist rather than passing a NULL comparison
+		       -- through as "not restricted".
+		       AND NOT EXISTS (
+		           SELECT 1 FROM scans s
+		            JOIN scan_policies p
+		              ON p.tenant_id = s.tenant_id AND p.policy_id = s.policy_id
+		            WHERE s.tenant_id = j.tenant_id AND s.scan_id = j.scan_id
+		              AND jsonb_array_length(p.allowed_zones) > 0
+		              AND NOT EXISTS (
+		                  SELECT 1 FROM jsonb_array_elements_text(p.allowed_zones) z
+		                   WHERE lower(z) = coalesce(
+		                       (SELECT sp.zone_id::text FROM scan_points sp
+		                         WHERE sp.tenant_id = $1 AND sp.scan_point_id = $3), '')
+		              )
+		       )
+		       -- Outside its maintenance window, a job stays queued. Evaluated
+		       -- in Go and passed in; see the doc comment above.
+		       AND NOT EXISTS (
+		           SELECT 1 FROM scans s
+		            WHERE s.tenant_id = j.tenant_id AND s.scan_id = j.scan_id
+		              AND s.policy_id = ANY($6::uuid[])
 		       )
 		       AND EXISTS (
 		           SELECT 1 FROM scan_tasks t
@@ -173,7 +258,7 @@ func (Jobs) Claim(ctx context.Context, c *Conn, scanPointID uuid.UUID, engines [
 		          j.attempt, j.reassign_safe, j.termination_reason,
 		          j.created_at, j.completed_at`
 
-	rows, err := c.Query(ctx, q, c.Tenant().UUID(), names, scanPointID, limit, MaxAttempts)
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), names, scanPointID, limit, MaxAttempts, closed)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -356,11 +441,17 @@ type ExpiredLease struct {
 	Requeued     bool
 }
 
-// CancellableJob is one in-flight job whose scan an operator has cancelled.
+// CancellableJob is one in-flight job whose scan an operator has stopped.
 type CancellableJob struct {
 	JobID  uuid.UUID
 	Epoch  int64
 	ScanID uuid.UUID
+
+	// ScanStatus is 'cancelled' or 'killed'. It travels so the reason on the
+	// wire and in the audit log says which one happened: an operator reading
+	// "cancelled" about a scan they killed has been told something untrue about
+	// their own action.
+	ScanStatus ScanStatus
 }
 
 // CancellableFor lists jobs this scan point is running under a cancelled scan.
@@ -375,33 +466,56 @@ type CancellableJob struct {
 // button that costs every other customer's scan is a stop button people
 // negotiate with rather than press.
 //
-// The trigger is scans.status = 'cancelled', which already exists: an operator
-// cancels a SCAN, and every job under it that some scan point is still holding
-// gets a CancelJob. No new column, and no second source of truth about whether
-// something is cancelled.
+// The trigger is scans.status, which already exists: an operator stops a SCAN,
+// and every job under it that some scan point is still holding gets a CancelJob.
+// No new column, and no second source of truth about whether something is
+// stopped.
+//
+// Both stopped statuses, not just 'cancelled'. Jobs.Claim has excluded
+// 'cancelled' and 'killed' from the outset, so a killed scan's queued jobs
+// stopped being handed out while its IN-FLIGHT jobs were told nothing — the one
+// state where the scan is most demonstrably still touching the estate. A scan is
+// killed by an operator acting on a scan-scoped kill switch, and KillSwitch
+// carries no job ids: this is the message that names them.
 //
 // The lease epoch travels because CancelJob must name the incarnation Core
-// means. A job reassigned after the operator hit cancel is running under a
-// higher epoch on a different scan point, and cancelling "job X" without the
-// epoch would let a stale message stop work Core never meant to touch.
+// means, and the epoch selected is THIS scan point's — not the job's highest.
+// After a reassignment the highest epoch belongs to somebody else, and a scan
+// point told to cancel an incarnation it does not hold will correctly ignore the
+// message.
 //
-// Only 'assigned' and 'running' jobs appear. A job already terminal needs no
-// message, and re-sending one would ask a scan point to cancel work it has
-// already reported on.
+// ============================================================================
+// The criterion is the LEASE, not scan_jobs.scan_point_id.
+// ============================================================================
+//
+// It was `scan_point_id = $2 AND status IN ('assigned','running')`, which drops
+// the job at precisely the wrong moment. ExpireLeases nulls scan_point_id and
+// requeues a reassign_safe job, or marks a non-reassign_safe one 'failed' — so a
+// scan point that partitioned while scanning stops matching just as it becomes
+// the thing an operator most needs to stop. It is still holding a lease and
+// still sending packets; Core simply lost its own record of who to talk to.
+//
+// A lease reaching 'released' is the one signal that the scan point actually
+// reported stopping; anything short of that and the cancellation is still owed.
+// Bounded by StillHoldingGrace, because a lease that ExpireLeases has already
+// moved out of 'granted' can never be released afterwards — see that constant.
+// Re-sending a cancellation to a scan point that already halted is harmless;
+// failing to send one is the whole failure ADR-024 control 4 exists to prevent.
 func (Jobs) CancellableFor(ctx context.Context, c *Conn, scanPointID uuid.UUID) ([]CancellableJob, error) {
 	const q = `
-		SELECT j.job_id, l.epoch, j.scan_id
+		SELECT j.job_id, l.epoch, j.scan_id, s.status
 		  FROM scan_jobs j
 		  JOIN scans s ON s.tenant_id = j.tenant_id AND s.scan_id = j.scan_id
 		  JOIN LATERAL (
 		       SELECT epoch FROM job_leases
 		        WHERE tenant_id = j.tenant_id AND job_id = j.job_id
+		          AND holder_scan_point = $2
+		          AND state <> 'released'
+		          AND expires_at > now() - ` + StillHoldingGrace + `
 		        ORDER BY epoch DESC LIMIT 1
 		  ) l ON true
 		 WHERE j.tenant_id = $1
-		   AND j.scan_point_id = $2
-		   AND j.status IN ('assigned', 'running')
-		   AND s.status = 'cancelled'
+		   AND s.status IN ('cancelled', 'killed')
 		 ORDER BY j.created_at`
 
 	rows, err := c.Query(ctx, q, c.Tenant().UUID(), scanPointID)
@@ -413,7 +527,7 @@ func (Jobs) CancellableFor(ctx context.Context, c *Conn, scanPointID uuid.UUID) 
 	var out []CancellableJob
 	for rows.Next() {
 		var j CancellableJob
-		if err := rows.Scan(&j.JobID, &j.Epoch, &j.ScanID); err != nil {
+		if err := rows.Scan(&j.JobID, &j.Epoch, &j.ScanID, &j.ScanStatus); err != nil {
 			return nil, mapError(err)
 		}
 		out = append(out, j)

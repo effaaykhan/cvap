@@ -1,87 +1,97 @@
 ---
 name: dispatch-scope-and-kill-gaps
-description: Standing gaps in internal/dispatch — Core-side scope check still absent, tag denies dropped fail-open, cancellation has no trigger. Check these first on any dispatch/scanpoint diff.
+description: Standing gaps in internal/dispatch and internal/store. The four bypasses this file named were fixed in session 8e — read the closed list first so they are not re-reported.
 metadata:
   type: project
 ---
 
-Rebased 2026-09-02 after the `constraintsFor` / `scopeLists` / `propagateCancellations`
-change. **Fixed since the first audit** (do not re-report): `Task.fragile` now travels from
-`assets.fragile` via `scan_tasks.asset_id`; `Jobs.Claim` refuses tasks with NULL `target_id`
-or `authorization_verified IS NOT TRUE`; `propagateKills` marks `sent` only on successful
-queue; `MaxAttempts` bounds retry; policy ceilings now reach the wire as min(platform, policy).
+Rebased 2026-09-02 after session 8e (`windows.go`, `LiveFor`, `cancel_acks`, migrations
+0024/0025, ADR-037). Verified against a live Postgres via `make store-test`.
+
+## Closed since earlier audits — do NOT re-report
+
+`Task.fragile` travels from `assets.fragile`. `Jobs.Claim` refuses NULL `target_id` and
+`authorization_verified IS NOT TRUE`. `propagateKills` marks `sent` only on successful queue.
+`MaxAttempts` bounds retry. Policy ceilings reach the wire as min(platform, policy), now
+including `max_concurrent_per_target`. **Core-side scope enforcement exists** (`permits` in
+`scope.go`, called per task in `offerWork`; `refuseJob` writes `job.scope_refused`). Tag
+denies no longer drop fail-open — `scopePlan` fails the job for anything it cannot express.
+`MaxScopeRulesPerAssignment` bounds the wire size. Empty-vs-absent is decided and written down
+(ADR-037 + proto receiver MUST). `allowed_zones` and `time_windows` are enforced.
+`scans.safety_mode` gives ADR-021 its per-scan opt-in and the effective mode is min(policy,
+scan). `killed` scans get `CancelJob`. `Jobs.Claim`'s kill clause covers `zone`.
+
+## Fixed in the same session, after the audit — do NOT re-report
+
+All four confirmed bypasses were closed before the change was handed back, each with a
+regression test that fails against the old code:
+
+- **DST spring-forward widening.** `windows.go` now builds each boundary through `wallClock`,
+  which reports whether the reading it was asked for actually exists that day; a window inside
+  a skipped hour does not open at all rather than collapsing into the midnight-crossing branch.
+  `TestWindowEnd` covers the spring gap, the day either side, and a window merely spanning it.
+- **Forgeable `CancelAck`.** `CancelAcks.Record` is now an `INSERT ... SELECT` conditional on an
+  unreleased lease held by that scan point at that epoch, under a scan that is actually stopped.
+  A repeat of an ack already held still returns nil, so the honest retry stays distinguishable
+  from the forged one. `TestAnUnsolicitedCancelAckIsRefused`.
+- **Scan kill lost on lease expiry.** `killCoversScanPoint` (one const, shared by `LiveFor` and
+  `Unacknowledged`) and `CancellableFor` key on the lease rather than `scan_jobs.scan_point_id`,
+  bounded by `store.StillHoldingGrace` — because `Release`/`ReleaseAny` require `granted`, so a
+  lease that expired can never be marked released and an unbounded test would chase it forever.
+  `TestAScanKillSurvivesLeaseExpiry`, `TestAReportedTerminalStopsTheCancellation`.
+- **v4-mapped CIDR exclusion.** `scopeMatches` unmaps the RULE as well as the target, moving the
+  prefix length with it. `TestPermitsIsExclusionFirstAndEmptyDeniesAll`.
+
+Also closed from the "still open" list below: **window close now has a second site** —
+`onLeaseRenewal` refuses a renewal once the window has shut, which ADR-012 and invariant 8 turn
+into a self-abort with zeroisation. It fails OPEN on a read error, deliberately, so a database
+blip cannot mass-revoke the fleet's leases; the start-side check is the one that fails closed.
+`TestALeaseIsNotRenewedPastTheMaintenanceWindow`.
+
+Two more, from the same round: `Unacknowledged` was not scoped like `LiveFor` (a zone kill
+named the whole fleet as delinquent, forever); and `KillSwitches.Issue` stopped a scan without
+setting `cancel_requested_at`, so the only stopped-scan path that exists was the one whose
+ADR-024 bound could not be measured. Both fixed. The widest arm of every kill predicate is now
+`scope NOT IN ('zone','scan')`, so a `kill_scope` added later fails safe.
 
 ## Still open, highest first
 
-**Core-side scope enforcement does not exist.** `offerWork` builds `constraints` and builds
-`wire.Tasks` in the same loop and never compares the two. Nothing anywhere compares
-`scan_tasks.task_target` against `policy_scope_rules`. `task_target` is free `text` with no
-constraint tying it to its `scan_targets.target_value`, so a task can carry a target_id for an
-authorised `192.0.2.0/24` and a `task_target` of anything at all — the new
-`TestCancelledScanIsNeitherDispatchedNorLeftRunning` seed does exactly that shape. ADR-024
-control 1 requires two sites; Core is site one and it is empty, and `internal/scanpoint` is
-still only `doc.go` + `CLAUDE.md`, so site two does not exist either. Forwarding the lists is
-not enforcing them.
+**No fragile concurrency cap.** `constraintsFor` clamps `fragile_rate_pps` beneath
+`max_rate_per_target` but every task, fragile or not, gets the same
+`max_concurrent_per_target`. The diff that added the lever argues in its own comment that
+"connection count is what tips a printer over".
 
-**Tag denies are dropped fail-OPEN.** `scopeLists` skips `MatchType == MatchTag` before the
-allow/deny switch. Dropping a tag *allow* fails closed (empty allowlist). Dropping a tag
-*deny* silently deletes an exclusion — `deny tag 'medical'` inside an allowed CIDR reaches the
-wire as no exclusion at all. The unit test asserts this behaviour, so it reads as intended.
-Allows and denies must not share a drop path.
+**Nothing triggers a kill or a cancellation.** `KillSwitches.Issue`, `KillSwitches.Resolve`,
+`Scans.SetSafetyMode` and any writer of `scans.status='cancelled'` / `cancel_requested_at` have
+no production caller — tests only. The whole ADR-024 control 4 chain is unreachable from
+outside the test suite. Also: `Resolve` un-blocks `Jobs.Claim`, so resolving a kill record
+resumes every scan it halted.
 
-**`match_type` is unrepresentable on the wire.** `allowed_targets` / `exclusions` are
-`repeated string` with no discriminator, and `scopeLists` pushes cidr, hostname and url values
-into the same list. A receiver cannot tell them apart; a hostname exclusion is bypassed by
-targeting the IP; a url exclusion is meaningless to a network scan point. `match_value` is
-`text` with no CHECK and `scopeLists` parses nothing, so `0.0.0.0/0` or an unparseable string
-travels verbatim.
+**Constraints are computed at claim time and never re-pushed.** True of scope, rate, safety
+mode and zones. Revoking `authorization_verified`, adding a deny rule or narrowing
+`allowed_zones` mid-scan reaches no in-flight task; a closing WINDOW now does, through the
+renewal refusal, and that is the only dimension with a mid-scan lever.
 
-**Empty-vs-absent, still undecided, now load-bearing.** `allowed_targets: []` = DENY ALL is
-asserted only in a Go unit test comment. `dispatch.proto` does not say it, nothing reads it,
-`make safety` is a failing stub. The natural proto3 reading is "unset → do not filter", which
-is fail-open. Same unanswered question for `max_rate_pps = 0` (constraintsFor has no floor and
-`uint32(*p.MaxRatePPS)` can truncate a huge int to 0) and `window_ends_unix = 0`.
+**`match_type` is still unrepresentable on the wire**, and hostname rules deliberately resolve
+nothing — so an allowed hostname covers whatever DNS says at scan time, in either direction.
+`allowed_engines` is still selected by nothing. Adaptive rate limiting (ADR-024 control 2) has
+no implementation and no wire field.
 
-**Policy fields that reach nothing.** `Policies.ForJob` selects 3 of `scan_policies`' 7
-meaningful columns. `time_windows` is dropped although `window_ends_unix` and
-`WINDOW_EXPIRED` both exist; `allowed_zones` is dropped, so a scan point in a forbidden zone
-can claim the job; `allowed_engines` is dropped, Claim filters on scan-point capability only.
+**A CIDR-shaped `task_target` is refused outright.** `scopeMatches` tries `ParsePrefix(rule)`
+first, so a CIDR allow rule only ever matches an *address*; a task whose target is a range
+fails `permits` and `refuseJob` terminates the job. Fail-safe, and now stated in
+`scan_tasks.task_target`'s column comment (migration 0024) so the first planner that emits a
+range sweep reads it before it writes one — but the behaviour is unchanged.
 
-**`safety_mode` now passes through with no per-scan opt-in and no audit event.** ADR-021 §36
-requires both. `scans` has no opt-in column and `offerWork` records no `AuditEvents`. One
-policy flipped to intrusive standing-authorises every scan bound to it, including scheduled
-ones.
+**An unparseable `time_windows` permanently fails every job under that policy** (claimed, then
+`constraintsFor` errors, then `refuseJob`). Safe direction, but a typo'd IANA zone name is a
+self-inflicted scan outage with `scope_violation_halt` as its reason.
 
-**Cancellation has no trigger.** Nothing sets `scans.status = 'cancelled'` — no `scans.go` in
-`internal/store`, no scan service in `internal/control`. `CancellableFor` and the new Claim
-clause cannot fire. Also: `CancellableFor` matches `'cancelled'` only while Claim excludes
-`'cancelled','killed'`, so a killed scan's in-flight jobs get no `CancelJob`; `CancelJob` has
-no ack message so the 10 s bound is unmeasurable; the inner `JOIN LATERAL` silently drops a
-job with no lease row; and once `ExpireLeases` requeues a job (`scan_point_id = NULL`) the
-scan point that may still be scanning it is no longer matched by `j.scan_point_id = $2`.
-
-**Constraints are computed at claim time and never re-pushed.** No wire message updates a
-running job's scope or rate. Revoking `authorization_verified` or adding a deny rule mid-scan
-does not reach in-flight tasks; the only lever is cancellation, which has no trigger.
-
-**Unbounded `ScopeRules`.** No LIMIT, unlike `MaxTasksPerAssignment`. A policy with enough
-rules produces a `JobAssignment` over the 4 MB wire cap, failing the Send *after* the job is
-assigned and leased — the exact failure `ErrTooManyTasks` exists to prevent, reopened on a
-different field.
-
-**Concurrency and adaptive backoff.** `max_concurrent_per_target` is platform-only: an
-operator lowering `max_rate_pps` to protect a fragile estate still gets 20 concurrent
-connections per host, and there is no fragile concurrency cap — connection count, not packet
-rate, is what kills printers. ADR-024's "rate limiting is adaptive during execution" has no
-implementation and no wire field.
-
-**Kill switch.** `KillSwitches.Live` is unscoped — every live kill goes to every scan point,
-and the wire `KillSwitch` carries only `kill_id`, so scope never travels. Claim's kill clause
-handles `tenant` and `scan` but not `zone`. Nothing sets `resolved_at`. `pollInterval = 2s` DB
-polls now number two per tick, neither with a query timeout.
-
-**How to apply:** on any `internal/dispatch`, `internal/scanpoint` or engine diff, re-check
-these before reading anything else. Separate "wrong now" from "wrong the moment a real engine
-lands" — for this codebase almost everything is the latter, and saying so is the useful part.
+**How to apply:** on any `internal/dispatch`, `internal/store` or engine diff, re-check the
+confirmed bypasses first, then the open list. Separate "wrong now" from "wrong the moment a
+real engine lands" — for this codebase most of it is the latter, and saying which is which is
+the useful part. A live dev Postgres is usually up (`docker ps` shows `cvap-postgres-1`);
+`make store-test` runs the integration half, and a throwaway `zz_*_test.go` probe in
+`internal/store` or `internal/dispatch` is the fastest way to prove a bypass — delete it after.
 
 Related: [[bypass-engine-import-guard]], [[lab-scope-guard-bypasses]]

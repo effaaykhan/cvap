@@ -131,6 +131,23 @@ func parseTargetAddr(target string) (netip.Addr, bool) {
 // does not cover the address that name resolves to, in either direction.
 func scopeMatches(rule, target string, addr netip.Addr, isAddr bool) bool {
 	if p, err := netip.ParsePrefix(rule); err == nil {
+		// The rule is unmapped as well as the target. Only the target was, so
+		// an exclusion written as ::ffff:10.0.0.0/120 did not cover 10.0.0.5 —
+		// while the bare-address form ::ffff:10.0.0.5 did, because that path
+		// calls Unmap(). An asymmetry that deletes an exclusion, which is the
+		// direction ADR-024 cannot afford: the v4-mapped form of an address is
+		// the oldest way there is to walk past an IP denylist, and writing the
+		// DENY in that form must not be the way to disarm it.
+		//
+		// The prefix length moves with the address: a v4-mapped /120 covers the
+		// same hosts as a v4 /24, so 96 comes off the bits. A prefix shorter
+		// than /96 is not naming a v4 range at all — Prefix() rejects the
+		// negative and the rule is left exactly as written.
+		if a := p.Addr(); a.Is4In6() {
+			if q, err := p.Addr().Unmap().Prefix(p.Bits() - 96); err == nil {
+				p = q
+			}
+		}
 		return isAddr && p.Contains(addr)
 	}
 	if a, err := netip.ParseAddr(rule); err == nil {

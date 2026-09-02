@@ -105,6 +105,24 @@ func (f *fakeStream) waitFor(t *testing.T, what string, pred func(*scanpointv1.C
 	}
 }
 
+// waitUntil polls a condition until it holds or the deadline passes.
+//
+// The dispatch poll is two seconds and the write it triggers lands after the
+// message it answers, so a single read straight after pushing a message races
+// the handler. Polling asserts the state Core ends in rather than the instant it
+// gets there.
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
 // Unused halves of grpc.ServerStream.
 func (f *fakeStream) SetHeader(metadata.MD) error  { return nil }
 func (f *fakeStream) SendHeader(metadata.MD) error { return nil }

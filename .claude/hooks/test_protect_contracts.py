@@ -16,15 +16,82 @@ Run: python3 .claude/hooks/test_protect_contracts.py
 
 from __future__ import annotations
 
+import atexit
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HOOK = ROOT / ".claude" / "hooks" / "protect-contracts.py"
 
 ALLOW, BLOCK = "ALLOW", "BLOCK"
+
+
+def _draft_repo() -> pathlib.Path:
+    """A throwaway repository holding one committed and one uncommitted ADR.
+
+    Built rather than borrowed. The real tree cannot demonstrate both halves at
+    once: every ADR in it is committed, and an uncommitted fixture placed there
+    would be committed by the very session that needs to test the case -- and
+    would then start failing. A temporary repository pins both states and mutates
+    nothing anyone is working in.
+    """
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="cvap-adr-guard-"))
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
+
+    adr = tmp / "docs" / "adr"
+    adr.mkdir(parents=True)
+    body = "# ADR-900: fixture\n\n**Status:** Accepted\n**Date:** 2026-09-02\n"
+    (adr / "900-committed.md").write_text(body)
+
+    git = ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "-C", str(tmp)]
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "fixture"]):
+        subprocess.run(git + args, check=True, capture_output=True)
+
+    # Written AFTER the commit, so it has no history at all.
+    (adr / "901-uncommitted.md").write_text(body.replace("900", "901"))
+    return tmp
+
+
+def _plain_dir(with_git: bool) -> pathlib.Path:
+    """A directory holding the same ADR, with no repository or with an empty one."""
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="cvap-adr-guard-"))
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
+    adr = tmp / "docs" / "adr"
+    adr.mkdir(parents=True)
+    (adr / "901-uncommitted.md").write_text(
+        "# ADR-901: fixture\n\n**Status:** Accepted\n**Date:** 2026-09-02\n")
+    if with_git:
+        subprocess.run(["git", "-C", str(tmp), "init", "-q"], check=True, capture_output=True)
+    return tmp
+
+
+def _nested_repo() -> pathlib.Path:
+    """A repository whose ADRs live under a subdirectory, committed.
+
+    Pointing CLAUDE_PROJECT_DIR at that subdirectory is what exercises the
+    toplevel check: the file is readable from there, so the guard gets past its
+    existence test and has to decide on git alone.
+    """
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="cvap-adr-guard-"))
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
+    adr = tmp / "sub" / "docs" / "adr"
+    adr.mkdir(parents=True)
+    (adr / "900-committed.md").write_text(
+        "# ADR-900: fixture\n\n**Status:** Accepted\n**Date:** 2026-09-02\n")
+    git = ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "-C", str(tmp)]
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "fixture"]):
+        subprocess.run(git + args, check=True, capture_output=True)
+    return tmp / "sub"
+
+
+DRAFT_REPO = _draft_repo()
+NO_REPO = _plain_dir(with_git=False)
+EMPTY_REPO = _plain_dir(with_git=True)
+NESTED_ROOT = _nested_repo()
 
 FROZEN_PROTO = "proto/cybersentinel/scanpoint/v1/ingest.proto"
 
@@ -131,6 +198,49 @@ CASES: list[tuple[str, dict, dict, str]] = [
     ("escape authorises a Write to a frozen proto",
      {"file_path": "proto/cybersentinel/scanpoint/v1/ingest.proto"},
      {"CVAP_ALLOW_PROTO_EDIT": "1"}, ALLOW),
+
+    # --- an uncommitted ADR is still a draft ---
+    #
+    # An ADR is frozen by being COMMITTED, not by carrying the word Accepted.
+    # The guard used to block the author's own correction to a document that had
+    # never left one working tree, with no override, which is not what the
+    # freeze is for. Both directions are asserted so neither half can rot: the
+    # exemption must open a draft, and it must not open anything else.
+    ("an Accepted ADR with no commit in HEAD is a draft",
+     {"file_path": "docs/adr/901-uncommitted.md"},
+     {"CLAUDE_PROJECT_DIR": str(DRAFT_REPO)}, ALLOW),
+    ("the same file, once committed, is frozen",
+     {"file_path": "docs/adr/900-committed.md"},
+     {"CLAUDE_PROJECT_DIR": str(DRAFT_REPO)}, BLOCK),
+    ("a draft is editable from a command too",
+     {"command": "sed -i 's/x/y/' docs/adr/901-uncommitted.md"},
+     {"CLAUDE_PROJECT_DIR": str(DRAFT_REPO)}, ALLOW),
+    ("a committed one is not, from a command either",
+     {"command": "sed -i 's/x/y/' docs/adr/900-committed.md"},
+     {"CLAUDE_PROJECT_DIR": str(DRAFT_REPO)}, BLOCK),
+
+    # The exemption must not become a way to reach a real, committed decision.
+    # ADR-029 is the one this session had to amend, so it is the one named here.
+    ("ADR-029 in the real tree still blocks",
+     {"file_path": str(ROOT / "docs/adr/029-schema-tables-the-erd-lacks.md")}, {}, BLOCK),
+    ("ADR-029 still blocks with the proto escape set",
+     {"file_path": str(ROOT / "docs/adr/029-schema-tables-the-erd-lacks.md")},
+     {"CVAP_ALLOW_PROTO_EDIT": "1"}, BLOCK),
+
+    # Fail closed, three ways. Each of these is a route to the wrong answer if
+    # the check is written casually.
+    ("a project dir that is not a repository at all cannot answer, so it blocks",
+     {"file_path": "docs/adr/901-uncommitted.md"},
+     {"CLAUDE_PROJECT_DIR": str(NO_REPO)}, BLOCK),
+    ("a repository with no commits does not read as nothing-is-frozen",
+     {"file_path": "docs/adr/901-uncommitted.md"},
+     {"CLAUDE_PROJECT_DIR": str(EMPTY_REPO)}, BLOCK),
+    # git resolves -C by walking UP to the enclosing repository, so a project
+    # dir below the toplevel would have docs/adr/x.md looked up against the
+    # WRONG base, find nothing, and call every ADR beneath it a draft.
+    ("a project dir below the repository toplevel blocks rather than guessing",
+     {"file_path": "docs/adr/900-committed.md"},
+     {"CLAUDE_PROJECT_DIR": str(NESTED_ROOT)}, BLOCK),
 ]
 
 

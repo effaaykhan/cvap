@@ -20,7 +20,7 @@ func leaseFor(t *testing.T, db *store.DB, tenant store.TenantID, spID uuid.UUID,
 
 	var epoch int64
 	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
-		if _, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10); err != nil {
+		if _, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10, nil); err != nil {
 			return err
 		}
 		l, err := (store.Leases{}).Grant(ctx, c, jobID, spID, store.LeaseTTL)

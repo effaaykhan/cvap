@@ -121,7 +121,7 @@ func TestJobClaimedByExactlyOneDispatcher(t *testing.T) {
 			defer wg.Done()
 			<-start
 			errs[i] = db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-				jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10)
+				jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10, nil)
 				claimed[i] = jobs
 				return err
 			})
@@ -183,7 +183,7 @@ func TestExpiredLeaseRequeuesOnlyReassignSafeJobs(t *testing.T) {
 
 	// Assign both, lease both, then expire both leases by force.
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10)
+		jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10, nil)
 		if err != nil {
 			return err
 		}
@@ -261,7 +261,7 @@ func TestExpiredLeaseRequeuesOnlyReassignSafeJobs(t *testing.T) {
 
 	// And the failed job must not be claimable again.
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10)
+		jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10, nil)
 		if err != nil {
 			return err
 		}
@@ -294,7 +294,7 @@ func TestRenewalRefusedAfterSupersession(t *testing.T) {
 
 	var epoch1 int64
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		if _, err := (store.Jobs{}).Claim(ctx, c, spA, []store.Engine{store.EngineDiscovery}, 10); err != nil {
+		if _, err := (store.Jobs{}).Claim(ctx, c, spA, []store.Engine{store.EngineDiscovery}, 10, nil); err != nil {
 			return err
 		}
 		l, err := (store.Leases{}).Grant(ctx, c, jobID, spA, store.LeaseTTL)
@@ -379,7 +379,7 @@ func TestExpiredLeaseCannotBeRenewed(t *testing.T) {
 
 	var epoch int64
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		if _, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10); err != nil {
+		if _, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10, nil); err != nil {
 			return err
 		}
 		l, err := (store.Leases{}).Grant(ctx, c, jobID, spID, store.LeaseTTL)
@@ -549,7 +549,7 @@ func TestLiveKillSwitchStopsAssignment(t *testing.T) {
 	}
 
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10)
+		jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10, nil)
 		if err != nil {
 			return err
 		}
@@ -569,7 +569,7 @@ func TestLiveKillSwitchStopsAssignment(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10)
+		jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10, nil)
 		if err != nil {
 			return err
 		}
@@ -647,7 +647,7 @@ func TestUnauthorisedTargetsAreNeverAssigned(t *testing.T) {
 	}
 
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10)
+		jobs, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10, nil)
 		if err != nil {
 			return err
 		}
@@ -824,7 +824,7 @@ func TestCancelledScanIsNeitherDispatchedNorLeftRunning(t *testing.T) {
 	// Take one job and lease it, then queue a second under the SAME scan so the
 	// dispatch half has something to refuse.
 	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
-		if _, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10); err != nil {
+		if _, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10, nil); err != nil {
 			return err
 		}
 		l, err := (store.Leases{}).Grant(ctx, c, running, spID, store.LeaseTTL)
@@ -865,7 +865,7 @@ func TestCancelledScanIsNeitherDispatchedNorLeftRunning(t *testing.T) {
 		if len(pending) != 0 {
 			t.Errorf("control: %d cancellable jobs before the scan was cancelled, want 0", len(pending))
 		}
-		claimed, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10)
+		claimed, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10, nil)
 		if err != nil {
 			return err
 		}
@@ -911,7 +911,7 @@ func TestCancelledScanIsNeitherDispatchedNorLeftRunning(t *testing.T) {
 		}
 
 		// Half two: the scan's remaining queued work stops being handed out.
-		claimed, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10)
+		claimed, err := (store.Jobs{}).Claim(ctx, c, spID, []store.Engine{store.EngineDiscovery}, 10, nil)
 		if err != nil {
 			return err
 		}

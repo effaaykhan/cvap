@@ -28,11 +28,37 @@ and it was the one path straight through the guard.
 
 Exit 2 blocks the tool call and returns the message to Claude.
 
+UNCOMMITTED ADRs ARE STILL DRAFTS
+--------------------------------
+An ADR is frozen by being COMMITTED, not by carrying the word Accepted. A file
+with no commit in HEAD is a draft: nobody else has read it, nothing links to it,
+and no decision has been settled by it. Its author fixing a typo before the
+commit lands is not a later session rewriting a settled decision, which is the
+only thing this half of the guard was built to stop.
+
+The gap was found the way these things are: a session wrote an ADR, a reviewer
+in the same session found a wording error in it, and the guard refused the
+author's own correction -- with no override, because Accepted ADRs deliberately
+have none. Supersession is not a sane answer for a document that has never
+existed outside one working tree.
+
+So: no commit in HEAD, editable. One commit in HEAD, frozen, and supersession is
+the only route from then on. The check is `git cat-file -e HEAD:<path>` and it
+fails CLOSED -- no git, no repository, no HEAD, or any other doubt, and the file
+is treated as committed.
+
+Note this is a property of the FILE's history, not of the session. A draft that
+survives to a commit is frozen for everyone including the person who wrote it,
+which is the moment other people can start relying on it.
+
 ESCAPE HATCH
 ------------
 A genuinely additive proto change, or the commit that establishes the baseline,
 sets CVAP_ALLOW_PROTO_EDIT=1 in the hook's own environment. That is the only
 form accepted.
+
+It applies to proto/ ONLY. A committed Accepted ADR has no override of any kind
+-- see below.
 
 An earlier version of this hook also honoured an inline
 `CVAP_ALLOW_PROTO_EDIT=1 cmd` assignment written into the Bash command, on the
@@ -44,7 +70,8 @@ than asking. Requiring the environment means the bypass needs a human to act,
 which is the entire point of a freeze. Visibility does not help if nobody is
 reading.
 
-Accepted ADRs have no escape hatch at all. They are superseded, not edited.
+Accepted ADRs that have been committed have no escape hatch at all. They are
+superseded, not edited. An uncommitted one is a draft -- see above.
 
 BIAS
 ----
@@ -64,6 +91,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(os.environ.get("CLAUDE_PROJECT_DIR", ".")).resolve()
@@ -85,10 +113,18 @@ If it is not additive, it needs a major version and a migration plan first.
 buf breaking enforces the same rule mechanically in CI; this hook is the
 earlier, cheaper failure."""
 
-ADR_MSG = """BLOCKED: this ADR is Accepted. Accepted decisions are superseded, not edited.
+ADR_MSG = """BLOCKED: this ADR is Accepted and committed. Accepted decisions are
+superseded, not edited.
 
 Write a new ADR that supersedes it, then set the old one's status to
-"Superseded by ADR-NNN". Use /new-adr to scaffold it."""
+"Superseded by ADR-NNN". Use /new-adr to scaffold it.
+
+There is no environment override for this, deliberately. CVAP_ALLOW_PROTO_EDIT
+applies to proto/ only.
+
+An ADR with no commit in HEAD is still a draft and is editable -- if you are
+seeing this for a file you wrote in this session, it has already been
+committed."""
 
 # A write construct anywhere in the same command segment as a protected path is
 # enough to block. Kept narrow enough that reads -- cat, grep, git diff, buf
@@ -124,11 +160,61 @@ def is_protected_proto(path: str) -> bool:
     return path.strip("'\"").endswith(".proto") and "proto" in parts[:-1]
 
 
+def _is_committed(relative: str) -> bool:
+    """Whether this path exists in HEAD.
+
+    Fails CLOSED in every uncertain case, which is this guard's bias: a missing
+    git binary, a directory that is not a repository, an unborn HEAD or a
+    timeout all report "committed", so the ADR stays protected. Only a clean
+    "git knows this repository and that path is not in HEAD" opens the file.
+
+    Three calls, and each rules out a way of getting the wrong answer.
+
+    `--show-toplevel` must equal ROOT. git resolves `-C <dir>` by walking UP to
+    the enclosing repository, so a ROOT that is a subdirectory would have its
+    paths resolved against the repository root instead -- `docs/adr/x.md` would
+    be looked up as if ROOT were the top, find nothing, and report every ADR
+    beneath it as an editable draft. Requiring ROOT to BE the toplevel is what
+    makes the relative path below mean what it says.
+
+    `rev-parse --verify HEAD` establishes that the question is answerable at
+    all: `cat-file -e` cannot distinguish "not in HEAD" from "there is no HEAD",
+    and a fresh repository with no commits must not read as "nothing is frozen".
+
+    Only then does `cat-file -e` answer it.
+    """
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if top.returncode != 0:
+            return True
+        if pathlib.Path(top.stdout.strip()).resolve() != ROOT:
+            return True
+
+        head = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", "HEAD"],
+            capture_output=True, timeout=5,
+        )
+        if head.returncode != 0:
+            return True
+
+        found = subprocess.run(
+            ["git", "-C", str(ROOT), "cat-file", "-e", "HEAD:" + relative],
+            capture_output=True, timeout=5,
+        )
+        return found.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
 def is_protected_adr(path: str) -> bool:
-    """An Accepted ADR, excluding the index.
+    """An Accepted ADR that has been committed, excluding the index.
 
     A path that does not exist yet is a new ADR being written, which is allowed.
     So is one whose status is Proposed -- an ADR is only immutable once accepted.
+    So is one that is accepted but not yet committed: see UNCOMMITTED ADRs above.
     """
     p = pathlib.PurePosixPath(path.strip("'\""))
     if p.suffix != ".md" or "adr" not in p.parts[:-1] or "docs" not in p.parts[:-1]:
@@ -140,7 +226,9 @@ def is_protected_adr(path: str) -> bool:
         text = candidate.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    return bool(re.search(r"^\*\*Status:\*\*\s*Accepted", text, re.MULTILINE | re.IGNORECASE))
+    if not re.search(r"^\*\*Status:\*\*\s*Accepted", text, re.MULTILINE | re.IGNORECASE):
+        return False
+    return _is_committed("docs/adr/" + p.name)
 
 
 def classify(path: str) -> str | None:

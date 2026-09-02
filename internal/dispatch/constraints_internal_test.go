@@ -2,11 +2,25 @@ package dispatch
 
 import (
 	"testing"
+	"time"
 
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
 func ptr(i int) *int { return &i }
+
+// jp builds the policy-plus-scan pair constraintsFor takes. The scan's opt-in
+// defaults to intrusive in these cases so that the POLICY ceiling is what the
+// assertion is measuring; the interaction between the two has its own test.
+func jp(p store.Policy) *store.JobPolicy {
+	return &store.JobPolicy{Policy: p, ScanSafetyMode: store.SafetyIntrusive}
+}
+
+// noWindow is a fixed instant. Every policy in these cases has empty
+// time_windows, which is unrestricted (ADR-037), so the value cannot matter —
+// and pinning it means a test that starts failing at 22:00 is telling the truth
+// about a bug rather than about the clock.
+var noWindow = time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 
 // TestConstraintsTakeTheMinimumOfPlatformAndPolicy is ADR-024 control 2.
 //
@@ -15,25 +29,25 @@ func ptr(i int) *int { return &i }
 // 1,000, against an estate its operator had reason to be careful with.
 func TestConstraintsTakeTheMinimumOfPlatformAndPolicy(t *testing.T) {
 	for _, tc := range []struct {
-		name                     string
-		policy                   *store.Policy
-		rate, perTarget, fragile uint32
-		mode                     string
+		name                                 string
+		policy                               *store.JobPolicy
+		rate, perTarget, fragile, concurrent uint32
+		mode                                 string
 	}{
 		{
 			name:   "no policy at all falls back to the platform table",
 			policy: nil,
-			rate:   1000, perTarget: 50, fragile: 10, mode: "safe",
+			rate:   1000, perTarget: 50, fragile: 10, concurrent: 20, mode: "safe",
 		},
 		{
 			name:   "NULL max_rate_pps means the platform default",
-			policy: &store.Policy{SafetyMode: store.SafetySafe},
-			rate:   1000, perTarget: 50, fragile: 10, mode: "safe",
+			policy: jp(store.Policy{SafetyMode: store.SafetySafe}),
+			rate:   1000, perTarget: 50, fragile: 10, concurrent: 20, mode: "safe",
 		},
 		{
 			name:   "a policy that lowers is honoured",
-			policy: &store.Policy{SafetyMode: store.SafetySafe, MaxRatePPS: ptr(50)},
-			rate:   50, perTarget: 50, fragile: 10, mode: "safe",
+			policy: jp(store.Policy{SafetyMode: store.SafetySafe, MaxRatePPS: ptr(50)}),
+			rate:   50, perTarget: 50, fragile: 10, concurrent: 20, mode: "safe",
 		},
 		{
 			// The per-target ceiling must come down with it. A runtime told it
@@ -41,8 +55,8 @@ func TestConstraintsTakeTheMinimumOfPlatformAndPolicy(t *testing.T) {
 			// 5 has been authorised to exceed the policy tenfold at the single
 			// place that matters most.
 			name:   "per-target and fragile clamp beneath a very low policy rate",
-			policy: &store.Policy{SafetyMode: store.SafetySafe, MaxRatePPS: ptr(5)},
-			rate:   5, perTarget: 5, fragile: 5,
+			policy: jp(store.Policy{SafetyMode: store.SafetySafe, MaxRatePPS: ptr(5)}),
+			rate:   5, perTarget: 5, fragile: 5, concurrent: 20,
 			mode: "safe",
 		},
 		{
@@ -50,20 +64,47 @@ func TestConstraintsTakeTheMinimumOfPlatformAndPolicy(t *testing.T) {
 			// too; Core does not rely on it, because the place that must never
 			// be wrong is the one deciding what goes on the wire.
 			name:   "a policy that tries to raise is ignored",
-			policy: &store.Policy{SafetyMode: store.SafetySafe, MaxRatePPS: ptr(5000)},
-			rate:   1000, perTarget: 50, fragile: 10, mode: "safe",
+			policy: jp(store.Policy{SafetyMode: store.SafetySafe, MaxRatePPS: ptr(5000)}),
+			rate:   1000, perTarget: 50, fragile: 10, concurrent: 20, mode: "safe",
 		},
 		{
-			// Not a quantity, so not minimised. Hardcoding "safe" meant an
-			// intrusive policy silently ran safe — the failure that looks like
+			// Not a quantity, so not minimised — but still reduced, by the scan
+			// opt-in this helper sets to intrusive. Hardcoding "safe" meant an
+			// intrusive policy silently ran safe, the failure that looks like
 			// everything working.
-			name:   "safety_mode passes through",
-			policy: &store.Policy{SafetyMode: store.SafetyIntrusive},
-			rate:   1000, perTarget: 50, fragile: 10, mode: "intrusive",
+			name:   "safety_mode passes through when the scan opted in",
+			policy: jp(store.Policy{SafetyMode: store.SafetyIntrusive}),
+			rate:   1000, perTarget: 50, fragile: 10, concurrent: 20, mode: "intrusive",
+		},
+		{
+			// ADR-024's second lever, added in migration 0024. Connection count
+			// rather than packet rate is what tips a printer over, so an
+			// operator who lowered the rate and was still handed 20 concurrent
+			// connections per host had not got what they asked for.
+			name:   "a policy that lowers concurrency is honoured",
+			policy: jp(store.Policy{SafetyMode: store.SafetySafe, MaxConcurrentPerTarget: ptr(2)}),
+			rate:   1000, perTarget: 50, fragile: 10, concurrent: 2, mode: "safe",
+		},
+		{
+			name:   "a policy that tries to raise concurrency is ignored",
+			policy: jp(store.Policy{SafetyMode: store.SafetySafe, MaxConcurrentPerTarget: ptr(500)}),
+			rate:   1000, perTarget: 50, fragile: 10, concurrent: 20, mode: "safe",
+		},
+		{
+			// The wrap ADR-024 forbids, arrived at by arithmetic rather than by
+			// anyone's decision. Bounded as int before the conversion.
+			name:   "a negative concurrency row cannot wrap into a huge ceiling",
+			policy: jp(store.Policy{SafetyMode: store.SafetySafe, MaxConcurrentPerTarget: ptr(-1)}),
+			rate:   1000, perTarget: 50, fragile: 10, concurrent: 20, mode: "safe",
+		},
+		{
+			name:   "the two levers are independent",
+			policy: jp(store.Policy{SafetyMode: store.SafetySafe, MaxRatePPS: ptr(5), MaxConcurrentPerTarget: ptr(1)}),
+			rate:   5, perTarget: 5, fragile: 5, concurrent: 1, mode: "safe",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := constraintsFor(tc.policy, nil)
+			got, err := constraintsFor(tc.policy, nil, noWindow)
 			if err != nil {
 				t.Fatalf("constraintsFor: %v", err)
 			}
@@ -79,12 +120,14 @@ func TestConstraintsTakeTheMinimumOfPlatformAndPolicy(t *testing.T) {
 			if got.GetSafetyMode() != tc.mode {
 				t.Errorf("safety_mode = %q, want %q", got.GetSafetyMode(), tc.mode)
 			}
-			// Never adjustable by policy today; asserted so that adding a column
-			// for either has to come here and think about the direction.
-			if got.GetMaxConcurrentPerTarget() != platformMaxConcurrentPerTarget {
+			if got.GetMaxConcurrentPerTarget() != tc.concurrent {
 				t.Errorf("max_concurrent_per_target = %d, want %d",
-					got.GetMaxConcurrentPerTarget(), platformMaxConcurrentPerTarget)
+					got.GetMaxConcurrentPerTarget(), tc.concurrent)
 			}
+			// Still not adjustable by policy; asserted so that adding a column
+			// for it has to come here and think about the direction. ADR-024
+			// says "adjust" rather than "lower only" for this one, which is a
+			// decision to make deliberately rather than by writing a migration.
 			if got.GetConnectTimeoutMs() != platformConnectTimeoutMs {
 				t.Errorf("connect_timeout_ms = %d, want %d",
 					got.GetConnectTimeoutMs(), platformConnectTimeoutMs)
@@ -154,7 +197,7 @@ func TestUnexpressibleRulesFailTheJobRatherThanVanish(t *testing.T) {
 				t.Error("scopePlan accepted a rule it cannot express on the wire; a rule that " +
 					"reaches neither enforcement site must fail the job, not disappear")
 			}
-			if _, err := constraintsFor(&store.Policy{SafetyMode: store.SafetySafe}, tc.rules); err == nil {
+			if _, err := constraintsFor(jp(store.Policy{SafetyMode: store.SafetySafe}), tc.rules, noWindow); err == nil {
 				t.Error("constraintsFor built an assignment from unexpressible rules")
 			}
 		})
@@ -190,6 +233,30 @@ func TestPermitsIsExclusionFirstAndEmptyDeniesAll(t *testing.T) {
 		got, why := permits(tc.target, allowed, exclusions)
 		if got != tc.want {
 			t.Errorf("permits(%q) = %v (%s), want %v — %s", tc.target, got, why, tc.want, tc.why)
+		}
+	}
+
+	// A v4-mapped CIDR exclusion covers the v4 target it names.
+	//
+	// A safety audit found this asymmetric: the TARGET was unmapped and the
+	// rule was not, so ::ffff:10.10.0.0/120 excluded nothing while the
+	// bare-address form ::ffff:10.10.0.5 excluded correctly. Writing a deny in
+	// the v4-mapped form must not be the way to disarm it — that is the
+	// direction ADR-024 cannot afford.
+	for _, tc := range []struct {
+		rule, target string
+		want         bool
+		why          string
+	}{
+		{"::ffff:10.10.0.0/120", "10.10.0.5", false, "a v4-mapped /120 excludes the v4 host"},
+		{"::ffff:10.10.0.0/120", "::ffff:10.10.0.5", false, "and its v4-mapped form"},
+		{"::ffff:10.10.0.5/128", "10.10.0.5", false, "a v4-mapped host prefix"},
+		{"::ffff:10.10.0.0/120", "10.10.1.5", true, "outside the range, so only the allow decides"},
+	} {
+		got, why := permits(tc.target, []string{"10.10.0.0/16"}, []string{tc.rule})
+		if got != tc.want {
+			t.Errorf("permits(%q) with exclusion %q = %v (%s), want %v — %s",
+				tc.target, tc.rule, got, why, tc.want, tc.why)
 		}
 	}
 

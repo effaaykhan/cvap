@@ -1,3 +1,3 @@
 - [Engine import guard bypasses](bypass_engine_import_guard.md) — six confirmed ways an engine reaches the network past `internal/engines/import_policy_test.go`
-- [Dispatch scope and kill gaps](dispatch_scope_and_kill_gaps.md) — Core-side scope check still absent, tag denies dropped fail-open, cancellation has no trigger; check first on dispatch/scanpoint diffs
+- [Dispatch scope and kill gaps](dispatch_scope_and_kill_gaps.md) — four bypasses found and fixed in session 8e (do not re-report); remaining gaps are fragile concurrency, no operator trigger, match_type on the wire
 - [Lab scope guard bypasses](lab_scope_guard_bypasses.md) — quoting, hostnames and integer IPs get past `.claude/hooks/lab-scope-guard.py`
