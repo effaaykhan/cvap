@@ -49,13 +49,34 @@ func ValidObservationType(s string) bool {
 type IngestState string
 
 const (
+	// IngestPending is where every observation starts.
+	//
+	// A submission arrives in chunks and its lease epoch can be superseded
+	// midway. If chunks landed as accepted, the finding pipeline — which filters
+	// exactly on that — could read chunk 0 before chunk 5 revealed the
+	// supersession. Quarantining retrospectively narrows that window; it does
+	// not close it.
+	//
+	// Landing pending closes it. The pipeline filters `accepted`, so an
+	// in-flight submission is invisible to it without the pipeline having to
+	// know submissions exist: no join to remember, and no window.
+	IngestPending IngestState = "pending"
+
+	// IngestAccepted: promoted by the terminal ack, in the same transaction as
+	// the final epoch check.
 	IngestAccepted IngestState = "accepted"
 
 	// IngestQuarantined: stored, withheld from the finding pipeline,
-	// operator-surfaced (ADR-026). Written at INSERT and never updated —
-	// observations are immutable, so this is a fact about how the row arrived.
+	// operator-surfaced (ADR-026).
 	IngestQuarantined IngestState = "quarantined"
 )
+
+// The ratchet: pending may be promoted once; accepted and quarantined are
+// terminal. Enforced by a trigger in migration 0020 rather than by convention,
+// because the finding pipeline runs as the same database role as ingest — a
+// grant cannot express "ingest may set this and the pipeline may not", and a
+// ratchet can, since un-quarantining is not an operation anything legitimately
+// performs.
 
 // Observation is what a scan point saw. Immutable once written, and ephemeral:
 // partitioned monthly with 90-day default retention, pruned by dropping a
@@ -293,6 +314,62 @@ func (Observations) ListQuarantined(ctx context.Context, c *Conn, since, until t
 		return nil, mapError(err)
 	}
 	return scanObservations(rows)
+}
+
+// Promote moves every pending observation in a submission to its terminal state.
+//
+// One statement, and it must run in the SAME transaction as the final epoch
+// check — that is what makes the disposition and the decision atomic. A
+// submission promoted to accepted while its epoch was already superseded would
+// put results from a fenced-off scan point into the finding pipeline.
+//
+// The WHERE clause names pending explicitly rather than relying on the trigger
+// to refuse the rest: the trigger is the backstop, and a statement that depends
+// on its backstop to be correct is a statement that raises in normal operation.
+func (Observations) Promote(ctx context.Context, c *Conn, submissionID string, to IngestState) (int64, error) {
+	if to != IngestAccepted && to != IngestQuarantined {
+		return 0, fmt.Errorf("store: cannot promote observations to %q; pending is the "+
+			"starting state and only accepted or quarantined are terminal", to)
+	}
+
+	const q = `
+		UPDATE observations
+		   SET ingest_state = $3
+		 WHERE tenant_id = $1
+		   AND submission_id = $2
+		   AND ingest_state = 'pending'`
+
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), submissionID, string(to))
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// PendingOlderThan counts observations still pending past a cutoff.
+//
+// The metric for the consequence the pending state creates: an upload abandoned
+// midway leaves its rows pending forever. That is correct — the results were
+// never attested complete, and deleting them would discard the record of what a
+// job touched (ADR-026) — but "correct and unbounded" needs to be visible, or
+// the first anyone knows of a broken ingest is a finding count that stopped
+// moving.
+//
+// Bounded window, like every other read here: observations is partitioned by
+// observed_at.
+func (Observations) PendingOlderThan(ctx context.Context, c *Conn, since, cutoff time.Time) (int64, error) {
+	const q = `
+		SELECT count(*)
+		  FROM observations
+		 WHERE tenant_id = $1
+		   AND observed_at >= $2 AND observed_at < $3
+		   AND ingest_state = 'pending'`
+
+	var n int64
+	if err := c.QueryRow(ctx, q, c.Tenant().UUID(), since, cutoff).Scan(&n); err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
 }
 
 // Resolve attaches an observation to an asset. Correlation's write.
