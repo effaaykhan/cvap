@@ -9,11 +9,19 @@ Rules:
 - Emits observations. Never constructs an Asset or Finding.
 - Lease renewal failure means self-abort and credential zeroise, on every path including
   panic recovery. Not "log and continue".
-- Credentials live in memory for the life of the job and nowhere else. No hand-written
-  struct holding credential material may have a `String()`, a `MarshalJSON` or a json tag
-  that exposes it. The generated protobuf types do have `String()` and cannot be changed:
-  log them only through `logging.Proto` / `logging.ProtoAttr`, which `make secret-logging`
-  enforces.
+- Credentials live in memory for the life of the job and nowhere else.
+- **A hand-written type holding credential material stores it in a `func() string` field and
+  implements `String()`, `GoString()`, `LogValue()` and `MarshalJSON()` returning a redacted
+  form (ADR-035).** This reverses what this file said before that ADR: the old rule was that
+  such a type must NOT implement `String` or `MarshalJSON`, which is exactly backwards.
+  Implementing nothing is not safe — a bare struct with an unexported string field still
+  prints its contents under `%v`. And the methods alone are not sufficient either: `fmt`
+  calls none of them when the value sits in an unexported field of another struct, because
+  `reflect.Value.CanInterface` is false there. The func field is what closes that; the
+  methods make the output legible. `Reveal()` is the only accessor.
+- The generated protobuf types do have `String()` and cannot be changed: log them only
+  through `logging.Proto` / `logging.ProtoAttr`, which `make secret-logging` enforces. No
+  interceptor, middleware or tracing layer may render message bodies (ADR-034).
 - **Credentials stop here.** Engine processes never receive raw credential material: the
   runtime holds the credential, establishes the authenticated session, and passes the engine
   a session handle or a short-lived derived token (ADR-020, ADR-027).

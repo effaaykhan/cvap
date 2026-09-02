@@ -87,6 +87,7 @@ DECLARE
     v_vuln      uuid;
     v_sub       text := 'fixture-submission-' || p_tag;
     v_obs       uuid := gen_random_uuid();
+    v_kill      uuid;
 BEGIN
     SELECT rule_id INTO v_rule FROM rules WHERE name = 'fixture-rule';
     SELECT vuln_def_id INTO v_vuln FROM vulnerability_defs WHERE cve_id = 'CVE-1999-0000';
@@ -253,6 +254,15 @@ BEGIN
                                          serial_number, not_before, not_after)
         VALUES (p_tenant, v_point, 'fixture-fp-' || p_tag, 'fixture-serial-' || p_tag,
                 now() - interval '1 day', now() + interval '89 days');
+
+    -- Kill switch and one acknowledgement. Both tenant-scoped, so both must
+    -- carry rows or case 1's sweep proves nothing for them (ADR-024).
+    INSERT INTO kill_switches (tenant_id, scope, issued_by, reason)
+        VALUES (p_tenant, 'tenant', v_user, 'fixture: halt everything')
+        RETURNING kill_id INTO v_kill;
+
+    INSERT INTO kill_acks (tenant_id, kill_id, scan_point_id, tasks_halted)
+        VALUES (p_tenant, v_kill, v_point, 2);
 
     INSERT INTO reports (tenant_id, report_type, parameters, object_store_ref, requested_by, generated_at)
         VALUES (p_tenant, 'exposure-summary', '{"window":"30d"}'::jsonb,

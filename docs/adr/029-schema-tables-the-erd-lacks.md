@@ -14,9 +14,9 @@ the migration rather than a gap in the diagram.
 
 ## Decision
 
-Six tables exist in the schema that the ERD does not draw. Each is listed here with the
+Eight tables exist in the schema that the ERD does not draw. Each is listed here with the
 decision that requires it, so a future reader diffing schema against diagram finds the
-reason rather than a discrepancy. Four are required by ADRs accepted after the diagram; two
+reason rather than a discrepancy. Six are required by ADRs accepted after the diagram; two
 are join tables the diagram implies but cannot name.
 
 - **`result_submissions`** — ADR-026's idempotency ledger. Ingest deduplicates on
@@ -43,6 +43,12 @@ are join tables the diagram implies but cannot name.
   what makes revocation immediate (ADR-031) — and also what destroys the record of which
   certificate was valid when. Backfilled at creation so the history has no hole covering
   everything before the migration.
+- **`kill_switches`** and **`kill_acks`** — ADR-024's kill switch and its acknowledgements,
+  added in migration 0019. The ERD has no kill switch at all. Two tables rather than a pair of
+  audit rows for a reason ADR-024 states outright: propagation is bounded at 10 seconds, and
+  "a 10-second bound Core cannot measure is not a control". The question during an incident is
+  *which scan points have not acknowledged*, and that has to be a query rather than a scan over
+  a text-keyed log.
 - **`scan_policy_credential_profiles`** and **`advisory_vuln_map`** — join tables for the
   ERD's own `SCAN_POLICY }o--o{ CREDENTIAL_PROFILE` and
   `VULNERABILITY_DEF }o--o{ VENDOR_ADVISORY`. Mermaid draws a many-to-many as a line; a
@@ -91,11 +97,11 @@ migration depends on cannot be added by a later one without rewriting the earlie
 
 The schema satisfies ADR-007 and ADR-026 rather than only the ERD, and the divergence is
 documented where the next person to compare them will look. The cost is a diagram that is now
-incomplete in six named places, which is a maintenance obligation: a seventh table that the
+incomplete in eight named places, which is a maintenance obligation: a ninth table that the
 ERD lacks belongs in this ADR, not in a further one. That obligation has now been exercised
-three times — `advisory_vuln_map` while writing migration 0010, and both enrolment tables
-while building the Enrollment service — which is evidence the annotation approach is holding
-rather than that it is failing. The signal to redraw is when a reader can no longer hold the
+four times — `advisory_vuln_map` while writing migration 0010, both enrolment tables while
+building the Enrollment service, and both kill tables while building Dispatch — which is
+evidence the annotation approach is holding rather than that it is failing. The signal to redraw is when a reader can no longer hold the
 divergences in mind, not the count itself. Anyone regenerating the schema from the
 diagram alone will still produce the wrong thing, so execution-plan §4.3's "generate
 migrations directly from the v2 ERD" is now qualified by this record.
