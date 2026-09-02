@@ -30,6 +30,15 @@
             "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/hooks/go-fmt-lint.sh"
           }
         ]
+      },
+      {
+        "matcher": "Bash|Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/verify-contracts.py"
+          }
+        ]
       }
     ]
   },

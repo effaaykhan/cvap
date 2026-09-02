@@ -333,5 +333,15 @@ jobs:
       # because a heredoc was a straight path through it. An extension like
       # that is exactly the kind that looks done and is not, so it gets a case
       # table too.
-      - name: Frozen contract guard
+      - name: Frozen contract guard (PreToolUse)
         run: python3 .claude/hooks/test_protect_contracts.py
+
+      # The other half. The PreToolUse guard enumerates ways to spell a write,
+      # and a python3 heredoc calling write_text went straight through it --
+      # the most common editing method in this repository, unnoticed for as
+      # long as the guard existed. This suite performs REAL writes with real
+      # interpreters and asks whether a frozen file changed, which is the only
+      # question that cannot be worked around. Runners have node, so the node
+      # cases that SKIP locally actually run here.
+      - name: Frozen contract verifier (PostToolUse)
+        run: python3 .claude/hooks/test_verify_contracts.py

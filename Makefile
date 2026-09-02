@@ -304,8 +304,9 @@ gitignore-test: ## Assert .gitignore still covers what it must
 scope-guard-test: ## Test the lab scope guard against its case table
 	python3 .claude/hooks/test_lab_scope_guard.py
 
-contract-guard-test: ## Test the frozen-contract guard against its case table
+contract-guard-test: ## Test both halves of the frozen-contract guard
 	python3 .claude/hooks/test_protect_contracts.py
+	python3 .claude/hooks/test_verify_contracts.py
 
 # An enrollment token is a bearer credential for a fleet identity and credential
 # material is the customer's estate. Both sit in plain fields on messages an

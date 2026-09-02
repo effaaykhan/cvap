@@ -73,6 +73,22 @@ reading.
 Accepted ADRs that have been committed have no escape hatch at all. They are
 superseded, not edited. An uncommitted one is a draft -- see above.
 
+THIS IS HALF OF A PAIR
+----------------------
+Everything below reasons about the SHAPE of a command, which means it is a guess
+about how a write will be spelled -- and the guess was wrong in the most ordinary
+way available: `python3 - <<'PY'` calling pathlib.write_text matches none of the
+patterns here. Enumerating interpreters instead was considered and rejected as
+the same game one level up (`uv run`, `env python`, `go run`, `./tool.py`, a make
+target, a compiled binary), with false positives that would fire on merely
+READING a protected path -- and committed ADRs have no override, so a false block
+on one has no way through.
+
+verify-contracts.py is the answer: a PostToolUse hook that asks whether a frozen
+file differs from HEAD, which no spelling can evade. This file still earns its
+place by PREVENTING the common cases rather than reporting them afterwards; the
+two are prevention and detection, not alternatives.
+
 BIAS
 ----
 This guard fails closed, which is the opposite of lab-scope-guard.py. That guard
