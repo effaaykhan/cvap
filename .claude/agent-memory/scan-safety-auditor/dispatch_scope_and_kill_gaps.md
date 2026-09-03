@@ -78,12 +78,11 @@ mode and zones. Revoking `authorization_verified`, adding a deny rule or narrowi
 renewal refusal, and that is the only dimension with a mid-scan lever.
 
 **Matcher edges that survived the move to `internal/scope`.** CIDR boundary arithmetic is
-correct (network, broadcast, off-by-one, non-canonical prefixes). An IPv6 ZONE defeats
-exclusions outright — `Prefix.Contains` returns false for any zoned address and `Addr`
-equality includes the zone. NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) notation of an
-excluded v4 address is not unmapped, so it walks past the exclusion when an IPv6 allow
-covers it; `Unmap()` handles `::ffff:` only. A trailing-dot FQDN is a different string from
-the same name without one.
+correct (network, broadcast, off-by-one, non-canonical prefixes). The three edges once recorded
+here — IPv6 zone, NAT64/6to4 notation, trailing-dot FQDN — were all closed by 2026-09-03;
+the translated-form work that closed the second one opened four narrower gaps of its own,
+which now live in [[scope-translated-form-bypasses]]. Read that file before re-reading this
+paragraph.
 
 **`match_type` is still unrepresentable on the wire**, and hostname rules deliberately resolve
 nothing — so an allowed hostname covers whatever DNS says at scan time, in either direction.

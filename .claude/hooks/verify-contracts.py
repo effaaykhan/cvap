@@ -76,6 +76,16 @@ ROOT = pathlib.Path(os.environ.get("CLAUDE_PROJECT_DIR", ".")).resolve()
 
 ESCAPE_VAR = "CVAP_ALLOW_PROTO_EDIT"
 
+# The supersession hatch, named by ADR number: CVAP_SUPERSEDE_ADR=035.
+#
+# The PreToolUse guard lets the edit through on the strength of this variable
+# alone, because it sees a path and not content. THIS hook is where the
+# constraint actually lives: it diffs the result against HEAD and stays quiet
+# only if the Status line is the only thing that moved. A body edit with the
+# variable set is reported exactly like an unauthorised one, which is the reason
+# the pair is safe to open at all.
+SUPERSEDE_VAR = "CVAP_SUPERSEDE_ADR"
+
 # Best-effort, and deliberately outside the repository: this is scratch state,
 # not something to commit or to have show up in git status.
 STATE_PATH = os.environ.get("CVAP_CONTRACT_VERIFY_STATE") or os.path.join(
@@ -147,6 +157,60 @@ def changed_protected_paths() -> list[tuple[str, str]]:
     return out
 
 
+def _adr_number(path: str) -> str | None:
+    m = re.match(r"^(\d{3})-", pathlib.PurePosixPath(path).name)
+    return m.group(1) if m else None
+
+
+def _authorised_supersession(path: str) -> bool:
+    """Whether this change is a status-only edit the operator authorised.
+
+    Three things must hold, and each rules out a way of turning a narrow hatch
+    into a general one:
+
+      * the operator named THIS ADR in the environment;
+      * the file still has the same number of lines as HEAD, so nothing was
+        added or removed;
+      * the only line that differs is the Status line, and it still reads as a
+        Status line.
+
+    Anything else -- a body edit, a reordering, a second ADR touched under one
+    variable -- falls through and is reported like any other change to a frozen
+    file. The write has already landed either way; the report is what reaches a
+    human, so the question is only whether this one was asked for.
+    """
+    want = os.environ.get(SUPERSEDE_VAR, "").strip()
+    have = _adr_number(path)
+    if not want or have is None:
+        return False
+    try:
+        if int(want) != int(have):
+            return False
+    except ValueError:
+        return False
+
+    head = _git("show", "HEAD:" + path)
+    if head is None or head.returncode != 0:
+        return False
+    try:
+        now = (ROOT / path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+    before = head.stdout.splitlines()
+    after = now.splitlines()
+    if len(before) != len(after):
+        return False
+
+    changed = [(b, a) for b, a in zip(before, after) if b != a]
+    if len(changed) != 1:
+        return False
+
+    was, is_ = changed[0]
+    status = re.compile(r"^\*\*Status:\*\*", re.IGNORECASE)
+    return bool(status.match(was.strip()) and status.match(is_.strip()))
+
+
 def _fingerprint(path: str) -> str:
     """Content of the file as it stands, or a marker when it is gone."""
     try:
@@ -185,8 +249,12 @@ def main() -> int:
     reportable = []
     for path, kind in changed_protected_paths():
         # The escape hatch covers proto/ and nothing else, exactly as the
-        # PreToolUse guard does. A committed ADR has no override of any kind.
+        # PreToolUse guard does.
         if kind == "proto" and escaped:
+            continue
+        # A committed ADR has one narrow override: an operator-named
+        # supersession, and only if the Status line is all that moved.
+        if kind == "adr" and _authorised_supersession(path):
             continue
         reportable.append((path, kind))
 
@@ -219,6 +287,10 @@ def main() -> int:
         else:
             lines.append("            Accepted ADRs are superseded, never edited (ADR-029 aside,")
             lines.append("            which is an enumeration its own text says to append to).")
+            if os.environ.get(SUPERSEDE_VAR, "").strip():
+                lines.append("            " + SUPERSEDE_VAR + " is set, and this change is NOT a")
+                lines.append("            status-only edit to the ADR it names. The hatch permits")
+                lines.append("            setting Status and nothing else.")
     lines += [
         "",
         "If this was not deliberate, revert it:",
@@ -226,7 +298,9 @@ def main() -> int:
         "    git checkout -- " + " ".join(p for p, _ in fresh),
         "",
         "If it WAS deliberate: a proto change needs CVAP_ALLOW_PROTO_EDIT=1 in this",
-        "hook's environment, and a committed ADR needs a superseding ADR instead.",
+        "hook's environment. A committed ADR needs a superseding ADR — and the one",
+        "edit that supersession requires, setting Status to \"Superseded by ADR-NNN\",",
+        "needs CVAP_SUPERSEDE_ADR=<nnn> naming it.",
         "Committing the change clears this, which is the point -- a frozen file should",
         "not sit modified in a working tree with nobody having decided to keep it.",
     ]

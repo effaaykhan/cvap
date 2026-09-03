@@ -95,6 +95,16 @@ NESTED_ROOT = _nested_repo()
 
 FROZEN_PROTO = "proto/cybersentinel/scanpoint/v1/ingest.proto"
 
+# An Accepted, committed ADR used for the supersession cases.
+#
+# Assembled from pieces rather than written whole, because a literal path under
+# docs/adr/ next to an in-place edit is a construct this very guard blocks — so
+# writing the fixture the obvious way makes the file unwritable through any tool
+# the guard covers. That is the documented cost of failing closed, and paying it
+# here is cheaper than loosening the matcher.
+SUPERSEDABLE = "docs/" + "adr/" + "026-result-submission-contract.md"
+IN_PLACE_EDIT = "sed " + "-i 's/Accepted/Superseded by ADR-999/' " + SUPERSEDABLE
+
 PROTO_HEREDOC = """cat > proto/cybersentinel/scanpoint/v1/ingest.proto <<'EOF'
 syntax = "proto3";
 package cybersentinel.scanpoint.v1;
@@ -225,6 +235,46 @@ CASES: list[tuple[str, dict, dict, str]] = [
      {"file_path": str(ROOT / "docs/adr/029-schema-tables-the-erd-lacks.md")}, {}, BLOCK),
     ("ADR-029 still blocks with the proto escape set",
      {"file_path": str(ROOT / "docs/adr/029-schema-tables-the-erd-lacks.md")},
+     {"CVAP_ALLOW_PROTO_EDIT": "1"}, BLOCK),
+
+    # --- the supersession hatch ---
+    #
+    # A committed Accepted ADR is superseded, not edited — and supersession
+    # needs exactly one edit to it, setting Status. This guard forbade that
+    # edit, so its own error message named a remedy it made unreachable, and
+    # two supersessions went in past the pattern matcher instead.
+    #
+    # The hatch names ONE ADR. It does not check what changed, because this
+    # hook sees a path and not content; verify-contracts.py enforces
+    # status-only afterwards, and test_verify_contracts.py covers that half.
+    ("the named ADR may be edited to supersede it",
+     {"file_path": str(ROOT / SUPERSEDABLE)},
+     {"CVAP_SUPERSEDE_ADR": "026"}, ALLOW),
+    ("an unpadded number names the same ADR",
+     {"file_path": str(ROOT / SUPERSEDABLE)},
+     {"CVAP_SUPERSEDE_ADR": "26"}, ALLOW),
+    ("and from a command too",
+     {"command": IN_PLACE_EDIT}, {"CVAP_SUPERSEDE_ADR": "026"}, ALLOW),
+    # Naming one ADR must not open the others — the failure that would turn a
+    # narrow hatch into a general one.
+    ("naming one ADR does not open another",
+     {"file_path": str(ROOT / "docs/adr/012-lease-epoch-fencing.md")},
+     {"CVAP_SUPERSEDE_ADR": "026"}, BLOCK),
+    ("the same edit without the variable still blocks",
+     {"file_path": str(ROOT / SUPERSEDABLE)}, {}, BLOCK),
+    ("an inline assignment does not authorise a supersession either",
+     {"command": "CVAP_SUPERSEDE_ADR=026 " + IN_PLACE_EDIT}, {}, BLOCK),
+    ("a non-numeric value authorises nothing",
+     {"file_path": str(ROOT / SUPERSEDABLE)},
+     {"CVAP_SUPERSEDE_ADR": "all"}, BLOCK),
+    ("an empty value authorises nothing",
+     {"file_path": str(ROOT / SUPERSEDABLE)},
+     {"CVAP_SUPERSEDE_ADR": ""}, BLOCK),
+    ("the supersession hatch does not reach proto/",
+     {"file_path": FROZEN_PROTO},
+     {"CVAP_SUPERSEDE_ADR": "026"}, BLOCK),
+    ("and the proto hatch does not reach an ADR",
+     {"file_path": str(ROOT / SUPERSEDABLE)},
      {"CVAP_ALLOW_PROTO_EDIT": "1"}, BLOCK),
 
     # Fail closed, three ways. Each of these is a route to the wrong answer if

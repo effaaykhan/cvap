@@ -1,4 +1,5 @@
 - [Scan point runtime bypasses](scanpoint_runtime_bypasses.md) — the terminal-path spawn race, unbounded grace_ms, missing rate aggregate; reproduced 2026-09-03
 - [Engine import guard](bypass_engine_import_guard.md) — now an allowlist in internal/enginepolicy; the `os` exception leaks os/exec by prefix match
-- [Dispatch scope and kill gaps](dispatch_scope_and_kill_gaps.md) — session 8e fixes (do not re-report); open: fragile concurrency, no operator trigger, IPv6 zone and NAT64 matcher edges
+- [Dispatch scope and kill gaps](dispatch_scope_and_kill_gaps.md) — session 8e fixes (do not re-report); open: fragile concurrency, no operator trigger, no mid-scan re-push
+- [Scope translated-form bypasses](scope_translated_form_bypasses.md) — ADR-039 NAT64/6to4/Teredo work: the /128 rule gap, cross-form gap, untrimmed rules; reproduced 2026-09-03
 - [Lab scope guard bypasses](lab_scope_guard_bypasses.md) — quoting, hostnames and integer IPs get past `.claude/hooks/lab-scope-guard.py`

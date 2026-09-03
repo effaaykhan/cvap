@@ -187,6 +187,188 @@ var Cases = []Case{
 		Allowed: []string{"printer.corp.example."},
 		Want:    true,
 	},
+	// ------------------------------------------------------------------
+	// Translated forms: EXPAND exclusions, never expand allows (ADR-039).
+	// ------------------------------------------------------------------
+	{
+		Name:       "NAT64 does not carry a target past an exclusion",
+		Target:     "64:ff9b::192.0.2.5",
+		Allowed:    []string{"64:ff9b::/96"},
+		Exclusions: []string{"192.0.2.5"},
+		Want:       false,
+	},
+	{
+		Name:       "6to4 does not either",
+		Target:     "2002:c000:0205::1",
+		Allowed:    []string{"2002::/16"},
+		Exclusions: []string{"192.0.2.5"},
+		Want:       false,
+	},
+	{
+		// Teredo obfuscates the client address by XOR with all ones, so
+		// 192.0.2.5 travels as 3fff:fdfa. Reading the bytes without inverting
+		// them extracts a different host, which is worse than not matching.
+		Name:       "Teredo does not either, and the obfuscation is undone",
+		Target:     "2001:0:4136:e378:8000:63bf:3fff:fdfa",
+		Allowed:    []string{"2001::/32"},
+		Exclusions: []string{"192.0.2.5"},
+		Want:       false,
+	},
+	{
+		Name:       "the deprecated v4-compatible form does not either",
+		Target:     "::192.0.2.5",
+		Allowed:    []string{"::/96"},
+		Exclusions: []string{"192.0.2.5"},
+		Want:       false,
+	},
+	{
+		// The other direction: an operator who excluded the translated form
+		// means that host by either name.
+		Name:       "an exclusion written as a translated address covers the v4 host",
+		Target:     "192.0.2.5",
+		Allowed:    []string{"192.0.2.0/24"},
+		Exclusions: []string{"64:ff9b::192.0.2.5"},
+		Want:       false,
+	},
+	{
+		// And it covers only that host.
+		Name:       "and does not cover a different v4 host",
+		Target:     "192.0.2.6",
+		Allowed:    []string{"192.0.2.0/24"},
+		Exclusions: []string{"64:ff9b::192.0.2.5"},
+		Want:       true,
+	},
+	{
+		// ALLOWS DO NOT EXPAND. The operator authorised a v4 range; the
+		// translated form goes through infrastructure they may not own.
+		Name:    "a v4 allow does not authorise the NAT64 form",
+		Target:  "64:ff9b::192.0.2.5",
+		Allowed: []string{"192.0.2.0/24"},
+		Want:    false,
+	},
+	{
+		Name:    "nor the 6to4 form",
+		Target:  "2002:c000:0205::1",
+		Allowed: []string{"192.0.2.0/24"},
+		Want:    false,
+	},
+	{
+		Name:    "nor the v4-compatible form",
+		Target:  "::192.0.2.5",
+		Allowed: []string{"192.0.2.0/24"},
+		Want:    false,
+	},
+	{
+		// The reverse of the same rule: authorising a translated address does
+		// not authorise the v4 host behind it.
+		Name:    "an allow written as a translated address does not authorise the v4 host",
+		Target:  "192.0.2.5",
+		Allowed: []string{"64:ff9b::192.0.2.5"},
+		Want:    false,
+	},
+	{
+		// An explicit IPv6 allow over the translation range still works — that
+		// is an operator authorising the translated path deliberately.
+		Name:    "an explicit NAT64 allow authorises the translated form",
+		Target:  "64:ff9b::192.0.2.5",
+		Allowed: []string{"64:ff9b::/96"},
+		Want:    true,
+	},
+	{
+		// A translated PREFIX exclusion is not expanded to v4: 64:ff9b::/96
+		// covers every IPv4 address in existence, and expanding it would turn
+		// one exclusion into a denial of the entire internet.
+		Name:       "a NAT64 prefix exclusion does not deny every v4 host",
+		Target:     "192.0.2.5",
+		Allowed:    []string{"192.0.2.0/24"},
+		Exclusions: []string{"64:ff9b::/96"},
+		Want:       true,
+	},
+	{
+		// Found by a scan-safety audit. netip.ParseAddr fails on anything with
+		// a slash, so the rule-side expansion reached nothing in prefix form —
+		// and that is the ONLY spelling a cidr-typed rule can use, because
+		// scopePlan validates those with ParsePrefix and rejects the bare
+		// address. For the natural match type, this half of ADR-039 was dead.
+		Name:       "a host-prefix translated exclusion covers the v4 host",
+		Target:     "192.0.2.5",
+		Allowed:    []string{"192.0.2.0/24"},
+		Exclusions: []string{"64:ff9b::192.0.2.5/128"},
+		Want:       false,
+	},
+	{
+		// Same audit. The rule's embedded address was compared against the
+		// target address only, never against the target's own embedded one, so
+		// an exclusion in one translated form missed the same host in another.
+		// ADR-039 says the operator "means that host by either name"; there are
+		// five names.
+		Name:       "a NAT64 exclusion covers the same host in 6to4 form",
+		Target:     "2002:c000:0205::1",
+		Allowed:    []string{"2002::/16"},
+		Exclusions: []string{"64:ff9b::192.0.2.5"},
+		Want:       false,
+	},
+	{
+		Name:       "and in Teredo form",
+		Target:     "2001:0:4136:e378:8000:63bf:3fff:fdfa",
+		Allowed:    []string{"2001::/32"},
+		Exclusions: []string{"64:ff9b::192.0.2.5"},
+		Want:       false,
+	},
+	{
+		// ISATAP: the marker is an interface identifier rather than a prefix,
+		// so it appears under link-local and global prefixes alike. Detectable
+		// as reliably as the prefix-based mechanisms, and still common in the
+		// Windows enterprise networks this product is aimed at.
+		Name:       "ISATAP does not carry a target past an exclusion",
+		Target:     "2001:db8::200:5efe:192.0.2.5",
+		Allowed:    []string{"2001:db8::/32"},
+		Exclusions: []string{"192.0.2.5"},
+		Want:       false,
+	},
+	{
+		Name:       "including the link-local form",
+		Target:     "fe80::5efe:192.0.2.5",
+		Allowed:    []string{"fe80::/10"},
+		Exclusions: []string{"192.0.2.5"},
+		Want:       false,
+	},
+	{
+		// An exclusion whose surrounding whitespace survived planning used to
+		// match nothing at all — a deleted exclusion with no signal.
+		Name:       "an exclusion with surrounding whitespace still excludes",
+		Target:     "192.0.2.5",
+		Allowed:    []string{"192.0.2.0/24"},
+		Exclusions: []string{"  192.0.2.5  "},
+		Want:       false,
+	},
+	{
+		Name:       "and a translated one with whitespace does too",
+		Target:     "192.0.2.5",
+		Allowed:    []string{"192.0.2.0/24"},
+		Exclusions: []string{" 64:ff9b::192.0.2.5 "},
+		Want:       false,
+	},
+	{
+		// A zone names a local interface, not a different host. It was stripped
+		// on the target side and not on the rule side.
+		Name:       "a zoned exclusion covers the unzoned host",
+		Target:     "fe80::1",
+		Allowed:    []string{"fe80::/10"},
+		Exclusions: []string{"fe80::1%eth0"},
+		Want:       false,
+	},
+	{
+		// The bare prefix of each mechanism names no host: 2002:: and
+		// 64:ff9b:: extract 0.0.0.0, 2001:: extracts 255.255.255.255. Reading
+		// those as addresses would let an exclusion of them match a prefix that
+		// reaches nothing.
+		Name:       "the bare NAT64 prefix is not the unspecified address",
+		Target:     "0.0.0.0",
+		Allowed:    []string{"0.0.0.0/32"},
+		Exclusions: []string{"64:ff9b::"},
+		Want:       true,
+	},
 	{
 		Name:    "an IPv6 target inside an IPv6 allow",
 		Target:  "2001:db8::5",

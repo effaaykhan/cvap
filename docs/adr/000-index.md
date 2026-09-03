@@ -47,3 +47,4 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 036 | The sweep enumerates tenants, and that is the only unscoped read | Accepted |
 | 037 | Empty means deny for permission lists, unrestricted for constraint lists | Accepted |
 | 038 | A secret field is a func of a type that can be zeroised | Accepted |
+| 039 | Translated address forms expand exclusions and do not expand allows | Accepted |

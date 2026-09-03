@@ -50,7 +50,7 @@ def build_repo() -> pathlib.Path:
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="cvap-verify-"))
     for rel, body in (
         (PROTO, 'syntax = "proto3";\npackage frozen;\n'),
-        (ADR, "# ADR-900\n\n**Status:** Accepted\n"),
+        (ADR, "# ADR-900\n\n**Status:** Accepted\n**Date:** 2026-09-01\n\nBody text that a supersession has no business touching.\n"),
         (INDEX, "| 900 | fixture | Accepted |\n"),
         (ORDINARY, "package store\n"),
     ):
@@ -165,6 +165,83 @@ def main() -> int:
                 subprocess.run(writer(str(repo / target)), check=True, capture_output=True)
             got = code_to_word(run_hook(repo, tmpstate / ("s%d.json" % i), env))
             results.append((name, want, got, got == want))
+
+        # --- the supersession hatch, where the constraint actually lives ---
+        #
+        # The PreToolUse guard lets the edit through on the variable alone,
+        # because it sees a path and not content. This is the half that decides
+        # whether what landed was the edit that was authorised.
+        #
+        # The body case is the one that matters: a hatch that permitted any
+        # edit to a named ADR would be a general edit hatch wearing a narrow
+        # name, and it is the case a reader is most likely to assume is covered.
+        # Reset first: the CASES loop leaves its last mutation in place, and a
+        # dirty proto would be reported alongside the ADR — the hook doing
+        # exactly its job, failing a case about something else.
+        reset_repo(repo)
+        adr = repo / ADR
+        original = adr.read_text()
+
+        def restore():
+            adr.write_text(original)
+
+        # Status only, with the variable naming this ADR: silent.
+        restore()
+        adr.write_text(original.replace("**Status:** Accepted",
+                                        "**Status:** Superseded by ADR-999"))
+        got = code_to_word(run_hook(repo, tmpstate / "sup1.json", {"CVAP_SUPERSEDE_ADR": "900"}))
+        results.append(("a status-only edit to the named ADR is authorised", ALLOW, got,
+                        got == ALLOW))
+
+        # The same edit without the variable: reported.
+        got = code_to_word(run_hook(repo, tmpstate / "sup2.json", {}))
+        results.append(("the same edit without the variable is reported", BLOCK, got,
+                        got == BLOCK))
+
+        # The variable naming a DIFFERENT ADR authorises nothing.
+        got = code_to_word(run_hook(repo, tmpstate / "sup3.json", {"CVAP_SUPERSEDE_ADR": "123"}))
+        results.append(("the variable naming another ADR authorises nothing", BLOCK, got,
+                        got == BLOCK))
+
+        # A BODY edit with the variable set. The case that would turn a narrow
+        # hatch into a general one, and the one this suite was sabotaged
+        # against — see the notes at the bottom.
+        restore()
+        adr.write_text(original.replace("**Status:** Accepted",
+                                        "**Status:** Superseded by ADR-999")
+                       + "\nsmuggled body text\n")
+        got = code_to_word(run_hook(repo, tmpstate / "sup4.json", {"CVAP_SUPERSEDE_ADR": "900"}))
+        results.append(("a body edit with the variable set is still reported", BLOCK, got,
+                        got == BLOCK))
+
+        # Status changed AND a body line changed, with the line count UNCHANGED.
+        #
+        # The case that reaches the "exactly one line differs" check, and the
+        # only one that does: appending smuggled text changes the count, and
+        # editing a body line alone fails the status-shape test. Sabotage found
+        # this — disabling the one-line check left the suite green, because
+        # every existing case was caught by a different guard first. A hatch
+        # that let a supersession carry a body edit alongside it would be a
+        # general edit hatch that merely looks narrow.
+        restore()
+        adr.write_text(original
+                       .replace("**Status:** Accepted", "**Status:** Superseded by ADR-999")
+                       .replace("Body text that a supersession has no business touching.",
+                                "Body text quietly rewritten under cover of a supersession."))
+        got = code_to_word(run_hook(repo, tmpstate / "sup6.json", {"CVAP_SUPERSEDE_ADR": "900"}))
+        results.append(("a status edit smuggling a body change alongside it is reported",
+                        BLOCK, got, got == BLOCK))
+
+        # A body edit that leaves the status alone, same line count. Nothing
+        # about "only one line changed" should be satisfiable by changing a
+        # line that is not the status.
+        restore()
+        adr.write_text(original.replace("# ADR-900", "# ADR-900 rewritten"))
+        got = code_to_word(run_hook(repo, tmpstate / "sup5.json", {"CVAP_SUPERSEDE_ADR": "900"}))
+        results.append(("a one-line edit that is not the status is reported", BLOCK, got,
+                        got == BLOCK))
+
+        restore()
 
         # --- a staged file has still never been committed ---
         #

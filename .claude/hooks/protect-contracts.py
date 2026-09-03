@@ -70,8 +70,28 @@ than asking. Requiring the environment means the bypass needs a human to act,
 which is the entire point of a freeze. Visibility does not help if nobody is
 reading.
 
-Accepted ADRs that have been committed have no escape hatch at all. They are
-superseded, not edited. An uncommitted one is a draft -- see above.
+SUPERSEDING A COMMITTED ADR
+--------------------------
+A committed Accepted ADR is superseded, not edited -- and supersession itself
+requires one edit to it: setting its status to "Superseded by ADR-NNN". This
+guard forbade exactly the edit its own error message prescribes, so the remedy
+was unreachable through it and two supersessions went in past the pattern
+matcher instead. A guard that forbids its own remedy teaches people to route
+around it, which costs more than the rule was worth.
+
+CVAP_SUPERSEDE_ADR=<nnn> in the hook's environment permits an edit to ADR-nnn and
+to nothing else. Same rule as CVAP_ALLOW_PROTO_EDIT: the ENVIRONMENT only, never
+an assignment inside a command, because an override anything composing a command
+can write into is one anything composing a command can use.
+
+It is deliberately narrow in three ways. It names one ADR, so setting it does not
+open the others. It does not check WHAT changed -- this hook sees a path, not
+content -- so the actual constraint is enforced afterwards by
+verify-contracts.py, which diffs against HEAD and reports unless the Status line
+is the only thing that moved. And it is not a general edit hatch: a body change
+with the variable set passes here and is reported there, which is the outcome
+that matters, because the write has landed either way and the report is what
+reaches a human.
 
 THIS IS HALF OF A PAIR
 ----------------------
@@ -114,6 +134,9 @@ ROOT = pathlib.Path(os.environ.get("CLAUDE_PROJECT_DIR", ".")).resolve()
 
 ESCAPE_VAR = "CVAP_ALLOW_PROTO_EDIT"
 
+# The supersession hatch. Names ONE ADR by number: CVAP_SUPERSEDE_ADR=035.
+SUPERSEDE_VAR = "CVAP_SUPERSEDE_ADR"
+
 PROTO_MSG = """BLOCKED: proto/ is the frozen wire contract (ADR-022).
 
 Scan points in customer networks run months-old builds, so changes must be
@@ -135,8 +158,12 @@ superseded, not edited.
 Write a new ADR that supersedes it, then set the old one's status to
 "Superseded by ADR-NNN". Use /new-adr to scaffold it.
 
-There is no environment override for this, deliberately. CVAP_ALLOW_PROTO_EDIT
-applies to proto/ only.
+To SUPERSEDE it -- which needs one edit, setting its status to
+"Superseded by ADR-NNN" -- set CVAP_SUPERSEDE_ADR=<nnn> in this hook's
+environment, naming this ADR. That permits the status change and nothing else:
+verify-contracts.py diffs the result against HEAD and reports if anything but the
+Status line moved. CVAP_ALLOW_PROTO_EDIT does not apply here; it is for proto/
+only.
 
 An ADR with no commit in HEAD is still a draft and is editable -- if you are
 seeing this for a file you wrote in this session, it has already been
@@ -225,6 +252,28 @@ def _is_committed(relative: str) -> bool:
         return True
 
 
+def adr_number(name: str) -> str | None:
+    """The leading number of an ADR filename, e.g. 035-foo.md -> 035."""
+    m = re.match(r"^(\d{3})-", name)
+    return m.group(1) if m else None
+
+
+def superseding(name: str) -> bool:
+    """Whether the operator has authorised a supersession edit to THIS ADR.
+
+    Compared as integers so 35 and 035 both name ADR-035, and an unset or
+    unparseable value authorises nothing.
+    """
+    want = os.environ.get(SUPERSEDE_VAR, "").strip()
+    have = adr_number(name)
+    if not want or have is None:
+        return False
+    try:
+        return int(want) == int(have)
+    except ValueError:
+        return False
+
+
 def is_protected_adr(path: str) -> bool:
     """An Accepted ADR that has been committed, excluding the index.
 
@@ -243,6 +292,10 @@ def is_protected_adr(path: str) -> bool:
     except OSError:
         return False
     if not re.search(r"^\*\*Status:\*\*\s*Accepted", text, re.MULTILINE | re.IGNORECASE):
+        return False
+    if superseding(p.name):
+        # Authorised, and bounded by verify-contracts.py afterwards: it reports
+        # unless the Status line is the only thing that changed.
         return False
     return _is_committed("docs/adr/" + p.name)
 
