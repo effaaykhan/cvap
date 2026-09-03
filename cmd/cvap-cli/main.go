@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/effaaykhan/cvap/internal/control/ca"
@@ -60,6 +62,19 @@ func devCA(log *slog.Logger, args []string) error {
 	if len(args) > 0 && args[0] != "" {
 		dir = args[0]
 	}
+	dir = filepath.Clean(dir)
+	// The argument is a path an operator typed, and writing there is the whole
+	// point of the command — but it is still argv, so it is cleaned and refused
+	// if it climbs. gosec's taint analysis is right that os.Args reaches
+	// MkdirAll; this is the check that makes the reach harmless rather than an
+	// argument about why it is fine.
+	for _, part := range strings.Split(dir, string(filepath.Separator)) {
+		if part == ".." {
+			return fmt.Errorf("cvap-cli: refusing a path that climbs out of itself: %q", dir)
+		}
+	}
+	// #nosec G703 -- cleaned and rejected above; the command exists to create a
+	// directory at the operator's chosen path.
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}

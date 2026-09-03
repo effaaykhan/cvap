@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -82,7 +81,18 @@ var ErrNoIdentity = errors.New("scanpoint: no identity on disk")
 
 // LoadIdentity reads a previous enrollment, or reports ErrNoIdentity.
 func LoadIdentity(dataDir string) (*Identity, error) {
-	raw, err := os.ReadFile(filepath.Join(dataDir, identityFile))
+	// Through os.Root, like every write here: a symlink planted in the data
+	// directory cannot redirect the read outside it.
+	root, err := os.OpenRoot(dataDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrNoIdentity
+		}
+		return nil, fmt.Errorf("scanpoint: open data dir: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	raw, err := readWithin(root, identityFile)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNoIdentity
@@ -93,7 +103,7 @@ func LoadIdentity(dataDir string) (*Identity, error) {
 	// a half-written enrollment, and continuing from it would produce a scan
 	// point that believes it has an identity and cannot present one.
 	for _, f := range []string{keyFile, certFile} {
-		if _, err := os.Stat(filepath.Join(dataDir, f)); err != nil {
+		if _, err := root.Stat(f); err != nil {
 			return nil, fmt.Errorf("scanpoint: identity is present but %s is not: %w", f, err)
 		}
 	}
@@ -229,6 +239,16 @@ func SaveIdentity(dataDir string, key *ecdsa.PrivateKey, certDER []byte, chain [
 // previous file rather than a truncated one — which for key.pem is the
 // difference between a scan point that restarts and one that has lost its
 // identity and cannot re-enrol without a new token.
+// readWithin reads a bounded file from inside the data directory.
+func readWithin(root *os.Root, name string) ([]byte, error) {
+	f, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(io.LimitReader(f, 1<<20))
+}
+
 // copyWithin duplicates a file inside the data directory.
 func copyWithin(root *os.Root, from, to string, perm os.FileMode) error {
 	f, err := root.Open(from)
@@ -294,7 +314,12 @@ func writeFile(root *os.Root, name string, data []byte, perm os.FileMode) error 
 // that it cannot be rendered by any verb and can be erased once spent, rather
 // than sitting in a string for the life of the process.
 func ReadToken(path string) (*Credential, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // operator-configured path
+	// #nosec G304 -- the path is operator configuration (CVAP_SP_ENROLLMENT_TOKEN_FILE),
+	// not input: it arrives from the process environment before any network
+	// connection exists, and there is no root to scope it to because an
+	// operator may keep the token anywhere. Bounded, because a token is 40-odd
+	// bytes and anything larger is a misconfiguration rather than a token.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("scanpoint: read enrollment token: %w", err)
 	}

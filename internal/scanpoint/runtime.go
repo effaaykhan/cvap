@@ -239,11 +239,11 @@ func (r *Runtime) sendHeartbeat() {
 	r.send(&scanpointv1.ScanPointMessage{
 		Msg: &scanpointv1.ScanPointMessage_Heartbeat{Heartbeat: &scanpointv1.Heartbeat{
 			SentAtUnix: r.now().Unix(),
-			ActiveJobs: uint32(len(r.snapshot())), //nolint:gosec // bounded by the job table
+			ActiveJobs: u32(len(r.snapshot())),
 			// The buffer depth is the only way Core can see a scan point
 			// approaching its ceiling rather than learning about it once data
 			// starts being shed (dispatch.proto).
-			BufferedSubmissions: uint32(count), //nolint:gosec // bounded by the buffer
+			BufferedSubmissions: u32(count),
 			BufferedBytes:       bytes,
 			// An attestation, not a control. The no-op engine sends nothing,
 			// and reporting zero is the truth rather than a placeholder.
@@ -256,7 +256,7 @@ func (r *Runtime) sendHeartbeat() {
 		r.send(&scanpointv1.ScanPointMessage{
 			Msg: &scanpointv1.ScanPointMessage_Backpressure{Backpressure: &scanpointv1.Backpressure{
 				State:               p,
-				BufferedSubmissions: uint32(count), //nolint:gosec // bounded
+				BufferedSubmissions: u32(count),
 				BufferedBytes:       bytes,
 				ReportedAtUnix:      r.now().Unix(),
 			}},
@@ -533,7 +533,7 @@ func (r *Runtime) terminate(j *job, reason scanpointv1.TerminationReason, incomp
 		obs, _, truncated := j.host.results()
 		var dropped int
 		observations, dropped = r.toWire(obs)
-		completed = uint32(len(observations)) //nolint:gosec // bounded by the buffer
+		completed = u32(len(observations))
 		if truncated || dropped > 0 {
 			// Truncated at the per-job bound, or an observation the engine
 			// produced that Core would reject. Either way this is not a whole
@@ -542,8 +542,8 @@ func (r *Runtime) terminate(j *job, reason scanpointv1.TerminationReason, incomp
 			incomplete = true
 		}
 	}
-	if n := len(j.tasks); uint32(n) > completed { //nolint:gosec // task count is bounded
-		failed = uint32(n) - completed //nolint:gosec // checked above
+	if n := u32(len(j.tasks)); n > completed {
+		failed = n - completed
 	}
 
 	submissionID := uuid.NewString()
@@ -680,7 +680,7 @@ func (r *Runtime) onCancel(c *scanpointv1.CancelJob) {
 				JobId:       c.GetJobId(),
 				LeaseEpoch:  c.GetLeaseEpoch(),
 				AckedAtUnix: r.now().Unix(),
-				TasksHalted: uint32(len(j.tasks)), //nolint:gosec // bounded by the assignment
+				TasksHalted: u32(len(j.tasks)),
 			}},
 		})
 	}()
@@ -698,7 +698,7 @@ func (r *Runtime) onKill(k *scanpointv1.KillSwitch) {
 		// the widest one — so it halts everything, which is what it meant
 		// before the field existed.
 		for _, j := range r.snapshot() {
-			halted += uint32(len(j.tasks)) //nolint:gosec // bounded by the assignment
+			halted += u32(len(j.tasks))
 			go r.abort(j, scanpointv1.TerminationReason_KILLED)
 		}
 	}

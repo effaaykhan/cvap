@@ -226,7 +226,12 @@ func (h *engineHost) start(ctx context.Context, targets []enginewire.Target, bud
 	// SIGKILL on cancellation, which skips the SIGTERM grace ADR-027 requires
 	// and gives the engine no chance to finish the observation in hand. Stop()
 	// owns the lifecycle instead.
-	cmd := exec.Command(h.binary) //nolint:gosec // binary is operator configuration, not input
+	// #nosec G204 -- h.binary is CVAP_SP_ENGINE_BINARY, operator configuration
+	// read from the environment at startup. Nothing from the wire reaches it:
+	// targets travel as JSON on stdin, never as argv, and there is no shell.
+	// An operator who can set this variable can already run anything as this
+	// uid.
+	cmd := exec.Command(h.binary)
 	cmd.Env = engineEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		// Its own process group, so a stop reaches anything the engine spawned.

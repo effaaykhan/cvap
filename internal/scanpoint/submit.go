@@ -126,6 +126,13 @@ func (s *Submitter) Pressure() scanpointv1.BackpressureState {
 func (s *Submitter) Buffered() (count int, bytes uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// buffered is an accumulator that drop() decrements. It is clamped at zero
+	// there, and clamped again here: a negative int converted to uint64 becomes
+	// roughly eighteen quintillion, and this number is what Core reads on the
+	// heartbeat to decide whether a scan point is approaching its ceiling.
+	if s.buffered < 0 {
+		return len(s.queue), 0
+	}
 	return len(s.queue), uint64(s.buffered)
 }
 
@@ -232,7 +239,7 @@ func (s *Submitter) deliver(ctx context.Context, sub *Submission) (keep bool, er
 
 	chunks := chunk(sub)
 	for i, c := range chunks {
-		idx := uint32(i) //nolint:gosec // bounded by len(chunks), which is bounded by the buffer
+		idx := u32(i)
 		if sub.hasResume && idx <= sub.resumeFrom {
 			// Already accepted on a previous attempt. Resumption is the reason
 			// SubmitResults is bidirectional: a terminal-only ack could not

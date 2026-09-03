@@ -28,7 +28,11 @@ import (
 // silently trusted a public CA would accept any certificate that CA had issued
 // for the endpoint's name, which is the whole property the private anchor buys.
 func trustAnchor(path string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(path) //nolint:gosec // operator-configured path
+	// #nosec G304 -- the path is operator configuration (CVAP_SP_CA_BUNDLE) and
+	// is the ADR-018 trust anchor, which is deliberately not baked into the
+	// binary. It arrives from the environment before any network connection
+	// exists, and there is no root to scope it to.
+	pem, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("scanpoint: read CA bundle: %w", err)
 	}
@@ -149,7 +153,8 @@ func EngineCapabilities(ctx context.Context, binary string) ([]*scanpointv1.Capa
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binary, "-capabilities") //nolint:gosec // operator-configured path
+	// #nosec G204 -- same binary, same reasoning as engineHost.start.
+	cmd := exec.CommandContext(ctx, binary, "-capabilities")
 	cmd.Env = engineEnv()
 	var buf bytes.Buffer
 	cmd.Stdout = &limitedWriter{w: &buf, remaining: 64 << 10}

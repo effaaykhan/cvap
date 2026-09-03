@@ -9,7 +9,7 @@
         proto proto-tools proto-gen proto-lint proto-breaking proto-verify \
         secret-logging secret-logging-test \
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
-        env-check app-role store-test e2e dev-ca \
+        env-check app-role store-test e2e dev-ca gosec \
         contract-guard-test
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
@@ -55,13 +55,30 @@ vet: ## go vet
 lint: ## golangci-lint
 	golangci-lint run
 
+# gosec, and it is NOT what `lint` runs.
+#
+# golangci-lint has its own gosec integration and this repository does not enable
+# it, so `make lint` can be clean while CI's standalone gosec fails — which is
+# exactly what happened when the scan point runtime landed. The two also read
+# different directives: golangci-lint honours //nolint:gosec, standalone gosec
+# honours #nosec, and a //nolint on a gosec finding is a suppression that
+# suppresses nothing while looking like it does.
+#
+# Same invocation as CI, including the gen/ exclusion, so a clean run here means
+# a clean run there.
+GOSEC_VERSION := v2.29.0
+
+gosec: ## Static security analysis, exactly as CI runs it
+	@command -v gosec >/dev/null || go install github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION)
+	gosec -exclude-dir=gen ./...
+
 fmt: ## Format and tidy
 	gofmt -l -w .
 	go mod tidy
 
 tidy: fmt
 
-ci: build vet test lint proto frontmatter gitignore-test scope-guard-test \
+ci: build vet test lint gosec proto frontmatter gitignore-test scope-guard-test \
     contract-guard-test secret-logging secret-logging-test env-check ## Everything CI runs, locally
 
 ## ---------- wire contract ----------
