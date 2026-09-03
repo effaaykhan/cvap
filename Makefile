@@ -10,7 +10,7 @@
         secret-logging secret-logging-test \
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
         env-check app-role store-test e2e dev-ca gosec mutate \
-        contract-guard-test
+        contract-guard-test fmt-check tidy-check govulncheck db-gates db-reachable
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
 # under a running project (ADR-025: consume commodity infrastructure).
@@ -46,8 +46,40 @@ help:
 build: ## Build all binaries
 	go build ./...
 
-test: ## Run tests with the race detector
-	go test ./... -race
+# test runs with the race detector, and says so loudly when it cannot.
+#
+# ============================================================================
+# -race needs cgo and a C compiler. Not every development box has one.
+# ============================================================================
+#
+# The old form was `go test ./... -race` unconditionally, which on a machine
+# without gcc fails at the FIRST target of `make ci` with "cgo: C compiler not
+# found" — so the whole local gate was unrunnable there, which is how gates
+# started being run one at a time by hand and how two of them stopped being run
+# at all.
+#
+# Falling back to a non-race run is the right trade, and announcing it is what
+# makes it a trade rather than a silent downgrade: Conn.done is an atomic.Bool
+# because a callback can start a goroutine that outlives it, and until -race ran
+# in CI that fix was reasoned rather than demonstrated. CI always has the
+# compiler and always runs with -race; a local run without it is a weaker claim
+# and has to say so.
+test: ## Run tests with the race detector, or say loudly that it could not
+	@if [ "$$CGO_ENABLED" != "0" ] && command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1; then \
+		echo "go test ./... -race"; \
+		CGO_ENABLED=1 go test ./... -race; \
+	else \
+		echo ""; \
+		echo "################################################################"; \
+		echo "#  RACE DETECTOR UNAVAILABLE: no C compiler on this machine     #"; \
+		echo "#                                                              #"; \
+		echo "#  Running WITHOUT -race. CI runs with it and this run does     #"; \
+		echo "#  not, so a data race introduced here will be caught there     #"; \
+		echo "#  and not now. Install gcc or clang to close the gap.          #"; \
+		echo "################################################################"; \
+		echo ""; \
+		go test ./...; \
+	fi
 
 vet: ## go vet
 	go vet ./...
@@ -78,8 +110,44 @@ fmt: ## Format and tidy
 
 tidy: fmt
 
-ci: build vet test lint gosec proto frontmatter gitignore-test scope-guard-test \
-    contract-guard-test secret-logging secret-logging-test mutate env-check ## Everything CI runs, locally
+# fmt-check and tidy-check are the CI steps, and `fmt` cannot stand in for
+# either: `fmt` WRITES, so it always succeeds and proves nothing about what is
+# committed. Neither was reachable from `make ci` until now.
+fmt-check: ## Fail if anything is not gofmt-clean
+	@unformatted=$$(gofmt -l .); \
+	if [ -n "$$unformatted" ]; then \
+		echo "These files are not gofmt-clean:"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+
+tidy-check: ## Fail if go.mod or go.sum would change under go mod tidy
+	@go mod tidy
+	@git diff --exit-code -- go.mod go.sum || { \
+		echo "go.mod or go.sum is not tidy; the diff above is what go mod tidy changed."; \
+		exit 1; \
+	}
+
+govulncheck: ## Known vulnerabilities in the dependency graph, as CI runs it
+	@command -v govulncheck >/dev/null || go install golang.org/x/vuln/cmd/govulncheck@latest
+	govulncheck ./...
+
+# ci is the WHOLE runner, and keeping it that way is the point.
+#
+# Two of the last three CI failures were gates that existed only on the runner.
+# rls-test caught fixture rows missing from three tables — its sweep refuses to
+# prove isolation for a table holding no rows, which is one of the better checks
+# here — and gofmt and `go mod tidy` were never reachable from this target at
+# all. A `make ci` that is a subset of CI trains you to trust a green local run
+# that means less than it says.
+#
+# db-gates is last: slowest, and the failure most likely to need the dev stack
+# looked at. govulncheck is here for parity and needs the network; it can fail on
+# an advisory published against code this commit did not touch, which is true of
+# CI too and is the point of running it.
+ci: fmt-check tidy-check build vet test lint gosec govulncheck proto frontmatter \
+    gitignore-test scope-guard-test contract-guard-test secret-logging \
+    secret-logging-test mutate env-check licences db-gates ## Everything CI runs, locally
 
 ## ---------- wire contract ----------
 
@@ -213,6 +281,62 @@ define verify_psql
 docker run --rm --network host postgres:16-alpine \
 	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c
 endef
+
+## ---------- gates that need a database ----------
+
+# db-gates: every CI check that needs Postgres, skipped LOUDLY when there is none.
+#
+# ============================================================================
+# A skip prints a banner. It never passes quietly.
+# ============================================================================
+#
+# The requirement is that `make ci` still works on a machine with no dev stack,
+# and the hazard is the obvious implementation of it: a conditional that turns
+# four real gates into nothing and lets the target exit 0 with no output. This
+# repository keeps finding that shape — `safety` and `corpus-check` are failing
+# stubs for exactly this reason, because a gate that silently passes is worse
+# than one that fails, since the first gets trusted.
+#
+# So the skip is as loud as a failure looks, names every gate that did not run,
+# and says how to run them. What it must never be is invisible.
+db-gates: ## Every gate needing Postgres. Skips loudly, never silently, when there is none.
+	@if $(MAKE) --no-print-directory db-reachable >/dev/null 2>&1; then \
+		set -e; \
+		$(MAKE) --no-print-directory migrate-verify; \
+		$(MAKE) --no-print-directory migrate-up; \
+		$(MAKE) --no-print-directory app-role; \
+		$(MAKE) --no-print-directory rls-test; \
+		$(MAKE) --no-print-directory store-test; \
+		$(MAKE) --no-print-directory e2e; \
+	else \
+		echo ""; \
+		echo "################################################################"; \
+		echo "#  SKIPPED: every gate that needs a database                   #"; \
+		echo "#                                                              #"; \
+		echo "#  NOT RUN:  migrate-verify   rls-test                         #"; \
+		echo "#            store-test       e2e                              #"; \
+		echo "#                                                              #"; \
+		echo "#  THIS IS NOT A PASS. rls-test proves tenant isolation and    #"; \
+		echo "#  refuses to prove it for any table holding no fixture rows;  #"; \
+		echo "#  store-test runs every integration suite in the repository.  #"; \
+		echo "#  CI runs all four, so a green run here claims less than it   #"; \
+		echo "#  looks like it does.                                         #"; \
+		echo "#                                                              #"; \
+		echo "#  To run them:   make up && make ci                           #"; \
+		echo "################################################################"; \
+		echo ""; \
+	fi
+
+# db-reachable exits 0 when Postgres is up and DATABASE_URL points at it.
+#
+# Both halves matter. An unset DATABASE_URL is a machine with no .env; a set one
+# with nothing listening is a machine whose dev stack is down. Both skip rather
+# than fail — and neither is allowed to look like a pass, which is what the
+# banner above is for.
+db-reachable:
+	@test -n "$(DATABASE_URL)" || exit 1
+	@docker run --rm --network host postgres:16-alpine \
+		psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -qtAc 'SELECT 1' >/dev/null 2>&1
 
 migrate-verify: ## Apply every migration, roll it all back, apply again — on a throwaway database
 	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
