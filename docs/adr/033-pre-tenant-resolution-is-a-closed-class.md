@@ -1,6 +1,6 @@
 # ADR-033: Pre-tenant resolution is a closed class
 
-**Status:** Accepted
+**Status:** Superseded by ADR-041
 **Date:** 2026-09-01
 
 ## Context

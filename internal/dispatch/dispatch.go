@@ -65,6 +65,7 @@ import (
 	"github.com/effaaykhan/cvap/internal/logging"
 	"github.com/effaaykhan/cvap/internal/scope"
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/target"
 )
 
 // Timings from execution-plan §5. Heartbeat every 30s, Core times out at 90s;
@@ -911,7 +912,16 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 			// runtime that is not written yet. That is precisely the
 			// "enforce at the Scan Point only" alternative ADR-024 rejected.
 			for _, t := range tasks {
-				ok, why := scope.Permits(t.TaskTarget, constraints.GetAllowedTargets(), constraints.GetExclusions())
+				// Canonicalised at planning and re-computed here, because a
+				// row can be written by something that skipped planning:
+				// scan_tasks.task_target is free text with no constraint tying
+				// it to its scan_targets row. The scan point runs the same
+				// comparison again on its own machine (ADR-024, ADR-042).
+				canon, canonical := target.Matches(t.TaskTarget)
+				ok, why := canonical, "target is not in canonical form"
+				if canonical {
+					ok, why = scope.Permits(canon, constraints.GetAllowedTargets(), constraints.GetExclusions())
+				}
 				if ok {
 					continue
 				}

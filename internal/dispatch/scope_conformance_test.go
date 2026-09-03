@@ -5,6 +5,7 @@ import (
 
 	"github.com/effaaykhan/cvap/internal/scope"
 	"github.com/effaaykhan/cvap/internal/scope/scopetest"
+	"github.com/effaaykhan/cvap/internal/target"
 )
 
 // TestCoreSiteAgreesWithTheSharedTable is one half of ADR-024's "both sides must
@@ -21,8 +22,15 @@ import (
 // it. If that line changes, this test has to change with it, which is the point:
 // the assertion is about the call site, not about the matcher.
 func TestCoreSiteAgreesWithTheSharedTable(t *testing.T) {
-	coreVerdict := func(target string, allowed, exclusions []string) bool {
-		ok, _ := scope.Permits(target, allowed, exclusions)
+	coreVerdict := func(raw string, allowed, exclusions []string) bool {
+		// The expression offerWork uses: canonicalise, then match. A target
+		// that will not canonicalise refuses the job (ADR-040), which is a
+		// denial here.
+		c, err := target.Canonicalise(raw)
+		if err != nil {
+			return false
+		}
+		ok, _ := scope.Permits(c, allowed, exclusions)
 		return ok
 	}
 

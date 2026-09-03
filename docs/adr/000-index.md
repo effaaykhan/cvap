@@ -41,7 +41,7 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 030 | Knowledge tables are read-only to the application role | Accepted |
 | 031 | Enrolment tenant lookup is a one-value SECURITY DEFINER function | Accepted |
 | 032 | The store package exposes no path to a raw connection | Accepted |
-| 033 | Pre-tenant resolution is a closed class | Accepted |
+| 033 | Pre-tenant resolution is a closed class | Superseded by ADR-041 |
 | 034 | No interceptor, middleware or tracing layer may render message bodies | Accepted |
 | 035 | A hand-written type holding a secret stores it in a func() string | Superseded by ADR-038 |
 | 036 | The sweep enumerates tenants, and that is the only unscoped read | Accepted |
@@ -49,3 +49,5 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 038 | A secret field is a func of a type that can be zeroised | Accepted |
 | 039 | Translated address forms expand exclusions and do not expand allows | Accepted |
 | 040 | A target that names an address must parse as one, or the job is refused | Accepted |
+| 041 | Pre-tenant resolution is a closed class of three (supersedes 033) | Accepted |
+| 042 | Targets are canonicalised once at planning, and re-canonicalised at the scan point | Accepted |

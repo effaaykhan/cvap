@@ -14,6 +14,7 @@ import (
 
 	"github.com/effaaykhan/cvap/internal/enginewire"
 	"github.com/effaaykhan/cvap/internal/scope"
+	"github.com/effaaykhan/cvap/internal/target"
 )
 
 // EngineOutcome is how an engine process ended.
@@ -194,8 +195,28 @@ func engineEnv() []string {
 
 // authorise is the runtime-side scope check, and the only place a verdict is
 // reached.
-func (h *engineHost) authorise(target string) (bool, string) {
-	return scope.Permits(target, h.allowed, h.exclusions)
+//
+// ============================================================================
+// It re-canonicalises. It does not validate.
+// ============================================================================
+//
+// Asking "is this string canonical" would accept a canonical form of the WRONG
+// HOST — which is exactly what a bug in Core's canonicalisation produces, and
+// three sessions of scope findings say to expect one. So the runtime runs the
+// same function on its own machine and requires its answer to EQUAL what
+// arrived. A disagreement means the value was mutated in transit, or Core
+// skipped the step, or Core's step produced something else; all three are
+// things a check of Core's homework cannot see.
+//
+// One function run twice is not two implementations. What makes this the second
+// enforcement site ADR-024 requires is that the computation is independent and
+// its result is allowed to disagree.
+func (h *engineHost) authorise(raw string) (bool, string) {
+	c, ok := target.Matches(raw)
+	if !ok {
+		return false, "target is not in canonical form: " + raw
+	}
+	return scope.Permits(c, h.allowed, h.exclusions)
 }
 
 // start spawns the engine and hands it the job.

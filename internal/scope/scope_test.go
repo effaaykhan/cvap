@@ -5,7 +5,22 @@ import (
 
 	"github.com/effaaykhan/cvap/internal/scope"
 	"github.com/effaaykhan/cvap/internal/scope/scopetest"
+	"github.com/effaaykhan/cvap/internal/target"
 )
+
+// verdict is what a site decides about one raw target.
+//
+// Canonicalisation is part of the decision, not a step before it: a target that
+// will not canonicalise is refused (ADR-040), and refusing is a denial. Both
+// sites do this, which is what keeps the shared table meaningful now that
+// scope.Permits no longer classifies.
+func verdict(raw string, allowed, exclusions []string) (bool, string) {
+	c, err := target.Canonicalise(raw)
+	if err != nil {
+		return false, err.Error()
+	}
+	return scope.Permits(c, allowed, exclusions)
+}
 
 // TestPermitsOverTheSharedTable is the matcher's own test.
 //
@@ -17,7 +32,7 @@ import (
 func TestPermitsOverTheSharedTable(t *testing.T) {
 	for _, tc := range scopetest.Cases {
 		t.Run(tc.Name, func(t *testing.T) {
-			got, why := scope.Permits(tc.Target, tc.Allowed, tc.Exclusions)
+			got, why := verdict(tc.Target, tc.Allowed, tc.Exclusions)
 			if got != tc.Want {
 				t.Errorf("Permits(%q, allow=%v, deny=%v) = %v (%s), want %v",
 					tc.Target, tc.Allowed, tc.Exclusions, got, why, tc.Want)
@@ -36,7 +51,7 @@ func TestARefusalAlwaysSaysWhy(t *testing.T) {
 	for _, tc := range []struct{ target string }{
 		{""}, {"198.51.100.1"}, {"192.0.2.5"},
 	} {
-		if ok, why := scope.Permits(tc.target, []string{"192.0.2.0/24"}, []string{"192.0.2.5"}); !ok && why == "" {
+		if ok, why := verdict(tc.target, []string{"192.0.2.0/24"}, []string{"192.0.2.5"}); !ok && why == "" {
 			t.Errorf("Permits(%q) refused with no reason", tc.target)
 		}
 	}

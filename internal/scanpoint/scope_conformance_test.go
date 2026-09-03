@@ -10,6 +10,7 @@ import (
 	scanpointv1 "github.com/effaaykhan/cvap/gen/cybersentinel/scanpoint/v1"
 	"github.com/effaaykhan/cvap/internal/enginewire"
 	"github.com/effaaykhan/cvap/internal/scope/scopetest"
+	"github.com/effaaykhan/cvap/internal/target"
 )
 
 // TestRuntimeSiteAgreesWithTheSharedTable is the half that did not exist.
@@ -31,15 +32,71 @@ func TestRuntimeSiteAgreesWithTheSharedTable(t *testing.T) {
 
 	for _, tc := range scopetest.Cases {
 		t.Run(tc.Name, func(t *testing.T) {
+			// The runtime is fed what the WIRE would carry, which since ADR-042
+			// is the canonical form Core wrote at planning — not the operator's
+			// raw string. A case Core refuses to canonicalise never reaches a
+			// scan point at all, and the table records that as a denial.
+			canon, err := target.Canonicalise(tc.Target)
+			if err != nil {
+				if tc.Want {
+					t.Fatalf("%q is expected in scope but does not canonicalise: %v", tc.Target, err)
+				}
+				return
+			}
+
 			h := newEngineHost(log, "/nonexistent", "job-1", tc.Allowed, tc.Exclusions)
-			got, why := h.authorise(tc.Target)
+			got, why := h.authorise(canon.Value)
 			if got != tc.Want {
-				t.Errorf("runtime verdict for %q = %v (%s), want %v. Core decides the same "+
-					"case in internal/dispatch; a disagreement is a target one side "+
-					"permits and the other refuses, and neither direction announces "+
-					"itself at runtime.", tc.Target, got, why, tc.Want)
+				t.Errorf("runtime verdict for %q (canonical %q) = %v (%s), want %v. Core "+
+					"decides the same case in internal/dispatch; a disagreement is a "+
+					"target one side permits and the other refuses, and neither "+
+					"direction announces itself at runtime.",
+					tc.Target, canon.Value, got, why, tc.Want)
 			}
 		})
+	}
+}
+
+// TestTheRuntimeRecomputesRatherThanValidating is the property the second
+// enforcement site exists for.
+//
+// Every target below is INSIDE the allowlist and would pass the matcher. Each is
+// refused anyway, because the runtime's own canonicalisation of the string does
+// not equal the string — which is what a value mutated in transit looks like,
+// and what a Core that skipped planning's normalisation produces.
+//
+// What this site guarantees is narrow and worth stating exactly: nothing reached
+// it unnormalised. It cannot catch a canonical string naming the wrong host —
+// that is the matcher's job, and the allowlist's. What it catches is the case
+// the matcher cannot see, where the string Core decided about and the string
+// about to be scanned are not the same string.
+func TestTheRuntimeRecomputesRatherThanValidating(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	allowed := []string{"192.0.2.0/24", "corp.example"}
+
+	for _, raw := range []string{
+		"192.0.2.5:443",          // a port survived planning
+		"[192.0.2.5]",            // brackets survived planning
+		"192.0.2.5.",             // the root label survived planning
+		"::ffff:192.0.2.5",       // an unmapped form survived planning
+		"https://corp.example/x", // a URL survived planning
+		"CORP.example",           // case survived planning
+		" 192.0.2.5",             // whitespace was reintroduced on the wire
+		"192.0.2.0/24",           // a prefix where planning should have decomposed
+	} {
+		h := newEngineHost(log, "/nonexistent", "job-1", allowed, nil)
+		if ok, _ := h.authorise(raw); ok {
+			t.Errorf("the runtime accepted %q, which is not its own canonical form of "+
+				"itself. Accepting it means the second site validated Core's answer "+
+				"instead of computing its own, and a canonical form of the WRONG host "+
+				"is exactly what a bug in Core's canonicalisation produces.", raw)
+		}
+	}
+
+	// The control: an in-scope target in the form planning actually writes.
+	h := newEngineHost(log, "/nonexistent", "job-1", allowed, nil)
+	if ok, why := h.authorise("192.0.2.5"); !ok {
+		t.Errorf("the runtime refused a canonical in-scope target: %s", why)
 	}
 }
 

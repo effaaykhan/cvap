@@ -28,12 +28,10 @@
 package scope
 
 import (
-	"net"
 	"net/netip"
-	"net/url"
-	"strconv"
 	"strings"
-	"unicode"
+
+	"github.com/effaaykhan/cvap/internal/target"
 )
 
 // Permits answers whether one target is in scope, and why not if it is not.
@@ -49,23 +47,24 @@ import (
 // policy's zone and window lists are constraints and read the other way, which
 // is the asymmetry ADR-037 exists to record.
 //
-// Addresses are compared after Unmap(), on both the rule and the target. Without
-// it an exclusion of 10.10.0.5 does not exclude ::ffff:10.10.0.5, and an
-// exclusion written as ::ffff:10.10.0.0/120 excludes nothing at all — the same
-// host wearing a different notation, which is the oldest way there is past an
-// IP-based denylist.
-func Permits(target string, allowed, exclusions []string) (bool, string) {
-	target = strings.TrimSpace(target)
-	if target == "" {
+// Addresses are compared after Unmap() on the RULE side. The target side needs
+// none of that any more: internal/target reduced it to one form before this
+// function ever saw it.
+func Permits(t target.Canonical, allowed, exclusions []string) (bool, string) {
+	if t.Value == "" {
 		return false, "empty task target"
 	}
-
-	addr, isAddr, host, refuse := classifyTarget(target)
-	if refuse != "" {
-		// A string that NAMES an address and will not parse as one. Refused
-		// outright rather than compared as a hostname — see classifyTarget.
-		return false, refuse
-	}
+	// The target arrives CANONICAL. Deciding what it is happened at planning,
+	// in internal/target, and the runtime re-computed it independently before
+	// calling here — so this function matches one string per host and does not
+	// have to reason about notation at all. That narrowing is the point: three
+	// audits found bypasses in the classification, and none of them can be
+	// reached from a value that has already been reduced to one form.
+	//
+	// Rules are NOT canonical. They are policy text an operator wrote, so the
+	// rule side still parses, trims and expands.
+	targetStr := t.Value
+	addr, isAddr := t.Addr, t.Kind == target.KindAddress
 
 	// Exclusions EXPAND through translation; allows do not. ADR-039 records the
 	// asymmetry, and both halves fail closed:
@@ -96,14 +95,12 @@ func Permits(target string, allowed, exclusions []string) (bool, string) {
 	// TRANSLATED form reaches a host through infrastructure the operator may
 	// not own, which a path on an authorised host does not.
 	for _, e := range exclusions {
-		if matchesExclusion(e, target, addr, isAddr) ||
-			(host != target && matchesExclusion(e, host, addr, isAddr)) {
+		if matchesExclusion(e, targetStr, addr, isAddr) {
 			return false, "excluded by scope rule " + e
 		}
 	}
 	for _, a := range allowed {
-		if matches(a, target, addr, isAddr) ||
-			(host != target && matches(a, host, addr, isAddr)) {
+		if matches(a, targetStr, addr, isAddr) {
 			return true, ""
 		}
 	}
@@ -275,252 +272,6 @@ func parseRuleAddr(rule string) (netip.Addr, bool) {
 		return a.WithZone("").Unmap(), true
 	}
 	if p, err := netip.ParsePrefix(rule); err == nil && p.Bits() == p.Addr().BitLen() {
-		return p.Addr().WithZone("").Unmap(), true
-	}
-	return netip.Addr{}, false
-}
-
-// classifyTarget decides what kind of thing a task target is.
-//
-// ============================================================================
-// A string that names an address and will not parse as one is refused.
-// ============================================================================
-//
-// Everything unparseable used to fall through to case-insensitive string
-// equality against hostname rules, which is the wrong matcher for a string that
-// names an address: `192.0.2.5:443`, `[192.0.2.5]` and `192.0.2.5.` are one host
-// wearing notation, and no CIDR or address exclusion could reach any of them. A
-// scan-safety audit demonstrated it through supported configuration — a
-// hostname- or url-typed allow carrying the same string — so an operator's
-// exclusion of a device could be walked past by writing its address with a port.
-//
-// Three branches, and ADR-040 records why the middle one exists:
-//
-//   - It normalises and PARSES. Then it is an address, and IP rules apply.
-//     Normalisation strips a port, brackets and the DNS root label, because none
-//     of those changes which host is reached — the same argument that makes
-//     ::ffff: a notation rather than a route (ADR-039).
-//   - It plainly is not an address — it has letters outside a URL host, so no
-//     notation of an address could produce it. Hostname equality, as before. A
-//     genuine target like scanner.example.com is unaffected, and so is one that
-//     merely starts with a digit, which the obvious leading-character test would
-//     have refused.
-//   - It LOOKS like an address and will not parse. Refused, and the caller fails
-//     the whole job: skipping the target would leave a scan reporting success
-//     over coverage it did not have, which is the under-scanning-that-looks-
-//     clean failure this package refuses everywhere else.
-//
-// A URL is unwrapped to its host first, so a url-typed target is judged on the
-// host it would reach rather than on its own punctuation.
-func classifyTarget(target string) (addr netip.Addr, isAddr bool, host, refuse string) {
-	host = target
-
-	// A URL is judged on its host. url.Parse accepts almost anything, so a
-	// scheme AND a host are both required before treating it as one — otherwise
-	// "192.0.2.5:443" parses as scheme "192.0.2.5" with opaque "443", which is
-	// exactly the string this function exists to catch. u.Host is set only when
-	// an authority was parsed, which already implies "//"; no separate check for
-	// it, because a contains-anywhere test would not constrain the position and
-	// would read as load-bearing when it is not.
-	if u, err := url.Parse(target); err == nil && u.Scheme != "" && u.Host != "" {
-		host = u.Host
-	}
-
-	host, bracketed := normaliseHost(host)
-	if host == "" {
-		return netip.Addr{}, false, target, "task target " + quote(target) + " has no host"
-	}
-
-	if a, ok := parseTargetAddr(host); ok {
-		return a, true, host, ""
-	}
-	// A range target parses as a prefix and is left alone: matching treats it as
-	// it always has, which is to say no CIDR allow covers it. Not refused,
-	// because it is well formed — see the case in scopetest.
-	if _, err := netip.ParsePrefix(host); err == nil {
-		return netip.Addr{}, false, host, ""
-	}
-
-	// Brackets are an address signal in themselves, and they are consumed by
-	// normalisation — so the fact of them has to travel. Without this,
-	// "[ 192.0.2.5 ]" lost its strongest signal before the test ran.
-	if bracketed || looksLikeAddress(host) {
-		return netip.Addr{}, false, host,
-			"task target " + quote(target) + " names an address and does not parse as one"
-	}
-	return netip.Addr{}, false, host, ""
-}
-
-// normaliseHost removes notation that does not change which host is reached,
-// and reports whether the form was bracketed.
-//
-// Port stripping is tried BEFORE the bare-bracket case, because "[v6]:port" has
-// to reach SplitHostPort intact — stripping the brackets first would leave
-// "v6]:port", which is not a host.
-func normaliseHost(host string) (string, bool) {
-	host = strings.TrimSpace(host)
-	bracketed := strings.HasPrefix(host, "[") || strings.Contains(host, "]")
-
-	// "[v6]:port" and "host:port".
-	if h, port, err := net.SplitHostPort(host); err == nil && h != "" && validPort(port) {
-		return strings.TrimSuffix(strings.TrimSpace(h), "."), bracketed
-	}
-
-	// A bare "[v6]", with whatever whitespace was inside it.
-	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-		inner := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-		return strings.TrimSuffix(strings.TrimSpace(inner), "."), true
-	}
-
-	// The DNS root label, for the no-port case.
-	return strings.TrimSuffix(host, "."), bracketed
-}
-
-// validPort is what makes SplitHostPort safe to use here.
-//
-// SplitHostPort does not validate the port: it splits on the LAST colon and
-// hands back whatever follows. So "https://printer.corp.example /x" split
-// cleanly into host "https" and port "//printer.corp.example /x", and the whole
-// normalisation then reported the scheme as the host — which disabled the
-// exclusion check and the shape test at once, because "https" is neither the
-// target nor address-shaped. Every malformed URL took that path.
-func validPort(port string) bool {
-	if port == "" || len(port) > 5 {
-		return false
-	}
-	for _, r := range port {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	n, err := strconv.Atoi(port)
-	return err == nil && n >= 0 && n <= 65535
-}
-
-// looksLikeAddress reports whether a string is trying to be an IP address.
-//
-// ============================================================================
-// A test on the COMPONENTS, not on the character set.
-// ============================================================================
-//
-// The first version asked whether the string was digits, dots and slashes. That
-// is an enumeration of two spellings, which is the failure ADR-040 criticises in
-// its own rejected alternatives — and an audit walked straight past it with
-// 0xC0000205, 0xC0.0x00.0x02.0x05, 192.0.0x2.5, 192.0.2.1-50 and
-// 192.0.2.5,192.0.2.6. Every one reaches 192.0.2.5 (or a range containing it)
-// through inet_aton semantics, and every one fell through to hostname equality
-// where no address exclusion could touch it. The hyphen range is the one that
-// matters most: it is how an operator writes a range by hand, and it names up
-// to 256 hosts.
-//
-// The question that generalises is whether every COMPONENT is a number. Split on
-// the separators an address or an address range can use — dot, slash, hyphen,
-// comma — and ask whether each piece parses as an integer in some base.
-// ParseUint with base 0 gives decimal, 0-octal and 0x-hex in one call, which is
-// exactly the set inet_aton accepts.
-//
-// This does not over-refuse hostnames, because bare hex is not a number to
-// ParseUint: "dead.beef" and "cafe.example" are hostnames, while "0xdead.0xbeef"
-// is not. "1host.corp.example" stays a hostname for the same reason, which is
-// why the obvious leading-digit test was wrong.
-//
-// A colon or a bracket is still decisive on its own: a hostname contains
-// neither, and normaliseHost has already removed a valid port.
-func looksLikeAddress(s string) bool {
-	if s == "" {
-		return false
-	}
-	// Fullwidth and other Unicode decimal digits are folded to ASCII for the
-	// SHAPE test only. UTS-46 maps them before resolution, so "２.０.２.５"
-	// reaches 2.0.2.5 — and it must not reach hostname equality on the way.
-	// The unfolded string is what gets parsed, so a folded-only match still
-	// ends in a refusal rather than in a silent reinterpretation.
-	s = foldDigits(s)
-
-	if strings.ContainsAny(s, ":[]") {
-		return true
-	}
-
-	fields := strings.FieldsFunc(s, func(r rune) bool {
-		return r == '.' || r == '/' || r == '-' || r == ','
-	})
-	if len(fields) == 0 {
-		return false
-	}
-	for _, f := range fields {
-		if _, err := strconv.ParseUint(f, 0, 64); err != nil {
-			return false
-		}
-	}
-	return true
-}
-
-// foldDigits maps Unicode decimal digits onto ASCII.
-func foldDigits(s string) string {
-	if isASCII(s) {
-		return s
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		if r > 0x7f && unicode.IsDigit(r) {
-			// digitValue returns 0-9 by construction, so the addition cannot
-			// leave ASCII — but it is written as a rune throughout rather than
-			// converted, because an int-to-rune conversion is the shape that
-			// wraps and gosec is right to ask about it.
-			b.WriteRune('0' + digitValue(r))
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
-
-func isASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 0x80 {
-			return false
-		}
-	}
-	return true
-}
-
-// digitValue returns 0-9 for any Unicode decimal digit.
-//
-// Every Unicode decimal-digit block is ten contiguous code points in order, so
-// counting back to the first non-digit gives the value without a lookup table.
-func digitValue(r rune) rune {
-	for v := rune(0); v < 10; v++ {
-		if !unicode.IsDigit(r - v) {
-			return v - 1
-		}
-	}
-	return 9
-}
-
-// quote renders a target for an operator-facing reason without letting a
-// control character reach a log line or an audit detail.
-func quote(s string) string {
-	const max = 100
-	if len(s) > max {
-		s = s[:max] + "..."
-	}
-	return strconv.Quote(s)
-}
-
-func parseTargetAddr(target string) (netip.Addr, bool) {
-	if a, err := netip.ParseAddr(target); err == nil {
-		// WithZone("") strips an IPv6 zone before any comparison.
-		//
-		// netip.Prefix.Contains returns false for ANY zoned address, and Addr
-		// equality includes the zone — so `fe80::1%eth0` was not excluded by a
-		// rule naming `fe80::1`, and no CIDR exclusion could ever match a zoned
-		// target at all. A zone identifies a local interface, not a different
-		// host, so it must not be able to carry a target out of scope.
-		return a.WithZone("").Unmap(), true
-	}
-	// A bare host in CIDR form, e.g. a task target written as 10.0.0.5/32.
-	if p, err := netip.ParsePrefix(target); err == nil && p.Bits() == p.Addr().BitLen() {
 		return p.Addr().WithZone("").Unmap(), true
 	}
 	return netip.Addr{}, false
