@@ -132,6 +132,14 @@ func (s *Sweeper) sweepTenant(ctx context.Context, tenant store.TenantID) {
 			return err
 		}
 
+		// Abandoned OIDC login attempts. Housekeeping, not a control: Consume
+		// already refuses an expired row, so what this removes is rows nothing
+		// would honour anyway. Somebody clicking sign in and closing the tab is
+		// the normal case, and without this the table only grows.
+		if _, err := (store.OIDCAuthRequests{}).PurgeExpiredAuthRequests(ctx, c, s.BatchLimit); err != nil {
+			return err
+		}
+
 		// The escalation is written in the SAME transaction as the expiry.
 		//
 		// ADR-012 makes a non-reassign_safe lease loss an operator escalation,

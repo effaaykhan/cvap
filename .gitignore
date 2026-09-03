@@ -37,3 +37,5 @@ venv/
 .idea/
 .vscode/
 *.swp
+.go.mod.tidycheck
+.go.sum.tidycheck

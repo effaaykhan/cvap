@@ -1,6 +1,10 @@
 package api
 
-import "testing"
+import (
+	"crypto/sha256"
+	"encoding/base64"
+	"testing"
+)
 
 // HashPasswordForTest exposes the password hasher to the integration test, which
 // lives in api_test and therefore cannot reach an unexported function.
@@ -15,4 +19,13 @@ func HashPasswordForTest(t *testing.T, password string) string {
 		t.Fatalf("hashPassword: %v", err)
 	}
 	return phc
+}
+
+// PKCEChallengeForTest exposes the S256 derivation so a test can check that the
+// verifier actually sent to the token endpoint hashes to the challenge that was
+// advertised — the property PKCE consists of, and one that would still "pass" a
+// test that only asserted a verifier was present.
+func PKCEChallengeForTest(verifier string) string {
+	sum := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }

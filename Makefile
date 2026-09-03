@@ -121,12 +121,27 @@ fmt-check: ## Fail if anything is not gofmt-clean
 		exit 1; \
 	fi
 
-tidy-check: ## Fail if go.mod or go.sum would change under go mod tidy
-	@go mod tidy
-	@git diff --exit-code -- go.mod go.sum || { \
-		echo "go.mod or go.sum is not tidy; the diff above is what go mod tidy changed."; \
+# tidy-check asserts that `go mod tidy` is a NO-OP, which is the property CI
+# means by "go mod tidy is committed".
+#
+# CI expresses it as `go mod tidy && git diff --exit-code`, which works there
+# because the runner starts from a clean checkout. It cannot work here: a
+# dependency you have just added and not yet committed is a git diff, so the
+# check would fail on every legitimate `go get` until it was committed — and a
+# gate that cannot pass before you commit is a gate you learn to skip.
+#
+# Comparing against a snapshot asks the same question without involving git.
+tidy-check: ## Fail if go mod tidy would change go.mod or go.sum
+	@cp go.mod .go.mod.tidycheck && cp go.sum .go.sum.tidycheck
+	@go mod tidy || { rm -f .go.mod.tidycheck .go.sum.tidycheck; exit 1; }
+	@if ! cmp -s go.mod .go.mod.tidycheck || ! cmp -s go.sum .go.sum.tidycheck; then \
+		echo "go mod tidy changed go.mod or go.sum:"; \
+		diff -u .go.mod.tidycheck go.mod || true; \
+		diff -u .go.sum.tidycheck go.sum || true; \
+		rm -f .go.mod.tidycheck .go.sum.tidycheck; \
 		exit 1; \
-	}
+	fi
+	@rm -f .go.mod.tidycheck .go.sum.tidycheck
 
 govulncheck: ## Known vulnerabilities in the dependency graph, as CI runs it
 	@command -v govulncheck >/dev/null || go install golang.org/x/vuln/cmd/govulncheck@latest

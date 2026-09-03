@@ -77,5 +77,15 @@ a comment at runtime.
   deployment operator's SSO policy.
 - **Login has one refusal for every failure.** Wrong password, unknown address, an address
   belonging to another tenant, a suspended tenant, the flag being off: one status, one body.
+- **Single sign-on (ADR-045).** Authorization code with PKCE, no client secret anywhere.
+  A returning user is identified by `users.oidc_subject`, never by email — email links an
+  invited account to a subject ONCE, only with `email_verified`, and only while
+  `oidc_subject IS NULL`. Both halves of the flow run behind `resolveTenant`, so the callback
+  can name no tenant: the state is redeemed inside the tenant its HOST resolved to, and `iss`,
+  `aud` and `nonce` are checked against that tenant's row and that attempt.
+- **The OIDC issuer is the only URL Core fetches that an operator supplied**, so the SSRF guard
+  is at dial time on the resolved address, is an allowlist of public unicast, and refuses
+  link-local even when `CVAP_CORE_OIDC_ALLOW_PRIVATE_ISSUER` permits the internal network —
+  an on-prem operator needs `10.0.0.5` and nobody needs `169.254.169.254`.
 
 Run `security-reviewer` on any change to auth, tenancy or the API surface.

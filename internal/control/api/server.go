@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -61,6 +62,28 @@ type Config struct {
 	// whether Insecure may be honoured. Empty means "not loopback".
 	ListenAddr string
 
+	// AllowPrivateIssuers lets an OIDC issuer resolve to a private or loopback
+	// address.
+	//
+	// For an on-prem deployment whose identity provider is on the internal
+	// network, which is the normal shape of on-prem rather than an exception.
+	// Off by default because on a SaaS deployment the issuer is customer-supplied
+	// configuration, and Core fetching it is a server-side request forgery
+	// primitive handed to a customer.
+	//
+	// Link-local stays refused either way: that is where cloud instance metadata
+	// lives and no identity provider belongs there.
+	AllowPrivateIssuers bool
+
+	// OIDCRootCAs replaces the system trust store for identity-provider traffic.
+	//
+	// For an on-prem deployment whose internal provider is issued by a private
+	// CA. Nil means the system roots. There is deliberately no setting that
+	// disables verification: the authorization code travels in the token
+	// exchange, and a deployment that cannot supply its CA is one where that
+	// exchange is unprotected.
+	OIDCRootCAs *x509.CertPool
+
 	// SessionTTL is capped by a CHECK constraint on sessions at 12 hours. Set
 	// lower here; it cannot be set higher, and the database is what says so.
 	SessionTTL time.Duration
@@ -80,6 +103,17 @@ type Server struct {
 	// UNAUTHENTICATED endpoint is a function of how many requests arrive, which
 	// is a denial of service anyone can reach. See verifyUnderLimit.
 	hashSem chan struct{}
+
+	// oidcClient is the hardened outbound client, and the ONLY one this package
+	// uses for identity-provider traffic. See oidc_client.go: the issuer is
+	// operator-supplied, so every fetch from it is a server-side request
+	// forgery surface.
+	oidcClient *http.Client
+
+	// providers caches discovery documents by issuer. It holds nothing
+	// tenant-specific — the client id and the audience check come from each
+	// tenant's own row every time a verifier is built.
+	providers *providerCache
 
 	// decoyHash is verified when there is no user, so that an unknown address
 	// costs the same as a known one.
@@ -152,8 +186,10 @@ func New(db *store.DB, log *slog.Logger, cfg Config) (*Server, error) {
 	s := &Server{
 		db: db, log: log, cfg: cfg,
 		reg: NewRegistry(), mux: http.NewServeMux(),
-		hashSem:   make(chan struct{}, maxConcurrentHashes),
-		decoyHash: decoy,
+		hashSem:    make(chan struct{}, maxConcurrentHashes),
+		decoyHash:  decoy,
+		oidcClient: newOIDCClient(cfg.AllowPrivateIssuers, cfg.OIDCRootCAs),
+		providers:  newProviderCache(),
 	}
 	s.routes()
 	s.mount()

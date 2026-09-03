@@ -312,6 +312,20 @@ BEGIN
                 'ZmFrZXNhbHRmYWtlc2FsdA$' ||
                 'ZmFrZWtleWZha2VrZXlmYWtla2V5ZmFrZWtleWZha2VrZXk');
 
+    -- An EXPIRED login attempt. Same reasoning as the session below and the
+    -- resolved kill switch above: a live one in the fixtures is a redeemable
+    -- state in every database loaded with them, and the hashes here are of
+    -- strings written in this file.
+    INSERT INTO oidc_auth_requests
+        (tenant_id, state_hash, nonce_hash, code_verifier, redirect_uri,
+         created_at, expires_at)
+        VALUES (p_tenant,
+                sha256(('fixture-state-' || p_tag)::bytea),
+                sha256(('fixture-nonce-' || p_tag)::bytea),
+                'fixture-verifier-' || p_tag,
+                'https://fixture-' || p_tag || '.invalid/v1/auth/oidc/callback',
+                now() - interval '1 hour', now() - interval '55 minutes');
+
     -- EXPIRED and revoked, and expiring within the 12-hour cap the CHECK
     -- enforces — a fixture that violated it would be a fixture teaching a
     -- session lifetime the schema forbids.

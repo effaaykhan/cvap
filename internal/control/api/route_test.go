@@ -43,7 +43,13 @@ func TestEveryRouteDeclaresWhoMayReachIt(t *testing.T) {
 			// exists to force: an endpoint reachable without a session is the
 			// most consequential thing anyone can add to this package.
 			switch r.Method + " " + r.Path {
-			case "POST /v1/auth/login", "GET /v1/openapi.json":
+			case "POST /v1/auth/login", "GET /v1/openapi.json",
+				// Both halves of the OIDC flow run before there is a session,
+				// by construction. The callback is the one endpoint here that
+				// takes a third party's redirect, and what makes it safe is not
+				// authentication but that it can name no tenant of its own: the
+				// host resolves the tenant, and the state is redeemed inside it.
+				"GET /v1/auth/oidc/start", "GET /v1/auth/oidc/callback":
 			default:
 				t.Errorf("%s %s is public and is not one of the routes this test knows about. "+
 					"If that is deliberate, add it here — and say why in the route's Description.",

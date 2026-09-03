@@ -47,6 +47,33 @@ func (s *Server) routes() {
 	})
 
 	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/auth/oidc/start",
+		Summary: "Begin single sign-on",
+		Description: "Returns the URL to send the browser to. Which identity provider that is " +
+			"comes from the tenant this request's HOST resolved to, never from a parameter " +
+			"(ADR-041). Mints a state, a nonce and a PKCE verifier bound to that tenant, all " +
+			"single-use and valid for ten minutes. Optional ?return_to= must be a path on " +
+			"this site: an absolute value would make the callback an open redirect.",
+		Access:   AccessPublic,
+		Response: StartOIDCResponse{},
+		Handler:  s.startOIDC,
+	})
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: OIDCCallbackPath,
+		Summary: "Complete single sign-on",
+		Description: "Where the identity provider returns the browser. The state is redeemed " +
+			"inside the tenant the callback's hostname resolved to, so a state minted at one " +
+			"tenant cannot be replayed at another; the ID token's iss and aud are checked " +
+			"against that tenant's configuration, and its nonce against the value minted for " +
+			"this attempt. On success it issues the same session local login issues and " +
+			"redirects to the recorded path.",
+		Access:  AccessPublic,
+		Status:  http.StatusSeeOther,
+		Handler: s.callbackOIDC,
+	})
+
+	r.Register(Route{
 		Method: http.MethodPost, Path: "/v1/auth/password",
 		Summary: "Change this account's password",
 		Description: "Requires the current password even when the account is flagged as needing " +

@@ -232,12 +232,22 @@ func run(log *slog.Logger) error {
 	// issued; an operator reaches it over server TLS with a session. Serving
 	// both on one port would mean one TLS configuration for two trust models,
 	// and the weaker one would win.
+	// An optional trust bundle for identity-provider traffic, for an on-prem
+	// deployment whose internal provider is issued by a private CA. Absent means
+	// the system roots, which is what a public issuer needs.
+	oidcRoots, err := loadOIDCRoots(os.Getenv("CVAP_CORE_OIDC_CA_BUNDLE"))
+	if err != nil {
+		return fmt.Errorf("cvap-core: operator api: %w", err)
+	}
+
 	apiSrv, err := api.New(db, log, api.Config{
-		Version:          version,
-		LocalAuthEnabled: os.Getenv("CVAP_CORE_LOCAL_AUTH") == "1",
-		Insecure:         os.Getenv("CVAP_CORE_API_INSECURE") == "1",
-		ListenAddr:       os.Getenv("CVAP_CORE_API_LISTEN"),
-		SessionTTL:       apiSessionTTL(),
+		Version:             version,
+		LocalAuthEnabled:    os.Getenv("CVAP_CORE_LOCAL_AUTH") == "1",
+		Insecure:            os.Getenv("CVAP_CORE_API_INSECURE") == "1",
+		ListenAddr:          os.Getenv("CVAP_CORE_API_LISTEN"),
+		AllowPrivateIssuers: os.Getenv("CVAP_CORE_OIDC_ALLOW_PRIVATE_ISSUER") == "1",
+		OIDCRootCAs:         oidcRoots,
+		SessionTTL:          apiSessionTTL(),
 	})
 	if err != nil {
 		return fmt.Errorf("cvap-core: operator api: %w", err)
@@ -383,4 +393,31 @@ func orDefault(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// loadOIDCRoots reads a PEM bundle of additional roots for identity-provider
+// traffic.
+//
+// An empty path means the system roots. A path that does not parse is a FATAL
+// startup error rather than a fallback: a deployment that configured a private
+// CA and silently got the system store would have single sign-on fail later with
+// a certificate error nobody connects to this file.
+func loadOIDCRoots(path string) (*x509.CertPool, error) {
+	if path == "" {
+		return nil, nil
+	}
+	// The path is deployment configuration read once at startup, from the same
+	// environment that supplies CVAP_CORE_CA_KEY — by a process the operator who
+	// set it already runs. There is no traversal boundary here to cross: an
+	// operator who can set this variable can already read any file Core can.
+	// #nosec G304,G703 -- operator-supplied configuration path, not request input
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("oidc ca bundle: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("oidc ca bundle %s contains no usable certificate", path)
+	}
+	return pool, nil
 }
