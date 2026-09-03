@@ -1,6 +1,6 @@
 ---
 name: recurring-findings
-description: Recurring security defect classes found in CVAP reviews, and the repo-specific constraints that shape acceptable fixes
+description: Recurring security defect classes found in CVAP reviews (31 classes), and the repo-specific constraints that shape acceptable fixes
 metadata:
   type: project
 ---
@@ -342,6 +342,84 @@ body and passes.
 **How to apply:** state the oracle as an end-to-end experiment — two requests differing in one
 secret — and compare *everything* observable: status, body, headers, Set-Cookie, and elapsed
 time. A test that asserts an indistinguishability property and only diffs the body is class 9.
+
+**27. A guard applied to the value going IN, defeated by a rewrite on the way OUT.**
+`isSafeReturnPath` (`internal/control/api/oidc.go`) refuses `p[1] == '/' || p[1] == '\\'`
+because a browser normalises `/\evil.test` to `//evil.test` and leaves the origin. It gates
+what is STORED in `oidc_auth_requests.return_path`. The value is emitted by
+`http.Redirect(w, r, req.ReturnPath, 303)`, and `http.Redirect` runs `path.Clean` on any
+leading-slash URL — which PROMOTES a backslash into position 1. Measured: `return_to=/./\evil.test`
+is accepted by the Go guard and by the column CHECK `^/[^/\\]`, and the callback emits
+`Location: /\evil.test`. Same for `/a/../\evil.test`. The test for it is self-checking:
+feed the emitted Location back through the guard that accepted the input; if it fails, that is
+the finding, and no browser is needed to prove it.
+**Why:** validation and emission are in different functions, and the stdlib's normalisation
+sits between them, so neither author sees the transformation.
+**How to apply:** for any validated string that is later handed to a stdlib formatter
+(`http.Redirect`, `url.JoinPath`, `filepath.Clean`, `template.URL`), re-run the validator on
+the OUTPUT. A guard that only holds on input is a guard on a value nobody uses.
+
+**28. A pre-auth token that is single-use and unguessable, and not bound to the browser.**
+The OIDC `state` is 256 bits from crypto/rand, hashed at rest, redeemed by `DELETE ... RETURNING`,
+tenant-scoped by RLS — every property except the one CSRF needs. No cookie is set at
+`/v1/auth/oidc/start`, so nothing ties the callback to the user agent that began the flow.
+Measured: an attacker starts a login from their own client, has the victim's browser open
+`/v1/auth/oidc/callback?code=…&state=…`, and the victim's browser receives a working session
+for the ATTACKER's account (`GET /v1/auth/session` returns the attacker's user id and role).
+In a vulnerability platform that is an operator entering scan credentials into an account the
+attacker reads. OAuth 2.0 Security BCP §4.7 is explicit that `state` must be bound to the user
+agent; replay protection and CSRF protection are different properties of the same parameter and
+the codebase only implemented the first.
+**Why:** "single-use" and "unguessable" feel like the whole of what `state` is for, and every
+test that exercises start-then-callback uses two cookieless requests, so the property is
+invisible from the suite.
+**How to apply:** for any multi-step flow, ask what ties step 2 to the BROWSER that did step 1,
+not merely to the server-side row. If the answer is nothing, write the probe where two different
+clients do the two steps.
+
+**29. A boolean guard that describes a DIFFERENT field than the one it guards.**
+`resolveOIDCUser` links an account by email only when the IdP asserts `email_verified` — and
+`tenant_auth_config.oidc_email_claim` lets an operator point the address at another claim.
+`email_verified` is defined by OIDC Core 5.1 as a statement about the `email` claim, so with
+`oidc_email_claim = 'upn'` the flag vouches for a value it says nothing about. Measured: a token
+with `email: mallory@… (email_verified: true)` and `upn: op@…` links the attacker's subject to
+the OPERATOR's account and returns the operator's session. Two separate defects in nine lines
+(`oidc.go`, the `cfg.OIDCEmailClaim != "email"` block): the flag is decoupled from the value,
+and when the configured claim is ABSENT the code silently falls back to the `email` claim the
+operator overrode precisely because they did not trust it.
+**How to apply:** whenever a check and the value it protects are named by different
+configuration, write down what the check is defined to assert. If a config knob can move the
+value and not the check, they are no longer the same fact.
+
+**30. A transport check applied to N-1 of the N URLs in one untrusted document.**
+`providerCache.get` loops over `authorization_endpoint` and `token_endpoint` demanding https,
+and does not check `jwks_uri` — the one URL whose integrity every signature verification
+depends on. go-oidc does not check it either. Measured: a discovery document naming
+`jwks_uri: http://…` completes a login, so the signing keys arrive over cleartext and an
+on-path attacker substitutes a key set and forges an ID token for any subject.
+**How to apply:** enumerate every URL a fetched document can name, not the ones the code
+happens to have variables for, and check the list against the scheme/host guard.
+
+**31. A size bound at the fetch the author wrote, absent at the fetches the library makes.**
+`exchangeCode` wraps the token response in `io.LimitReader(resp.Body, 1<<20)`. go-oidc's
+`NewProvider` (oidc.go:312) and `RemoteKeySet.updateKeys` (jwks.go:315) both `io.ReadAll` with
+no limit, through the same hardened client — whose `MaxResponseHeaderBytes` and `Timeout` bound
+headers and time but not body size. Measured on the dev box: one UNAUTHENTICATED
+`GET /v1/auth/oidc/start` against a 256 MiB discovery document = 2202 MiB TotalAlloc, HeapSys
+2279 MiB, and it still returned 200; a padded JWKS at the callback = 2458 MiB. Core is one
+process holding dispatch, ingest and lease renewal.
+**Why:** the presence of a LimitReader in the same file reads as "bodies are bounded here".
+**How to apply:** for every outbound fetch, name which of (dial, TLS, headers, body-time,
+body-SIZE) is bounded, and check the ones the library owns by reading its source, not the
+client config. A `*http.Client` cannot express a body-size cap.
+
+**Confirmed-good patterns worth NOT re-deriving.** Two properties this review measured and
+found correct, both of which earlier sessions got wrong: (a) the OIDC callback releases its
+pool connection BEFORE the network round trip to the IdP — 40 concurrent callbacks parked in a
+hanging token exchange moved an unrelated `SELECT 1` from 0.78 ms to 1.7-5.1 ms, i.e. no
+starvation, which is class 25 correctly applied; (b) `OIDCAuthRequests.Consume`'s
+`DELETE ... RETURNING` under READ COMMITTED gives exactly one winner — 4 concurrent callbacks
+on one state, 6/6 rounds, one session each time. Do not re-litigate either without new evidence.
 
 **Constraint on fixes:** `proto/` is frozen additive-only within a major version (ADR-022),
 enforced by `buf breaking` with the FILE category and a baseline established at bd0e4f9.

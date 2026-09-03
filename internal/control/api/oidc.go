@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +61,16 @@ type cachedProvider struct {
 	endpoints struct {
 		Authorization string `json:"authorization_endpoint"`
 		Token         string `json:"token_endpoint"`
+
+		// JWKS is here ONLY so the https check below covers it.
+		//
+		// go-oidc fetches it itself and does not check the scheme, and the first
+		// version of that check listed the other two and omitted this one — so a
+		// discovery document naming an http jwks_uri completed a login, with the
+		// signing keys arriving in cleartext. Those keys are the root of every
+		// signature check: an on-path attacker who substitutes the key set forges
+		// an ID token for any subject at that issuer.
+		JWKS string `json:"jwks_uri"`
 	}
 	fetchedAt time.Time
 }
@@ -97,14 +108,14 @@ func (pc *providerCache) get(ctx context.Context, client *http.Client, issuer st
 	if err := p.Claims(&fresh.endpoints); err != nil {
 		return nil, fmt.Errorf("api: oidc discovery document for %s: %w", issuer, err)
 	}
-	if fresh.endpoints.Authorization == "" || fresh.endpoints.Token == "" {
-		return nil, fmt.Errorf("api: oidc discovery for %s names no authorization or token endpoint", issuer)
+	if fresh.endpoints.Authorization == "" || fresh.endpoints.Token == "" || fresh.endpoints.JWKS == "" {
+		return nil, fmt.Errorf("api: oidc discovery for %s is missing an authorization, token or jwks endpoint", issuer)
 	}
 	// Both endpoints must be https. Discovery came over TLS from the issuer, so
 	// a plaintext endpoint in it is either a misconfigured provider or one whose
 	// document has been tampered with, and the authorization code would travel
 	// in the clear either way.
-	for _, e := range []string{fresh.endpoints.Authorization, fresh.endpoints.Token} {
+	for _, e := range []string{fresh.endpoints.Authorization, fresh.endpoints.Token, fresh.endpoints.JWKS} {
 		u, err := url.Parse(e)
 		if err != nil || u.Scheme != "https" {
 			return nil, fmt.Errorf("api: oidc endpoint %q for %s is not https", e, issuer)
@@ -214,6 +225,14 @@ func (s *Server) startOIDC(w http.ResponseWriter, r *http.Request) {
 			"An unexpected error occurred.", err)
 		return
 	}
+	// The browser binding. See the column comment in migration 0029: state gives
+	// single-use, this gives user-agent binding, and the flow needs both.
+	browserTok, browserHash, err := newToken()
+	if err != nil {
+		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
+			"An unexpected error occurred.", err)
+		return
+	}
 
 	// The redirect_uri is DERIVED from the tenant's own domain, server-side.
 	//
@@ -230,13 +249,24 @@ func (s *Server) startOIDC(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.db.Write(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		_, err := (store.OIDCAuthRequests{}).Create(ctx, c,
-			stateHash[:], nonceHash[:], verifier, redirectURI, returnPath, authRequestTTL)
+			stateHash[:], nonceHash[:], browserHash[:], verifier, redirectURI, returnPath, authRequestTTL)
 		return err
 	}); err != nil {
+		if errors.Is(err, store.ErrTooManyAuthRequests) {
+			// A flood, or a sweeper that has stopped purging. Loud, because the
+			// second reading is an outage in a component nothing else watches.
+			s.log.Warn("oidc login attempts are at the per-tenant ceiling",
+				"request_id", requestIDFrom(r.Context()), "tenant_id", tenant.String())
+			writeError(w, r, s.log, http.StatusTooManyRequests, CodeConflict,
+				"Too many sign-in attempts are in flight. Try again shortly.", err)
+			return
+		}
 		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
 			"An unexpected error occurred.", err)
 		return
 	}
+
+	http.SetCookie(w, s.oidcBindingCookie(browserTok, authRequestTTL))
 
 	q := url.Values{
 		"response_type":         {"code"},
@@ -289,9 +319,12 @@ func (s *Server) callbackOIDC(w http.ResponseWriter, r *http.Request) {
 		// The identity provider refused. Logged with its reason and reported
 		// without it: the string comes from a third party and lands in a
 		// browser.
+		// TRUNCATED. Both fields are third-party text on an unauthenticated
+		// path: one callback wrote 200 KB of log from error_description in a
+		// review probe, which is a way to fill a disk with a GET.
 		s.log.Info("identity provider refused the authorization",
 			"request_id", requestIDFrom(r.Context()), "tenant_id", tenant.String(),
-			"error", e, "description", q.Get("error_description"))
+			"error", truncate(e, 256), "description", truncate(q.Get("error_description"), 512))
 		refuse(fmt.Errorf("identity provider returned error=%s", e))
 		return
 	}
@@ -303,6 +336,24 @@ func (s *Server) callbackOIDC(w http.ResponseWriter, r *http.Request) {
 	}
 	stateHash := sha256.Sum256([]byte(state))
 
+	// The binding cookie.
+	//
+	// Its absence is the attack: a victim's browser directed at a callback URL
+	// the attacker assembled has no cookie from OUR /start, because it never
+	// called it. An attacker can cause a request; they cannot make it send a
+	// cookie their own browser received.
+	//
+	// ABSENT and WRONG take one path, deliberately. An early return on absence
+	// would leave the state unconsumed while a wrong value consumed it, which
+	// makes the two distinguishable by whether a retry then works — and gives an
+	// attacker a free probe. An empty string compares unequal to any hash, so
+	// falling through handles both.
+	var bindingValue string
+	if c, err := r.Cookie(s.oidcBindingName()); err == nil {
+		bindingValue = c.Value
+	}
+	s.clearOIDCBinding(w)
+
 	// Consumed FIRST, before the code is exchanged.
 	//
 	// Single-use has to be won before anything expensive or observable happens.
@@ -310,13 +361,31 @@ func (s *Server) callbackOIDC(w http.ResponseWriter, r *http.Request) {
 	// exchanged twice concurrently, and each exchange is a request to the IdP
 	// that an attacker can therefore cause.
 	var (
-		req *store.OIDCAuthRequest
-		cfg *store.AuthConfig
+		req      *store.OIDCAuthRequest
+		cfg      *store.AuthConfig
+		mismatch bool
 	)
 	if err := s.db.Write(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
 		if req, err = (store.OIDCAuthRequests{}).Consume(ctx, c, stateHash[:]); err != nil {
 			return err
+		}
+		// ============================================================================
+		// Sets a flag and returns NIL, so the DELETE commits.
+		// ============================================================================
+		//
+		// Returning an error here rolls the transaction back, which un-deletes
+		// the row — so a wrong binding left the state redeemable and a second
+		// callback with the right cookie succeeded. My own regression test
+		// caught it, and it is the same shape as the lockout counter a security
+		// review found last session: a control performed inside a transaction
+		// that is then aborted by the refusal it triggered.
+		//
+		// A failed binding check must cost the attempt. Otherwise an attacker who
+		// can cause one callback can cause a second.
+		if !constantTimeEqualHash(bindingValue, req.BrowserHash) {
+			mismatch = true
+			return nil
 		}
 		cfg, err = (store.AuthConfigs{}).Get(ctx, c)
 		return err
@@ -327,6 +396,12 @@ func (s *Server) callbackOIDC(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
 			"An unexpected error occurred.", err)
+		return
+	}
+	if mismatch {
+		s.log.Warn("oidc callback presented the wrong browser binding",
+			"request_id", requestIDFrom(r.Context()), "tenant_id", tenant.String())
+		refuse(errBrowserMismatch)
 		return
 	}
 	if cfg.Method != store.AuthOIDC {
@@ -346,7 +421,24 @@ func (s *Server) callbackOIDC(w http.ResponseWriter, r *http.Request) {
 
 	rawIDToken, err := s.exchangeCode(r.Context(), prov.endpoints.Token, cfg.OIDCClientID, code, req.CodeVerifier, req.RedirectURI)
 	if err != nil {
-		s.log.Info("oidc token exchange failed",
+		// A TRANSPORT failure is an outage, and gets the same 502 discovery
+		// does. The two were conflated: ADR-046 claimed "an identity provider
+		// being down is a 502, not a 401", which was true of discovery and false
+		// of the exchange — so a provider that went down between the redirect
+		// and the callback presented as "that sign-in could not be completed"
+		// with nothing at Error level and no issuer in the log. That is exactly
+		// the confusion the sentence said it prevented.
+		if errors.Is(err, errIDPUnreachable) {
+			s.log.Error("identity provider unreachable at the token exchange",
+				"request_id", requestIDFrom(r.Context()), "tenant_id", tenant.String(),
+				"issuer", cfg.OIDCIssuer, "err", err)
+			writeError(w, r, s.log, http.StatusBadGateway, CodeInternal,
+				"Single sign-on is temporarily unavailable.", err)
+			return
+		}
+		// A protocol refusal — the provider answered and said no — is the
+		// caller's problem and refuses like any other bad credential.
+		s.log.Info("oidc token exchange refused",
 			"request_id", requestIDFrom(r.Context()), "tenant_id", tenant.String(), "err", err)
 		refuse(err)
 		return
@@ -382,6 +474,24 @@ func (s *Server) callbackOIDC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// azp, when the audience is multi-valued.
+	//
+	// OIDC Core 3.1.3.7 step 4: a token whose `aud` names several clients must
+	// carry `azp` naming the one it was issued to, and go-oidc checks only that
+	// our client id appears SOMEWHERE in `aud`. Without this, a token minted for
+	// another client at the same issuer — which on a shared-issuer deployment is
+	// another tenant's — is accepted here as long as it also lists ours.
+	if len(idToken.Audience) > 1 {
+		var azpClaim struct {
+			AZP string `json:"azp"`
+		}
+		if err := idToken.Claims(&azpClaim); err != nil || azpClaim.AZP != cfg.OIDCClientID {
+			refuse(fmt.Errorf("id token has a multi-valued audience and azp %q, want %q",
+				azpClaim.AZP, cfg.OIDCClientID))
+			return
+		}
+	}
+
 	// The nonce, compared to the one minted for THIS login attempt.
 	//
 	// go-oidc does not check it — the library cannot know what was minted — so a
@@ -393,23 +503,25 @@ func (s *Server) callbackOIDC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var claims struct {
-		Email         string `json:"email"`
-		EmailVerified *bool  `json:"email_verified"`
-	}
-	if err := idToken.Claims(&claims); err != nil {
-		refuse(fmt.Errorf("id token claims could not be read: %w", err))
+	// ============================================================================
+	// email_verified describes the `email` claim, and nothing else.
+	// ============================================================================
+	//
+	// OIDC Core 5.1 defines it as a statement about `email`. The first version
+	// read the ADDRESS from a configurable claim and the VERIFICATION always from
+	// `email_verified` — so with oidc_email_claim = "upn", a token asserting
+	// `email: mallory@…` with `email_verified: true` alongside `upn: op@…` linked
+	// the attacker's subject to the operator's account, permanently. A security
+	// review measured it. Worse, a token with no `upn` at all fell through to the
+	// `email` value, which is the claim the operator overrode precisely because
+	// they did not trust it.
+	//
+	// So a configured claim brings its own verification claim, and an absent one
+	// is a refusal rather than a fallback.
+	email, emailVerified, err := s.addressFromClaims(idToken, cfg.OIDCEmailClaim)
+	if err != nil {
+		refuse(err)
 		return
-	}
-	// A configurable claim, because identity providers disagree about which one
-	// carries the address.
-	if cfg.OIDCEmailClaim != "" && cfg.OIDCEmailClaim != "email" {
-		var raw map[string]any
-		if err := idToken.Claims(&raw); err == nil {
-			if v, ok := raw[cfg.OIDCEmailClaim].(string); ok {
-				claims.Email = v
-			}
-		}
 	}
 
 	var (
@@ -421,7 +533,7 @@ func (s *Server) callbackOIDC(w http.ResponseWriter, r *http.Request) {
 	)
 	err = s.db.Write(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
-		user, err = s.resolveOIDCUser(ctx, c, cfg, idToken.Subject, claims.Email, claims.EmailVerified)
+		user, err = s.resolveOIDCUser(ctx, c, cfg, idToken.Subject, email, emailVerified)
 		if err != nil {
 			if errors.Is(err, errOIDCNoAccount) {
 				denied = err
@@ -429,15 +541,11 @@ func (s *Server) callbackOIDC(w http.ResponseWriter, r *http.Request) {
 			}
 			return err
 		}
-		id := user.ID
-		if err := (store.AuditEvents{}).Record(ctx, c, store.AuditEvent{
-			ActorID: &id, ActorType: store.ActorUser,
-			Action: "auth.session_issued", ResourceType: "user", ResourceID: &id,
-			Detail: map[string]any{"method": "oidc", "issuer": cfg.OIDCIssuer},
-		}); err != nil {
-			return err
-		}
-		token, csrfTok, resp, err = s.issueSession(ctx, c, r, user, false)
+		// ONE event, written by issueSession, which now takes the method. This
+		// used to record its own here as well, so every SSO login left two rows
+		// and the second claimed the method was "local".
+		token, csrfTok, resp, err = s.issueSession(ctx, c, r, user, false, "oidc",
+			map[string]any{"issuer": cfg.OIDCIssuer, "subject": idToken.Subject})
 		return err
 	})
 	if err != nil {
@@ -454,9 +562,94 @@ func (s *Server) callbackOIDC(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, s.sessionCookie(token, ttl))
 	http.SetCookie(w, s.csrfCookie(csrfTok, ttl))
 
-	// A redirect to the PATH recorded at the start of the flow, which the column
-	// constrains and isSafeReturnPath checked. Not to anything in this request.
-	http.Redirect(w, r, req.ReturnPath, http.StatusSeeOther)
+	// ============================================================================
+	// The guard runs on the input; http.Redirect rewrites the output.
+	// ============================================================================
+	//
+	// isSafeReturnPath refuses `/\evil.test` because browsers normalise the
+	// backslash to `//`. http.Redirect then runs path.Clean, which PROMOTES a
+	// backslash into that position: a review measured `/./\evil.test` and
+	// `/a/../\evil.test` passing the Go guard and the column CHECK, and coming
+	// out of http.Redirect as `Location: /\evil.test`.
+	//
+	// So the value that is actually sent is the value that is checked. Cleaning
+	// here and validating the result closes the gap in the direction that cannot
+	// reopen: whatever http.Redirect would do has already been done.
+	location := path.Clean(req.ReturnPath)
+	if !isSafeReturnPath(location) {
+		// Not an error to the caller — they are signed in, and where to land is
+		// a preference. Logged, because a stored path that only becomes unsafe
+		// after cleaning means the start endpoint let something through.
+		s.log.Warn("oidc return path became unsafe after cleaning; redirecting to the root",
+			"request_id", requestIDFrom(r.Context()), "stored", truncate(req.ReturnPath, 256))
+		location = "/"
+	}
+	http.Redirect(w, r, location, http.StatusSeeOther)
+}
+
+// errIDPUnreachable distinguishes an identity provider outage from its refusal.
+//
+// The difference decides a status code and a log level, and therefore whether an
+// operator finds out that their provider is down.
+var errIDPUnreachable = errors.New("api: identity provider unreachable")
+
+// oidcBindingCookieName carries the browser binding between /start and the
+// callback.
+//
+// The __Host- prefix is enforced by the browser: it requires Secure, forbids
+// Domain, and requires Path=/. So a cookie by this name cannot have been set by
+// a sibling hostname — which on a SaaS deployment is another tenant — and the
+// browser refuses to send it over plaintext. That is a property no server-side
+// check can obtain, which is why the prefix is used rather than a plain name.
+//
+// It falls back to an unprefixed name only when Insecure is set, because
+// __Host- requires Secure and Insecure exists exactly for the loopback
+// development case where there is no TLS. api.New refuses Insecure anywhere but
+// loopback.
+const (
+	oidcBindingCookieSecure   = "__Host-cvap_oidc"
+	oidcBindingCookieInsecure = "cvap_oidc"
+)
+
+// errBrowserMismatch means the callback came from a different user agent than
+// the one that began the flow — or from one that never began a flow at all.
+var errBrowserMismatch = errors.New("api: oidc callback browser binding does not match")
+
+// oidcBindingCookie sets the binding.
+//
+// #nosec G124 -- Secure is set unless Config.Insecure, which api.New refuses
+// anywhere but loopback; HttpOnly and SameSite are literal.
+func (s *Server) oidcBindingCookie(value string, ttl time.Duration) *http.Cookie {
+	return &http.Cookie{
+		Name:     s.oidcBindingName(),
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   !s.cfg.Insecure,
+		// Lax, not Strict: the callback IS a cross-site top-level navigation —
+		// the identity provider redirects into it — so Strict would withhold the
+		// cookie on the one request that needs it. Lax sends it on exactly this
+		// shape of request, which is why the binding has to be a value the
+		// attacker cannot obtain rather than a same-site assertion.
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(ttl.Seconds()),
+	}
+}
+
+func (s *Server) oidcBindingName() string {
+	if s.cfg.Insecure {
+		return oidcBindingCookieInsecure
+	}
+	return oidcBindingCookieSecure
+}
+
+// clearOIDCBinding removes the cookie on every callback exit path.
+//
+// Every path, success and failure alike: a binding left behind is one a second
+// callback could present, which would turn a single-use state into a single-use
+// state plus a reusable binding.
+func (s *Server) clearOIDCBinding(w http.ResponseWriter) {
+	http.SetCookie(w, s.expiredCookie(s.oidcBindingName(), true))
 }
 
 // errOIDCNoAccount means the assertion was valid and names nobody here.
@@ -477,10 +670,14 @@ var errOIDCNoAccount = errors.New("api: no account for this subject")
 //     and the role such a user would get is a permission grant made by the IdP.
 func (s *Server) resolveOIDCUser(ctx context.Context, c *store.Conn, cfg *store.AuthConfig, subject, email string, emailVerified *bool) (*store.User, error) {
 	if subject == "" {
-		return nil, errors.New("api: id token carried no subject")
+		// errOIDCNoAccount, not a generic error: a hostile identity provider
+		// asserting sub:"" would otherwise drive a 500 and an Error-level log
+		// line on demand, and produce a status code distinguishable from every
+		// other refusal.
+		return nil, errOIDCNoAccount
 	}
 
-	user, err := (store.Users{}).GetBySubject(ctx, c, subject)
+	user, err := (store.Users{}).GetBySubject(ctx, c, cfg.OIDCIssuer, subject)
 	switch {
 	case err == nil:
 		if user.Status != store.UserActive {
@@ -499,7 +696,7 @@ func (s *Server) resolveOIDCUser(ctx context.Context, c *store.Conn, cfg *store.
 			if existing.Status == store.UserDisabled {
 				return nil, errOIDCNoAccount
 			}
-			if err := (store.Users{}).LinkSubject(ctx, c, existing.ID, subject); err != nil {
+			if err := (store.Users{}).LinkSubject(ctx, c, existing.ID, cfg.OIDCIssuer, subject); err != nil {
 				// ErrNotFound here means the row is already linked to a
 				// DIFFERENT subject. The newer assertion does not win.
 				if errors.Is(err, store.ErrNotFound) {
@@ -535,7 +732,7 @@ func (s *Server) resolveOIDCUser(ctx context.Context, c *store.Conn, cfg *store.
 	if err != nil {
 		return nil, err
 	}
-	if err := (store.Users{}).LinkSubject(ctx, c, created.ID, subject); err != nil {
+	if err := (store.Users{}).LinkSubject(ctx, c, created.ID, cfg.OIDCIssuer, subject); err != nil {
 		return nil, err
 	}
 	if err := (store.Users{}).SetStatus(ctx, c, created.ID, store.UserActive); err != nil {
@@ -572,7 +769,10 @@ func (s *Server) exchangeCode(ctx context.Context, tokenEndpoint, clientID, code
 
 	resp, err := s.oidcClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("api: token exchange: %w", err)
+		// Wrapped so the caller can tell an OUTAGE from a refusal. A connection
+		// refused, a TLS failure, a timeout and an address the SSRF guard
+		// rejected all land here; none of them is the user's doing.
+		return "", fmt.Errorf("%w: %w", errIDPUnreachable, err)
 	}
 	defer resp.Body.Close()
 
@@ -586,6 +786,12 @@ func (s *Server) exchangeCode(ctx context.Context, tokenEndpoint, clientID, code
 	if resp.StatusCode != http.StatusOK {
 		// The provider's error body is NOT included: it is third-party text on a
 		// path that ends in a browser.
+		//
+		// 5xx is the provider failing, which is an outage; 4xx is it refusing
+		// this exchange, which is not.
+		if resp.StatusCode >= 500 {
+			return "", fmt.Errorf("%w: token endpoint returned %d", errIDPUnreachable, resp.StatusCode)
+		}
 		return "", fmt.Errorf("api: token endpoint returned %d", resp.StatusCode)
 	}
 
@@ -673,4 +879,40 @@ func constantTimeEqualHash(plaintext string, want []byte) bool {
 	}
 	sum := sha256.Sum256([]byte(plaintext))
 	return subtle.ConstantTimeCompare(sum[:], want) == 1
+}
+
+// addressFromClaims reads the email address and ITS verification claim.
+//
+// The pair travels together on purpose. `email_verified` is defined as a
+// statement about `email`; a deployment that maps the address to `upn` needs
+// `upn_verified` to say anything about `upn`, and in its absence the honest
+// answer is "not verified" rather than "look at a different claim".
+func (s *Server) addressFromClaims(idToken *oidc.IDToken, claim string) (string, *bool, error) {
+	if claim == "" || claim == "email" {
+		var c struct {
+			Email         string `json:"email"`
+			EmailVerified *bool  `json:"email_verified"`
+		}
+		if err := idToken.Claims(&c); err != nil {
+			return "", nil, fmt.Errorf("api: id token claims could not be read: %w", err)
+		}
+		return c.Email, c.EmailVerified, nil
+	}
+
+	var raw map[string]any
+	if err := idToken.Claims(&raw); err != nil {
+		return "", nil, fmt.Errorf("api: id token claims could not be read: %w", err)
+	}
+	v, ok := raw[claim].(string)
+	if !ok || v == "" {
+		// REFUSED rather than falling back to `email`. The fallback was the
+		// defect: an operator configures a non-default claim because they do not
+		// trust the default, and silently using it anyway inverts that decision.
+		return "", nil, fmt.Errorf("api: id token carries no %q claim", claim)
+	}
+	var verified *bool
+	if b, ok := raw[claim+"_verified"].(bool); ok {
+		verified = &b
+	}
+	return v, verified, nil
 }

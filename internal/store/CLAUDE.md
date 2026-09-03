@@ -21,12 +21,14 @@ Rules:
   finding status, not by time.
 - Large evidence goes to the object store; the row holds a summary and a pointer (ADR-015).
 
-Nine tables in the schema are not drawn in the v2 ERD. They are required, and ADR-029 records
-why, so they do not read as inventions when you diff schema against diagram: `result_submissions`
-(ADR-026's idempotency ledger — `observations.submission_id` has no FK target without it),
-`asset_resolution_queue` (ADR-007's unresolved merge queue), `enrollment_tokens` and
-`scan_point_certificates` (ADR-018), `kill_switches` and `kill_acks` (ADR-024), `cancel_acks`
-(ADR-024's per-scan half, migration 0025), and the join tables
+Thirteen tables in the schema are not drawn in the v2 ERD. They are required, and ADR-029
+records why, so they do not read as inventions when you diff schema against diagram:
+`result_submissions` (ADR-026's idempotency ledger — `observations.submission_id` has no FK
+target without it), `asset_resolution_queue` (ADR-007's unresolved merge queue),
+`enrollment_tokens` and `scan_point_certificates` (ADR-018), `kill_switches` and `kill_acks`
+(ADR-024), `cancel_acks` (ADR-024's per-scan half, migration 0025), `tenant_auth_config`,
+`user_credentials` and `sessions` (the operator API's authentication surface, migration 0026),
+`oidc_auth_requests` (ADR-046's pre-auth state, migration 0027), and the join tables
 `scan_policy_credential_profiles` and `advisory_vuln_map`.
 
 That list is ADR-029's to hold, not this file's — a tenth table belongs in the ADR, and this

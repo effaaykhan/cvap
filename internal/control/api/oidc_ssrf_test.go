@@ -1,6 +1,10 @@
 package api
 
 import (
+	"bytes"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -54,22 +58,92 @@ func TestPrivateAddressesAreRefusedByDefaultAndPermittedDeliberately(t *testing.
 	}
 }
 
-// TestTheGuardIsAnAllowlistNotABlocklist.
+// TestTheAddressesAnAuditWalkedPastAreRefused.
 //
-// Every range below is one a blocklist typically forgets, and each is refused
-// because the structure is "permit public unicast, refuse the rest" rather than
-// a list of bad prefixes.
-func TestTheGuardIsAnAllowlistNotABlocklist(t *testing.T) {
+// ============================================================================
+// Every one of these was PERMITTED by the first version of the guard.
+// ============================================================================
+//
+// The test that stood here before was worthless in a specific and instructive
+// way: it listed six ranges that the guard's switch explicitly named, asserted
+// they were refused, and reported that as evidence of an allowlist. It tested
+// the blocklist's entries. An ADR-compliance pass ran the real function against
+// the ranges the switch did NOT name and got every one of these back permitted.
+func TestTheAddressesAnAuditWalkedPastAreRefused(t *testing.T) {
 	for _, tc := range []struct{ addr, why string }{
-		{"100.64.0.1:443", "RFC 6598 carrier-grade NAT, where cloud infrastructure often sits"},
-		{"0.0.0.0:443", "the unspecified address"},
-		{"[::]:443", "the IPv6 unspecified address"},
-		{"224.0.0.1:443", "multicast"},
-		{"[ff02::1]:443", "IPv6 multicast"},
-		{"[2001:0:1:2:3:4:5:6]:443", "Teredo, which carries an embedded v4 address"},
+		{"[2002:a00:1::1]:443", "6to4 carrying 10.0.0.1"},
+		{"[64:ff9b::a00:1]:443", "NAT64 carrying 10.0.0.1 — an ordinary IPv6-only subnet feature"},
+		{"[::a9fe:a9fe]:443", "the metadata address in v4-compatible form"},
+		{"[2001:0:1:2:3:4:a9fe:a9fe]:443", "Teredo, whose embedded v4 is bitwise-inverted"},
+		{"[fe80::5efe:a00:1]:443", "ISATAP carrying 10.0.0.1"},
+		{"240.0.0.1:443", "class E, reserved"},
+		{"0.1.2.3:443", "0.0.0.0/8, this-network space"},
+		{"[fec0::1]:443", "site-local, deprecated but still routed on some networks"},
+		{"[fc00::1]:443", "unique-local, the IPv6 RFC 1918"},
+		{"192.0.0.1:443", "IETF protocol assignments"},
+		{"198.18.0.1:443", "benchmarking space"},
+		{"192.88.99.1:443", "the 6to4 relay anycast range"},
 	} {
-		if err := refuseUnsafeAddress("tcp", tc.addr, true); err == nil {
-			t.Errorf("%s was permitted even with allowPrivate; it is %s", tc.addr, tc.why)
+		if err := refuseUnsafeAddress("tcp", tc.addr, false); err == nil {
+			t.Errorf("%s was permitted; it is %s", tc.addr, tc.why)
+		}
+	}
+}
+
+// TestATranslatedPrivateAddressIsRefusedTheWayAPlainOneIs.
+//
+// ADR-039's rule, applied to a refusal list. A guard that refuses 10.0.0.5 and
+// permits 64:ff9b::a00:5 does not refuse 10.0.0.5 — it refuses one spelling of
+// it, which is exactly the finding that ADR was written about, arrived at from
+// the other side of the codebase.
+func TestATranslatedPrivateAddressIsRefusedTheWayAPlainOneIs(t *testing.T) {
+	// Every spelling of 10.0.0.5 that one of the five mechanisms can produce.
+	spellings := []string{
+		"10.0.0.5:443",
+		"[::ffff:10.0.0.5]:443",      // v4-mapped: a notation, not a translation
+		"[64:ff9b::a00:5]:443",       // NAT64
+		"[2002:a00:5::1]:443",        // 6to4
+		"[::10.0.0.5]:443",           // v4-compatible
+		"[2001:db8::5efe:a00:5]:443", // ISATAP inside documentation space
+
+		// ============================================================================
+		// The one the 2000::/3 allowlist does NOT catch.
+		// ============================================================================
+		//
+		// A GLOBAL prefix — allocated, routable, not special-purpose — carrying an
+		// ISATAP interface identifier, whose low 32 bits are 10.0.0.5. The
+		// allowlist permits the wrapper because the wrapper is a perfectly
+		// ordinary public address; only extraction sees what is inside it.
+		//
+		// Sabotaging the TranslatedV4s call makes this line, and only this line,
+		// fail — which is what says the extraction is load-bearing rather than
+		// belt-and-braces. The first version of this test had no such case, so
+		// removing the extraction entirely left it green.
+		"[2a00:1450::5efe:a00:5]:443",
+	}
+	for _, addr := range spellings {
+		if err := refuseUnsafeAddress("tcp", addr, false); err == nil {
+			t.Errorf("%s was permitted with AllowPrivateIssuers off; it reaches 10.0.0.5", addr)
+		}
+	}
+}
+
+// TestTheIPv6SideIsAnAllowlist.
+//
+// One condition does the work: outside 2000::/3 is refused without anybody
+// having had to think of the range. That is the property the old structure
+// claimed and did not have, and it is why these pass without an entry each.
+func TestTheIPv6SideIsAnAllowlist(t *testing.T) {
+	for _, addr := range []string{
+		"[100::1]:443",    // discard-only, RFC 6666
+		"[4000::1]:443",   // unallocated
+		"[8000::1]:443",   // unallocated
+		"[fd00::1]:443",   // unique-local
+		"[ff05::1:3]:443", // site-local multicast
+		"[::2]:443",       // inside ::/128 neighbourhood, unallocated
+	} {
+		if err := refuseUnsafeAddress("tcp", addr, false); err == nil {
+			t.Errorf("%s was permitted; only 2000::/3 is globally-routable IPv6 unicast", addr)
 		}
 	}
 }
@@ -119,3 +193,108 @@ func TestTheRefusalNamesTheAddress(t *testing.T) {
 		t.Errorf("the refusal does not name the address: %v", err)
 	}
 }
+
+// TestEveryIdentityProviderResponseBodyIsBounded.
+//
+// ============================================================================
+// One unauthenticated GET took Core's heap to 2.2 GiB.
+// ============================================================================
+//
+// exchangeCode reads its own body through an io.LimitReader, which covers the
+// one fetch this package makes itself. The other two — discovery and the JWKS
+// refresh — happen inside go-oidc, which uses io.ReadAll, and an *http.Client
+// has no setting that bounds a body. A security review measured a 256 MiB
+// discovery document from an issuer taking TotalAlloc to 2202 MiB from a single
+// anonymous GET of /v1/auth/oidc/start, and returning 200.
+//
+// The issuer is tenant-administrator configuration, so that is one customer's
+// row OOM-killing the process that runs dispatch, ingest and lease renewal for
+// every other tenant.
+//
+// The bound is asserted on the TRANSPORT rather than through a handler, because
+// that is where it has to live: below every caller, including ones inside a
+// dependency and ones added later.
+func TestEveryIdentityProviderResponseBodyIsBounded(t *testing.T) {
+	const oversized = MaxIDPResponseBytes * 4
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Streamed rather than allocated, so the test does not itself hold what
+		// it is checking Core will not.
+		chunk := bytes.Repeat([]byte("A"), 64<<10)
+		for written := 0; written < oversized; written += len(chunk) {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	// The real client, with the private-address allowance a loopback test server
+	// needs — the same setting an on-prem deployment uses.
+	client := newOIDCClient(true, nil)
+	resp, err := client.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	n, err := io.Copy(io.Discard, resp.Body)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if n > MaxIDPResponseBytes {
+		t.Errorf("read %d bytes from an identity provider, cap is %d. An unbounded body here is "+
+			"an out-of-memory kill of the whole Core process, reachable by one unauthenticated "+
+			"GET against a tenant-configured issuer.", n, MaxIDPResponseBytes)
+	}
+	if n != MaxIDPResponseBytes {
+		t.Errorf("read %d bytes, expected the body to be truncated at exactly %d",
+			n, MaxIDPResponseBytes)
+	}
+}
+
+// TestTheBoundedTransportStillClosesTheUnderlyingBody.
+//
+// The cap replaces what can be READ and keeps the original as the Closer. Get
+// that wrong and every fetch leaks a connection, which is a slower version of
+// the same outage.
+func TestTheBoundedTransportStillClosesTheUnderlyingBody(t *testing.T) {
+	var closed bool
+	inner := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Body: &closeRecorder{
+				Reader:  bytes.NewReader([]byte("hello")),
+				onClose: func() { closed = true },
+			},
+		}, nil
+	})
+
+	b := &boundedBody{max: 1 << 20, inner: inner}
+	resp, err := b.RoundTrip(&http.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !closed {
+		t.Error("closing the capped body did not close the underlying one; every fetch through " +
+			"this client would leak its connection")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type closeRecorder struct {
+	io.Reader
+	onClose func()
+}
+
+func (c *closeRecorder) Close() error { c.onClose(); return nil }

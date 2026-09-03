@@ -317,11 +317,12 @@ BEGIN
     -- state in every database loaded with them, and the hashes here are of
     -- strings written in this file.
     INSERT INTO oidc_auth_requests
-        (tenant_id, state_hash, nonce_hash, code_verifier, redirect_uri,
+        (tenant_id, state_hash, nonce_hash, browser_hash, code_verifier, redirect_uri,
          created_at, expires_at)
         VALUES (p_tenant,
                 sha256(('fixture-state-' || p_tag)::bytea),
                 sha256(('fixture-nonce-' || p_tag)::bytea),
+                sha256(('fixture-browser-' || p_tag)::bytea),
                 'fixture-verifier-' || p_tag,
                 'https://fixture-' || p_tag || '.invalid/v1/auth/oidc/callback',
                 now() - interval '1 hour', now() - interval '55 minutes');

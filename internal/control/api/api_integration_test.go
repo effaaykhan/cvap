@@ -1136,3 +1136,28 @@ func TestALockedAccountIsA401AndNotA500(t *testing.T) {
 			"condition as a 500 tells an operator their deployment is broken.", w.Code)
 	}
 }
+
+// TestALocalLoginIsAuditedAsLocal, the other half of the pair.
+func TestALocalLoginIsAuditedAsLocal(t *testing.T) {
+	f := newFixture(t, `{}`)
+	f.login(t)
+
+	var method string
+	var n int
+	if err := f.db.Read(context.Background(), f.tenant, func(ctx context.Context, c *store.Conn) error {
+		if err := c.QueryRow(ctx,
+			`SELECT count(*) FROM audit_events WHERE tenant_id = $1 AND action = 'auth.session_issued'`,
+			f.tenant.UUID()).Scan(&n); err != nil {
+			return err
+		}
+		return c.QueryRow(ctx,
+			`SELECT detail->>'method' FROM audit_events
+			  WHERE tenant_id = $1 AND action = 'auth.session_issued'`,
+			f.tenant.UUID()).Scan(&method)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || method != "local" {
+		t.Errorf("a local login wrote %d events with method=%q; want 1 and \"local\"", n, method)
+	}
+}

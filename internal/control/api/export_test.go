@@ -29,3 +29,13 @@ func PKCEChallengeForTest(verifier string) string {
 	sum := sha256.Sum256([]byte(verifier))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
+
+// OIDCBindingCookieNameForTest exposes the binding cookie's name so a test can
+// find it among the Set-Cookie headers. The name differs between secure and
+// insecure deployments because __Host- requires Secure.
+func OIDCBindingCookieNameForTest(insecure bool) string {
+	if insecure {
+		return oidcBindingCookieInsecure
+	}
+	return oidcBindingCookieSecure
+}

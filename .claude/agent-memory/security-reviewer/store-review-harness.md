@@ -1,6 +1,6 @@
 ---
 name: store-review-harness
-description: How to actually test internal/store and the RLS schema against the running dev database, including the non-obvious environment quirks
+description: How to actually test internal/store, internal/control/api and the RLS schema against the running dev database, including the non-obvious environment quirks
 metadata:
   type: reference
 ---
@@ -56,5 +56,29 @@ leak PoC must launder the argument through an `any`-typed helper. Hand-seeding t
 `psql` needs `deployment_mode = 'onprem'` (not `on_prem`) and `scan_zones.trust_level` is
 NOT NULL with no default. Forced interleavings are best written as one `db.Write` callback
 that parks on a channel while a second goroutine drives the real service.
+
+**`internal/control/api` probes.** Scratch files go in `internal/control/api/` as
+`package api_test` (reaches `newFixture`, `newOIDCFixture`, `newFakeIDP`, `fixture.do`) or
+`package api` (reaches `isSafeReturnPath`, `refuseUnsafeAddress`, `newOIDCClient`). Same
+`CVAP_TEST_DATABASE_URL="$APP_DATABASE_URL"`. `newFixture` seeds a tenant with a random
+`.test` domain and drives requests by setting `r.Host`, so multi-tenant probes are just two
+fixtures. `newFakeIDP` serves discovery/JWKS/token over TLS and hands the server cert to
+`api.Config.OIDCRootCAs`; to change what the DISCOVERY document says (jwks_uri scheme, a
+huge body) you have to build your own mux rather than extend it — `newFakeIDP`'s handlers
+are closures over fixed values.
+
+Two gotchas that cost time here:
+- Go runs tests in a package **in parallel by default within one binary is false, but
+  separate packages are parallel** — the real bite was that a probe allocating ~2 GB makes
+  UNRELATED tests in the same run fail with 500s that look like real findings. Run
+  memory-heavy probes with `-run '^TestOne$'` on their own before believing a result.
+- **Other agents rewrite the files you are reviewing, mid-review.** A concurrent
+  ADR-compliance pass rewrote `oidc_client.go`, `oidc.go` and `internal/store/oidc.go` and
+  added migration 0028 while this review was running, and the dev DB was migrated under the
+  reviewed commit. When that happens, `git worktree add --detach <dir> <commit>` gives a
+  clean tree at the commit under review — but the DEV DATABASE is shared and moves with the
+  working tree, so a worktree at an older commit may fail against a newer schema. Check
+  `git status` and re-verify each finding against the CURRENT tree before reporting it as
+  open; some may already be fixed.
 
 See [[recurring-findings]] for what these probes have turned up.

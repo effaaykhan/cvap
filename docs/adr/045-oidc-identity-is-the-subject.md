@@ -1,6 +1,6 @@
 # ADR-045: OIDC identity is the subject, the client is public, and the issuer is a network the deployment chooses to trust
 
-**Status:** Accepted
+**Status:** Superseded by ADR-046
 **Date:** 2026-09-03
 
 ## Context

@@ -285,8 +285,21 @@ def main() -> int:
         if kind == "proto":
             lines.append("            proto/ is additive-only within a major version (ADR-022).")
         else:
-            lines.append("            Accepted ADRs are superseded, never edited (ADR-029 aside,")
-            lines.append("            which is an enumeration its own text says to append to).")
+            lines.append("            Accepted ADRs are superseded, never edited.")
+            if _adr_number(path) == "029":
+                # ADR-029 is an enumeration its own text says to append to, so
+                # an append here is expected rather than a violation. There is
+                # deliberately no code exemption: this hook cannot tell an
+                # append from a rewrite, and a message that described an
+                # exemption the code did not implement is the exact defect
+                # class this repository polices — it read as a carve-out that
+                # would let any edit to that file through unexamined.
+                lines.append("            ADR-029 is the exception its own text describes: it is an")
+                lines.append("            enumeration of tables the ERD lacks, and it says a further")
+                lines.append("            one belongs in it rather than in a new ADR. This hook does")
+                lines.append("            NOT exempt it -- it cannot tell an append from a rewrite --")
+                lines.append("            so an append is reported like any other change and cleared")
+                lines.append("            by committing it. Check the diff is an append.")
             if os.environ.get(SUPERSEDE_VAR, "").strip():
                 lines.append("            " + SUPERSEDE_VAR + " is set, and this change is NOT a")
                 lines.append("            status-only edit to the ADR it names. The hatch permits")

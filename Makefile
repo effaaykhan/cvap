@@ -65,7 +65,7 @@ build: ## Build all binaries
 # compiler and always runs with -race; a local run without it is a weaker claim
 # and has to say so.
 test: ## Run tests with the race detector, or say loudly that it could not
-	@if [ "$$CGO_ENABLED" != "0" ] && command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1; then \
+	@if [ "$$CGO_ENABLED" != "0" ] && { command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1; }; then \
 		echo "go test ./... -race"; \
 		CGO_ENABLED=1 go test ./... -race; \
 	else \

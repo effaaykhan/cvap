@@ -111,6 +111,26 @@ func (s *Sweeper) Sweep(ctx context.Context) {
 		// push a pass; if that stops being enough, the fix is a separate ticker
 		// with the ordering thought through, not a bigger limit.
 		PlanPending(ctx, s.db, s.log, tenant, PlanBatchLimit)
+
+		// Abandoned OIDC login attempts, in their OWN transaction.
+		//
+		// It was inside the lease pass, three paragraphs below a comment
+		// explaining that job state and its escalation "commit together or not
+		// at all" — so a lock wait or deadlock on oidc_auth_requests aborted the
+		// whole tenant's sweep and lease expiry stopped behind one Error line.
+		// A security review found it, and found in the same pass that an
+		// unauthenticated caller can grow that table, which is what turns a
+		// theoretical coupling into a reachable one.
+		//
+		// Housekeeping genuinely is housekeeping — Consume already refuses an
+		// expired row — so its failure must not be able to stop a control.
+		if err := s.db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+			_, err := (store.OIDCAuthRequests{}).PurgeExpiredAuthRequests(ctx, c, s.BatchLimit)
+			return err
+		}); err != nil {
+			s.log.ErrorContext(ctx, "sweep: purge expired oidc auth requests",
+				"tenant_id", tenant.String(), "error", err)
+		}
 	}
 }
 
@@ -129,14 +149,6 @@ func (s *Sweeper) sweepTenant(ctx context.Context, tenant store.TenantID) {
 		}
 
 		if offline, err = (store.ScanPoints{}).MarkStaleOffline(ctx, c, s.now().Add(-HeartbeatTimeout)); err != nil {
-			return err
-		}
-
-		// Abandoned OIDC login attempts. Housekeeping, not a control: Consume
-		// already refuses an expired row, so what this removes is rows nothing
-		// would honour anyway. Somebody clicking sign in and closing the tab is
-		// the normal case, and without this the table only grows.
-		if _, err := (store.OIDCAuthRequests{}).PurgeExpiredAuthRequests(ctx, c, s.BatchLimit); err != nil {
 			return err
 		}
 

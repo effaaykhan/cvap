@@ -42,6 +42,17 @@ type fakeIDP struct {
 	omitIDToken      bool
 	tokenStatus      int
 
+	// plainJWKS serves jwks_uri over http rather than https, which is the one
+	// discovery endpoint the first version of the scheme check omitted.
+	plainJWKS *httptest.Server
+
+	// extraClaims are merged into the ID token, so a test can assert on a claim
+	// the standard struct does not name — a mapped address claim, or azp.
+	extraClaims map[string]any
+
+	// audiences, when set, replaces the single audience with a multi-valued one.
+	audiences []string
+
 	// What the token endpoint actually received, so a test can assert PKCE and
 	// the redirect_uri travelled.
 	lastForm map[string]string
@@ -69,11 +80,15 @@ func newFakeIDP(t *testing.T) *fakeIDP {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		jwks := idp.issuer + "/jwks"
+		if idp.plainJWKS != nil {
+			jwks = idp.plainJWKS.URL + "/jwks"
+		}
 		writeJSONTest(w, map[string]any{
 			"issuer":                                idp.issuer,
 			"authorization_endpoint":                idp.issuer + "/authorize",
 			"token_endpoint":                        idp.issuer + "/token",
-			"jwks_uri":                              idp.issuer + "/jwks",
+			"jwks_uri":                              jwks,
 			"response_types_supported":              []string{"code"},
 			"subject_types_supported":               []string{"public"},
 			"id_token_signing_alg_values_supported": []string{"RS256"},
@@ -133,12 +148,18 @@ func (f *fakeIDP) mintIDToken() string {
 		"exp": f.expiry.Unix(),
 		"iat": time.Now().Add(-time.Minute).Unix(),
 	}
+	if f.audiences != nil {
+		claims["aud"] = f.audiences
+	}
 	if f.nonce != "" {
 		claims["nonce"] = f.nonce
 	}
 	if f.email != "" {
 		claims["email"] = f.email
 		claims["email_verified"] = f.verified
+	}
+	for k, v := range f.extraClaims {
+		claims[k] = v
 	}
 
 	h, _ := json.Marshal(header)
@@ -173,4 +194,17 @@ func randomHex(t *testing.T, n int) string {
 		t.Fatal(err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// servePlainJWKS points the discovery document's jwks_uri at a cleartext
+// server. The signing keys are the root of every signature check, so fetching
+// them over http lets an on-path attacker substitute the key set.
+func (f *fakeIDP) servePlainJWKS() {
+	f.t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/jwks", func(w http.ResponseWriter, r *http.Request) {
+		writeJSONTest(w, map[string]any{"keys": []any{}})
+	})
+	f.plainJWKS = httptest.NewServer(mux)
+	f.t.Cleanup(f.plainJWKS.Close)
 }

@@ -152,6 +152,11 @@ CREATE POLICY oidc_auth_requests_tenant_isolation ON oidc_auth_requests
 -- began a login, not that anybody signed in. The session it produces is the
 -- durable record, and sessions.revoked_at is where the audit trail lives.
 GRANT SELECT, INSERT, DELETE ON oidc_auth_requests TO cvap_app;
-GRANT UPDATE (oidc_subject) ON users TO cvap_app;
+
+-- No GRANT on users here. 0001 already grants table-wide UPDATE, so a
+-- column-list grant would be a no-op that READS like a narrowing control and is
+-- not one — the linking constraint is the conditional UPDATE in
+-- Users.LinkSubject, and pretending otherwise would put a second, false claim
+-- next to the real one.
 
 COMMIT;

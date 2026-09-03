@@ -33,8 +33,13 @@ the constraint before the reasoning:
 Email is stored **as entered** and compared lowercased. Do not normalise on write — it
 loses what the user typed, and that shows up in outbound mail.
 
-**Login resolves tenant first**, by subdomain, SSO issuer, or explicit selection, then the
-user within it. There is no lookup path from a bare email address to an account.
+**Login resolves tenant first**, then the user within it. There is no lookup path from a bare
+email address to an account.
+
+It resolves it from the **request host**, and from nothing else (ADR-041). This sentence used
+to offer "subdomain, SSO issuer, or explicit selection" as three options; two of them do not
+exist, and the SSO issuer one is forbidden by ADR-046 — the callback must be unable to name its
+own tenant, which is precisely what choosing a tenant by issuer would be.
 
 The consequence, which is real and must be designed for rather than worked around: tenant
 discovery is its own problem. A user at two tenants who types only an email cannot be
@@ -77,7 +82,7 @@ a comment at runtime.
   deployment operator's SSO policy.
 - **Login has one refusal for every failure.** Wrong password, unknown address, an address
   belonging to another tenant, a suspended tenant, the flag being off: one status, one body.
-- **Single sign-on (ADR-045).** Authorization code with PKCE, no client secret anywhere.
+- **Single sign-on (ADR-046, superseding ADR-045).** Authorization code with PKCE, no client secret anywhere.
   A returning user is identified by `users.oidc_subject`, never by email — email links an
   invited account to a subject ONCE, only with `email_verified`, and only while
   `oidc_subject IS NULL`. Both halves of the flow run behind `resolveTenant`, so the callback

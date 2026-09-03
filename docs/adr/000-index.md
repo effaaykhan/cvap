@@ -53,4 +53,5 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 042 | Targets are canonicalised once at planning, and re-canonicalised at the scan point | Superseded by ADR-044 |
 | 043 | The route registry is the API contract, and the OpenAPI document is emitted from it | Accepted |
 | 044 | Target canonicalisation, restated with three claims corrected (supersedes 042) | Accepted |
-| 045 | OIDC identity is the subject, the client is public, and the issuer is a network the deployment trusts | Accepted |
+| 045 | OIDC identity is the subject, the client is public, and the issuer is a network the deployment trusts | Superseded by ADR-046 |
+| 046 | OIDC, restated with the SSRF guard made true and two claims corrected (supersedes 045) | Accepted |

@@ -14,9 +14,9 @@ the migration rather than a gap in the diagram.
 
 ## Decision
 
-Nine tables exist in the schema that the ERD does not draw. Each is listed here with the
+Thirteen tables exist in the schema that the ERD does not draw. Each is listed here with the
 decision that requires it, so a future reader diffing schema against diagram finds the
-reason rather than a discrepancy. Seven are required by ADRs accepted after the diagram;
+reason rather than a discrepancy. Eleven are required by ADRs accepted after the diagram;
 two are join tables the diagram implies but cannot name.
 
 - **`result_submissions`** — ADR-026's idempotency ledger. Ingest deduplicates on
@@ -66,6 +66,25 @@ two are join tables the diagram implies but cannot name.
   advisory commonly fixes several CVEs while one CVE is commonly addressed by an advisory
   per distro release.
 
+- **`tenant_auth_config`**, **`user_credentials`** and **`sessions`** — the operator API's
+  authentication surface, added in migration 0026. The ERD draws `USER` with an
+  `auth_provider` column and stops there: it has no way to say which identity provider a
+  tenant federates with, where a local password verifier lives, or what a signed-in session
+  is. All three are consequences of decisions the diagram predates. `tenant_auth_config`
+  carries ADR-041's per-tenant method and, deliberately, no client secret. `user_credentials`
+  holds argon2id verifiers and the lockout counter, and exists only because on-prem needs a
+  login path when there is no identity provider to delegate to. `sessions` is where the
+  twelve-hour absolute cap is enforced as a CHECK rather than as application policy, and its
+  rows survive logout because who was signed in from where is audit material.
+
+- **`oidc_auth_requests`** — ADR-045's pre-authentication state, added in migration 0027. The
+  authorization code flow has a gap between the redirect out to the identity provider and the
+  callback back, and the values that bind those two halves together — the state and nonce
+  hashes, the PKCE verifier, the `redirect_uri` that must match at exchange — have to survive
+  it somewhere. The ERD has no concept of a login in flight. Single-use is a `DELETE ...
+  RETURNING` against this table, which is also what makes a replayed state fail rather than
+  succeed twice.
+
 `quarantine_reason` lives on `result_submissions`, written once per submission. Observations
 carry `ingest_state` — what the finding pipeline filters on — but not the reason, which would
 otherwise be duplicated across every row of a chunk stream on the largest table in the system.
@@ -105,13 +124,23 @@ migration depends on cannot be added by a later one without rewriting the earlie
 
 The schema satisfies ADR-007 and ADR-026 rather than only the ERD, and the divergence is
 documented where the next person to compare them will look. The cost is a diagram that is now
-incomplete in nine named places, which is a maintenance obligation: a tenth table that the
-ERD lacks belongs in this ADR, not in a further one. That obligation has now been exercised
-five times — `advisory_vuln_map` while writing migration 0010, both enrolment tables while
-building the Enrollment service, both kill tables while building Dispatch, and `cancel_acks`
-while making per-scan cancellation measurable — which is evidence the annotation approach is
-holding rather than that it is failing. The signal to redraw is when a reader can no longer hold the
-divergences in mind, not the count itself. Anyone regenerating the schema from the
+incomplete in thirteen named places, which is a maintenance obligation: a further table that
+the ERD lacks belongs in this ADR, not in a new one. That obligation has now been exercised
+seven times — `advisory_vuln_map` while writing migration 0010, both enrolment tables while
+building the Enrollment service, both kill tables while building Dispatch, `cancel_acks` while
+making per-scan cancellation measurable, and the four authentication tables while building the
+operator API and single sign-on.
+
+**The seventh exercise was late, and that is the first evidence against the approach rather
+than for it.** Migration 0026 added three undrawn tables and did not append; migration 0027
+added a fourth and its own table comment said "see ADR-029" while ADR-029 still said nine. An
+ADR-compliance pass found it. `internal/store/CLAUDE.md` carries a warning about exactly this
+failure — it said "four" for two sessions after this ADR said eight — and it had gone stale
+again in the same way.
+
+The signal to redraw is when a reader can no longer hold the divergences in mind, not the count
+itself. Thirteen is close to that line, and a fourteenth arriving unrecorded is the trigger
+below rather than an eighth exercise. Anyone regenerating the schema from the
 diagram alone will still produce the wrong thing, so execution-plan §4.3's "generate
 migrations directly from the v2 ERD" is now qualified by this record.
 

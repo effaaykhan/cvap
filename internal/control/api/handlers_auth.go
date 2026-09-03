@@ -265,7 +265,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var err error
-		token, csrfTok, resp, err = s.issueSession(ctx, c, r, user, cred.MustChange)
+		token, csrfTok, resp, err = s.issueSession(ctx, c, r, user, cred.MustChange, "local", nil)
 		return err
 	})
 	if err != nil {
@@ -319,9 +319,19 @@ func (s *Server) verifyUnderLimit(ctx context.Context, phc, password string) (ma
 	return ok, rehash
 }
 
-// issueSession mints the tokens and writes the row. Shared by local login and,
-// when it lands, the OIDC callback.
-func (s *Server) issueSession(ctx context.Context, c *store.Conn, r *http.Request, user *store.User, mustChange bool) (string, string, LoginResponse, error) {
+// issueSession mints the tokens and writes the row. Shared by local login and
+// the OIDC callback.
+//
+// method is REQUIRED and travels into the audit event, which is the fix for a
+// defect an ADR-compliance pass found: this function used to hardcode
+// {"method": "local"}, so every single-sign-on login wrote a durable audit row
+// claiming a local password login had succeeded — on a SaaS tenant, where all
+// three conditions for local auth are unsatisfiable. The OIDC callback wrote its
+// own correct event as well, so each login produced two rows, one of them false,
+// and an operator querying the audit log for local-auth use got a false positive
+// on every SSO session. That is the invariant migration 0026's three-condition
+// gate exists to make auditable, and it had stopped being auditable.
+func (s *Server) issueSession(ctx context.Context, c *store.Conn, r *http.Request, user *store.User, mustChange bool, method string, detail map[string]any) (string, string, LoginResponse, error) {
 	token, tokenHash, err := newToken()
 	if err != nil {
 		return "", "", LoginResponse{}, err
@@ -337,11 +347,22 @@ func (s *Server) issueSession(ctx context.Context, c *store.Conn, r *http.Reques
 		return "", "", LoginResponse{}, err
 	}
 
+	if method == "" {
+		// A caller that forgot would otherwise write an event whose method claim
+		// is empty, which reads as "unknown" and is exactly the ambiguity the
+		// hardcoded value produced.
+		return "", "", LoginResponse{}, errors.New("api: issueSession requires an authentication method")
+	}
+	if detail == nil {
+		detail = map[string]any{}
+	}
+	detail["method"] = method
+
 	id := user.ID
 	if err := (store.AuditEvents{}).Record(ctx, c, store.AuditEvent{
 		ActorID: &id, ActorType: store.ActorUser,
 		Action: "auth.session_issued", ResourceType: "user", ResourceID: &id,
-		Detail: map[string]any{"method": "local"},
+		Detail: detail,
 	}); err != nil {
 		return "", "", LoginResponse{}, err
 	}
