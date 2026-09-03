@@ -180,6 +180,77 @@ Resolution is **not** redemption. `ResolveEnrollmentTokenTenant` says which tena
 transaction as; single-use is enforced inside it by `EnrollmentTokens.Redeem`, a conditional
 UPDATE whose atomicity comes from the database re-evaluating its predicate after a lock wait.
 
+## A refusal must not roll back its own record
+
+**If a closure passed to `Write` records that a refusal happened, it must not then return an
+error.** The error aborts the transaction, and the record goes with it.
+
+This has now been found three times, twice in shipped code, and every time it read as correct in
+review — the control is right there in the function:
+
+```go
+err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+    if !ok {
+        RecordFailure(ctx, c, userID)   // the control
+        return errRefused               // ← throws it away
+    }
+    ...
+})
+```
+
+**The shape to write instead**: return `nil`, and carry the refusal out in a captured variable.
+Only a genuine FAULT — a database error, a broken constraint — returns an error, because only a
+fault wants the transaction undone.
+
+```go
+var denied error
+err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+    if !ok {
+        denied = errRefused
+        return RecordFailure(ctx, c, userID)   // its own error still aborts, correctly
+    }
+    ...
+})
+if err != nil { /* fault */ }
+if denied != nil { /* refusal, and it was recorded */ }
+```
+
+### The three instances
+
+1. **The local-auth lockout counter** (`internal/control/api/handlers_auth.go`). `RecordFailure`
+   followed by `return errWrongPassword`. `failed_attempts` was still 0 after fifteen wrong
+   passwords: the lockout existed in the schema, in this package and in the handler, and engaged
+   never. Found by a security-review probe, not by review — every test checked the response, and
+   the response is identical either way.
+2. **The OIDC browser-binding check** (`internal/control/api/oidc.go`). The binding is compared
+   inside the transaction that consumed the single-use state with `DELETE ... RETURNING`;
+   returning an error on mismatch un-deleted it, so a wrong binding left the state redeemable and
+   a second callback with the right cookie succeeded. Found by its own regression test, written
+   because instance 1 had happened.
+3. **Ingest's ledger conflict** (`internal/dispatch/ingest.go`) is the same hazard arriving from
+   the other direction, and it is here because the answer is different. A unique violation aborts
+   the transaction *whatever the code does* — there is no "return nil" available. So the work
+   moves: `errConflictResume` travels out as a sentinel and `resume` asks the question again in a
+   **fresh** transaction. When the abort is unavoidable, the record cannot be written in that
+   transaction at all, and pretending otherwise is instance 1 with extra steps.
+
+### Why there is no checker for this
+
+Attempted, measured, rejected. An AST pass over the tree flagging "a recording call inside a
+`Write` closure with a non-nil return after it" produced **9 findings and 0 true positives**, on a
+tree where all three instances were already fixed. Excluding each recording call's own
+`if err != nil { return err }` guard took it from 17 to 9; the rest are returns in sibling
+branches, which need path sensitivity rather than lexical position.
+
+Path sensitivity would not fix it either, because the discriminating fact is **not syntactic**:
+`return err` where `err` is a database fault is correct and must roll back, and
+`return errWrongPassword` is a refusal and must not. A checker cannot tell those apart, and one
+that guessed would fire on every correct handler in the package. Documented with three worked
+examples in preference to a checker that produces noise — a gate that fires on correct code is
+one people learn to skip, which is the same failure as a gate that silently passes.
+
+`security-reviewer` is prompted to look for this shape by hand.
+
 ## Errors carry schema detail — do not pass them to a caller
 
 `mapError` embeds `pgErr.ConstraintName`, `pgErr.ColumnName` and `pgErr.Message`. That is

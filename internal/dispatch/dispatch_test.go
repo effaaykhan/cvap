@@ -804,3 +804,118 @@ func TestOutOfScopeTaskIsRefusedRatherThanDispatched(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestANonCanonicalTaskTargetRefusesTheJob(t *testing.T) {
+	db := testDB(t)
+	tenant, leaf, spID := enrolledScanPoint(t, db)
+	jobID := seedQueuedJob(t, db, tenant, true)
+
+	// ============================================================================
+	// The Core half of ADR-044's re-computation, which nothing tested.
+	// ============================================================================
+	//
+	// 192.0.2.5:443 is INSIDE the seed policy's 192.0.2.0/24 — the matcher would
+	// permit the host it names. What refuses it is that it is not the canonical
+	// form of itself, which is what a row written by something that skipped
+	// planning looks like. scan_tasks.task_target is free text with no
+	// constraint tying it to its scan_targets row, so that is reachable rather
+	// than hypothetical.
+	//
+	// `make mutate` found the gap: the shared-table driver canonicalises the raw
+	// target first, simulating planning, so by the time it reaches offerWork's
+	// expression the value is already canonical and Matches cannot disagree with
+	// Canonicalise. Two mutations survived against it. The runtime had such a
+	// test; Core did not.
+	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		_, err := c.Exec(ctx,
+			`UPDATE scan_tasks SET task_target = '192.0.2.5:443'
+			  WHERE tenant_id = $1 AND job_id = $2`, c.Tenant().UUID(), jobID)
+		return err
+	}); err != nil {
+		t.Fatalf("write a non-canonical task target: %v", err)
+	}
+
+	svc := newService(t, db)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fs := newFakeStream(peerCtx(ctx, leaf))
+
+	done := make(chan error, 1)
+	go func() { done <- svc.Connect(fs) }()
+
+	fs.push(&scanpointv1.ScanPointMessage{
+		Msg: &scanpointv1.ScanPointMessage_Hello{Hello: &scanpointv1.Hello{
+			ScanPointId:     spID.String(),
+			ProtocolVersion: testVersion,
+			AgentVersion:    "0.1.0",
+			Capabilities: []*scanpointv1.Capability{
+				{Engine: "discovery", EngineVersion: "0.1.0", Enabled: true},
+			},
+		}},
+	})
+	fs.waitFor(t, "ServerHello", func(m *scanpointv1.CoreMessage) bool {
+		return m.GetServerHello() != nil
+	})
+
+	// Give the pump time to poll, refuse and not assign.
+	deadline := time.Now().Add(10 * time.Second)
+	var terminal *store.Job
+	for time.Now().Before(deadline) {
+		if err := db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+			j, err := (store.Jobs{}).GetByID(ctx, c, jobID)
+			if err != nil {
+				return err
+			}
+			if j.Status == store.JobFailed {
+				terminal = j
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if terminal != nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if terminal == nil {
+		t.Fatal("the job was never refused. Core computed an allowlist and dispatched a task " +
+			"outside it, which makes the allowlist advisory and leaves ADR-024 control 1 with " +
+			"one enforcement site instead of two")
+	}
+	if terminal.TerminationReason == nil ||
+		*terminal.TerminationReason != store.TerminationScopeViolationHalt {
+		t.Errorf("termination_reason = %v, want scope_violation_halt", terminal.TerminationReason)
+	}
+
+	fs.mu.Lock()
+	outbound := append([]*scanpointv1.CoreMessage(nil), fs.outbound...)
+	fs.mu.Unlock()
+	for _, m := range outbound {
+		if m.GetJob() != nil {
+			t.Errorf("an out-of-scope job was put on the wire: %v", m.GetJob())
+		}
+	}
+
+	// The audit event, not just the state change. An operator reads the audit
+	// log and the UI, never Core's stdout, so a scan that stopped for a scope
+	// defect would otherwise look like a scan that stalled.
+	if err := db.Read(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		events, err := (store.AuditEvents{}).ListByResource(ctx, c, "scan_job", jobID, 10)
+		if err != nil {
+			return err
+		}
+		for _, e := range events {
+			if e.Action == "job.scope_refused" {
+				return nil
+			}
+		}
+		t.Errorf("no job.scope_refused audit event; got %d events", len(events))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

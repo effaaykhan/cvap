@@ -54,6 +54,9 @@ skipped resolution is the branch ADR-017 exists to prevent.
 
 ## internal/control/api
 
+Design below; **how it is tested is in `internal/control/api/CLAUDE.md`**, and that file is not
+optional reading — a cookieless test suite made login CSRF structurally invisible here.
+
 The operator API. One package, and the shape of it is ADR-043's: **each endpoint is declared
 once as a `Route` value**, which is simultaneously what the mux dispatches on, what the
 middleware enforces, and what the OpenAPI document is emitted from. They cannot disagree

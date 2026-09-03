@@ -217,6 +217,20 @@ jobs:
           CVAP_TEST_DATABASE_URL: postgres://cvap_app_login:cvap_dev_only_app_password@localhost:5432/cvap?sslmode=disable
         run: go test ./test/e2e/... -count=1 -timeout 10m
 
+      # Mutation testing lives in THIS job, not the config one, because it now
+      # covers Go suites that need a database — and a suite that skips passes,
+      # so every mutation it would have killed survives instead. The driver
+      # refuses an empty baseline rather than reporting those as survivors, but
+      # the right answer is to give it the database.
+      #
+      # It sabotages each guard's checks one at a time and requires the suite to
+      # notice. A surviving mutation fails the build naming the check nothing
+      # exercises; it has found a real gap in every session it has run.
+      - name: Guard suites actually reach their checks
+        env:
+          APP_DATABASE_URL: postgres://cvap_app_login:cvap_dev_only_app_password@localhost:5432/cvap?sslmode=disable
+        run: make mutate
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -363,5 +377,3 @@ jobs:
       #
       # It runs the secret-logging suite too, which is the gate standing
       # between an enrollment token and a log line.
-      - name: Guard suites actually reach their checks
-        run: make mutate

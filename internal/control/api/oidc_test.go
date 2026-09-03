@@ -19,6 +19,64 @@ import (
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
+// Mutations, declared beside the tests that must kill them.
+//
+// The two rollback ones matter most: both are the shape
+// internal/store/CLAUDE.md documents, both shipped once, and neither is visible
+// in a response — every one of these mutants returns exactly what the correct
+// code returns to the caller, and is caught only because a test looks at the
+// database or drives a second request.
+//
+// mutate:subject internal/control/api/oidc.go
+// mutate:test    ./internal/control/api/ -run TestACallbackFromADifferentBrowser|TestAMismatchedBinding|TestTheBindingCookieIsCleared|TestAPlaintextJWKS|TestAMappedAddressClaim|TestAMultiValuedAudience|TestTheRedirectLocation|TestAnEmptySubject|TestEachLoginWrites
+//
+// mutate:case    the browser binding is not compared
+// mutate:old     if !constantTimeEqualHash(bindingValue, req.BrowserHash) {
+// mutate:new     if false && !constantTimeEqualHash(bindingValue, req.BrowserHash) {
+//
+// mutate:case    a failed binding rolls back the state consumption
+// mutate:old     mismatch = true
+// mutate:new     return errBrowserMismatch //nolint // MUTANT
+//
+// mutate:case    jwks_uri is exempt from the https check
+// mutate:old     for _, e := range []string{fresh.endpoints.Authorization, fresh.endpoints.Token, fresh.endpoints.JWKS} {
+// mutate:new     for _, e := range []string{fresh.endpoints.Authorization, fresh.endpoints.Token} {
+//
+// mutate:case    a mapped address claim borrows email_verified
+// mutate:old     if b, ok := raw[claim+"_verified"].(bool); ok {
+// mutate:new     if b, ok := raw["email_verified"].(bool); ok {
+//
+// mutate:case    a configured address claim is ignored and email is used instead
+// mutate:old     if claim == "" || claim == "email" {
+// mutate:new     if true {
+//
+// The address-only fallback — absent mapped claim resolving to `email` — is
+// NOT a mutation here, and the reason is worth recording rather than leaving as
+// a gap. It survived, and checking why showed it names no load-bearing control:
+// with verification read from `<claim>_verified`, an absent mapped claim has no
+// verification to satisfy the linking gate, so the address it falls back to
+// cannot link whatever it is. The mutation above restores the whole original
+// bug — address AND verification from `email` — which is the dangerous
+// combination and is killed.
+//
+// mutate:case    azp is not checked on a multi-valued audience
+// mutate:old     if len(idToken.Audience) > 1 {
+// mutate:new     if false {
+//
+// mutate:case    the redirect location is not re-checked after cleaning
+// mutate:old     if !isSafeReturnPath(location) {
+// mutate:new     if false {
+//
+// mutate:case    an empty subject is not refused
+// mutate:old     if subject == "" {
+// mutate:new     if subject == "\x00never\x00" {
+//
+// mutate:subject internal/control/api/handlers_auth.go
+//
+// mutate:case    the audit event hardcodes the local method
+// mutate:old     detail["method"] = method
+// mutate:new     detail["method"] = "local"
+//
 // oidcFixture is a tenant configured for single sign-on against a fake IdP.
 type oidcFixture struct {
 	*fixture

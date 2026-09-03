@@ -37,6 +37,21 @@ Check that `CredentialGrant.material` has no path to a log sink.
 IDs from the request are validated against the caller's tenant — an IDOR in a vulnerability
 platform exposes another customer's attack surface.
 
+**Refusal durability.** For every `db.Write` closure that records that a refusal happened —
+an audit event, a failed-attempt counter, the consumption of a single-use token — check
+whether any path can return an error AFTER it. The error aborts the transaction and the
+record goes with it. Three instances so far, two of them shipped: the login lockout counter
+(`failed_attempts` stayed 0 after fifteen wrong passwords), the OIDC browser binding (a
+wrong binding left the single-use state redeemable), and ingest's ledger conflict, where the
+abort is unavoidable and the work has to move to a fresh transaction instead. The rule and
+its worked examples are in `internal/store/CLAUDE.md`.
+
+There is deliberately no automated check: the discriminating fact is not syntactic —
+`return err` on a database fault is correct and must roll back, `return errWrongPassword` is
+a refusal and must not. **Assert on the database, not the status code.** Every one of these
+produced an identical response either way, which is why review missed them and a probe did
+not: `SELECT failed_attempts`, not `w.Code`.
+
 **Injection.** Parameterised queries only. Command construction for scan engines must not
 interpolate target strings into a shell. Check for `exec.Command` with a shell wrapper.
 

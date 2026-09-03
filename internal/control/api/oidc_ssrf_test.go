@@ -9,6 +9,37 @@ import (
 	"testing"
 )
 
+// Mutations, declared beside the tests that must kill them.
+//
+// Four of these were sabotage-tested by hand before `make mutate` covered Go —
+// and one of the hand tests found a test that proved nothing: removing the
+// translated-form extraction left the suite green, because every case was
+// already caught by the 2000::/3 allowlist. That is exactly the thing that
+// should not depend on somebody remembering to try it.
+//
+// mutate:subject internal/control/api/oidc_client.go
+// mutate:test    ./internal/control/api/ -run TestLinkLocal|TestPrivateAddresses|TestTheAddresses|TestATranslated|TestTheIPv6Side|TestPublicAddresses|TestNonTCP|TestTheRefusalNames|TestEveryIdentityProvider|TestTheBoundedTransport
+//
+// mutate:case    the IPv6 allowlist is not applied
+// mutate:old     if !globalUnicastV6.Contains(c) {
+// mutate:new     if false {
+//
+// mutate:case    translated forms are not extracted
+// mutate:old     candidates = append(candidates, target.TranslatedV4s(ip)...)
+// mutate:new     _ = target.TranslatedV4s
+//
+// mutate:case    the private-issuer flag opens the whole registry, link-local included
+// mutate:old     if allowPrivate && (r == reasonPrivate || r == reasonLoopback) {
+// mutate:new     if allowPrivate {
+//
+// mutate:case    the v4 registry is not consulted
+// mutate:old     r := specialPurposeV4(c)
+// mutate:new     r := ""
+//
+// mutate:case    identity provider response bodies are unbounded
+// mutate:old     Reader: io.LimitReader(resp.Body, b.max),
+// mutate:new     Reader: resp.Body,
+//
 // The dial guard is the only thing standing between an operator-supplied issuer
 // URL and Core's own network. It is tested directly, on the function the dialer
 // actually calls, because every other way of reaching it goes through DNS.

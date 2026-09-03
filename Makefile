@@ -162,7 +162,7 @@ govulncheck: ## Known vulnerabilities in the dependency graph, as CI runs it
 # CI too and is the point of running it.
 ci: fmt-check tidy-check build vet test lint gosec govulncheck proto frontmatter \
     gitignore-test scope-guard-test contract-guard-test secret-logging \
-    secret-logging-test mutate env-check licences db-gates ## Everything CI runs, locally
+    secret-logging-test env-check licences db-gates ## Everything CI runs, locally
 
 ## ---------- wire contract ----------
 
@@ -323,13 +323,14 @@ db-gates: ## Every gate needing Postgres. Skips loudly, never silently, when the
 		$(MAKE) --no-print-directory rls-test; \
 		$(MAKE) --no-print-directory store-test; \
 		$(MAKE) --no-print-directory e2e; \
+		$(MAKE) --no-print-directory mutate; \
 	else \
 		echo ""; \
 		echo "################################################################"; \
 		echo "#  SKIPPED: every gate that needs a database                   #"; \
 		echo "#                                                              #"; \
 		echo "#  NOT RUN:  migrate-verify   rls-test                         #"; \
-		echo "#            store-test       e2e                              #"; \
+		echo "#            store-test       e2e         mutate               #"; \
 		echo "#                                                              #"; \
 		echo "#  THIS IS NOT A PASS. rls-test proves tenant isolation and    #"; \
 		echo "#  refuses to prove it for any table holding no fixture rows;  #"; \
@@ -500,8 +501,12 @@ scope-guard-test: ## Test the lab scope guard against its case table
 # means adding the mutation that proves the check is reached, in the same diff.
 # A surviving mutation fails the build with the name of the check nothing
 # exercises.
+# The Go suites here need a database, and a suite that SKIPS passes — so every
+# mutation it would have killed survives instead. The driver refuses an empty
+# baseline for exactly that reason; passing the URL is what makes the run mean
+# something rather than fail loudly.
 mutate: ## Assert every guard check is actually reached by its test suite
-	python3 .claude/hooks/mutate.py
+	CVAP_TEST_DATABASE_URL="$(APP_DATABASE_URL)" python3 .claude/hooks/mutate.py
 
 contract-guard-test: ## Test both halves of the frozen-contract guard
 	python3 .claude/hooks/test_protect_contracts.py

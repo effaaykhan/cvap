@@ -13,6 +13,25 @@ import (
 	"github.com/effaaykhan/cvap/internal/target"
 )
 
+// Mutations, declared beside the tests that must kill them.
+//
+// The runtime is the site that actually sends packets, and the property worth
+// the most here is the one ADR-044 spends a page on: it RE-COMPUTES rather than
+// validating. The first mutation is precisely the wrong version — the one that
+// passes every test the right one does, unless a test drives a non-canonical
+// value.
+//
+// mutate:subject internal/scanpoint/enginehost.go
+// mutate:test    ./internal/scanpoint/ -run TestRuntimeSiteAgreesWithTheSharedTable|TestTheRuntimeRecomputes|TestAnUnauthorisedTargetRefusesTheWholeJob
+//
+// mutate:case    the runtime validates the form instead of re-computing it
+// mutate:old     c, ok := target.Matches(raw)
+// mutate:new     c, err := target.Canonicalise(raw); ok := err == nil
+//
+// mutate:case    a non-canonical target is accepted rather than refused
+// mutate:old     return false, "target is not in canonical form: " + raw
+// mutate:new     return true, ""
+//
 // TestRuntimeSiteAgreesWithTheSharedTable is the half that did not exist.
 //
 // Five comments said it did — in scopetest/cases.go, in scope.go, in

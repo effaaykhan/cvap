@@ -42,8 +42,11 @@ Run: python3 .claude/hooks/mutate.py   (or `make mutate`)
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import re
 import pathlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -58,6 +61,163 @@ SUITES = [
     ".claude/hooks/test_verify_contracts.py",
     ".github/scripts/test_check_secret_logging.py",
 ]
+
+# Go suites that declare mutations in a comment block beside the tests.
+#
+# The Python suites are pointed at a mutant FILE through an environment
+# variable, which a compiled language cannot do. Go's `-overlay` is built for
+# exactly this: a JSON map from a real path to a replacement, applied at compile
+# time, so the working tree is never modified and there is nothing to restore if
+# this is interrupted.
+#
+# A suite here without a mutation block is reported rather than skipped, same as
+# for Python — a suite that quietly opts out is how this stops covering
+# anything.
+GO_SUITES = [
+    "internal/control/api/oidc_ssrf_test.go",
+    "internal/control/api/oidc_test.go",
+    "internal/dispatch/scope_conformance_test.go",
+    "internal/scanpoint/scope_conformance_test.go",
+]
+
+# The declaration shape, in comments beside the tests:
+#
+#   // mutate:subject internal/control/api/oidc_client.go
+#   // mutate:test    ./internal/control/api/ -run TestA|TestB
+#   // mutate:case    drop the translated-form extraction
+#   // mutate:old     candidates = append(candidates, target.TranslatedV4s(ip)...)
+#   // mutate:new     _ = target.TranslatedV4s
+#
+# subject and test are declared once; case/old/new repeat. Mutations are
+# single-line by construction, which is a real constraint and the right one: a
+# mutation that needs a paragraph is usually testing that the code compiles.
+GO_DIRECTIVE = re.compile(r"^\s*//\s*mutate:(subject|test|case|old|new)\s+(.*?)\s*$")
+
+
+def parse_go_suite(path: pathlib.Path):
+    """(test_args, [(name, subject, old, new)]) or (None, reason).
+
+    mutate:subject may be declared more than once and applies to the cases that
+    follow it, because one suite legitimately covers checks in two files — the
+    OIDC tests exercise both oidc.go and the session issuance in
+    handlers_auth.go, and splitting them into two suites to satisfy the format
+    would put the mutation somewhere other than beside the test that kills it.
+    """
+    subject = test_args = None
+    cases: list[tuple[str, str, str, str]] = []
+    pending: dict[str, str] = {}
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = GO_DIRECTIVE.match(line)
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2)
+        if key == "subject":
+            subject = value
+        elif key == "test":
+            test_args = value
+        else:
+            pending[key] = value
+            if {"case", "old", "new"} <= pending.keys():
+                if subject is None:
+                    return None, "a mutate:case appears before any mutate:subject"
+                cases.append((pending["case"], subject, pending["old"], pending["new"]))
+                pending = {}
+
+    if test_args is None:
+        return None, "no mutate:test declared"
+    if not cases:
+        return None, "declares no mutate:case"
+    return test_args, cases
+
+
+def run_go_suite(test_args: str, overlay: pathlib.Path | None) -> tuple[bool, int]:
+    """(passed, tests_that_actually_ran).
+
+    ============================================================================
+    A SKIPPED suite passes, and a mutation it does not run always survives.
+    ============================================================================
+
+    Most of these suites need CVAP_TEST_DATABASE_URL and call t.Skip without it.
+    `go test` then exits 0, so the baseline looked green and every mutant looked
+    green too — nine mutations "survived" on a tree where all of them are killed,
+    purely because `make ci` did not export the database URL. That is the
+    silently-passing gate this repository keeps finding, one level below the gate
+    that exists to find it.
+
+    So the count of tests that actually ran is returned alongside the exit
+    status, and a baseline that ran nothing is reported rather than trusted.
+    """
+    cmd = [os.environ.get("GO", "go"), "test", "-count=1", "-v"]
+    if overlay is not None:
+        cmd.append("-overlay=" + str(overlay))
+    cmd += shlex.split(test_args)
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT),
+                          env=dict(os.environ))
+    ran = sum(1 for line in proc.stdout.splitlines()
+              if line.startswith("--- PASS:") or line.startswith("--- FAIL:"))
+    return proc.returncode == 0, ran
+
+
+def go_mutations(rows: list) -> tuple[int, int]:
+    """Run every Go suite's mutations. Returns (failures, total)."""
+    failures = total = 0
+
+    for rel in GO_SUITES:
+        suite = ROOT / rel
+        test_args, cases = parse_go_suite(suite)
+        if test_args is None:
+            rows.append((rel, "NO MUTATIONS", cases))
+            failures += 1
+            continue
+
+        baseline, ran = run_go_suite(test_args, None)
+        if ran == 0:
+            rows.append((rel, "BASELINE EMPTY",
+                         "the suite ran no tests — every mutation would survive. "
+                         "Set CVAP_TEST_DATABASE_URL (make up)."))
+            failures += 1
+            continue
+        if not baseline:
+            rows.append((rel, "BASELINE RED", "the suite fails against its own subject"))
+            failures += 1
+            continue
+
+        for name, subject_rel, old, new in cases:
+            total += 1
+            label = "%s :: %s" % (pathlib.Path(rel).stem, name)
+            subject = ROOT / subject_rel
+            original = subject.read_text(encoding="utf-8")
+
+            if original.count(old) != 1:
+                rows.append((label, "ANCHOR LOST",
+                             "matched %d times in %s; the mutation tests nothing"
+                             % (original.count(old), subject_rel)))
+                failures += 1
+                continue
+
+            with tempfile.TemporaryDirectory() as tmp:
+                mutant = pathlib.Path(tmp) / subject.name
+                mutant.write_text(original.replace(old, new), encoding="utf-8")
+                overlay = pathlib.Path(tmp) / "overlay.json"
+                overlay.write_text(json.dumps(
+                    {"Replace": {str(subject): str(mutant)}}), encoding="utf-8")
+                passed, mutantRan = run_go_suite(test_args, overlay)
+
+            if mutantRan == 0:
+                rows.append((label, "MUTANT EMPTY",
+                             "the mutant ran no tests — it probably does not compile, "
+                             "so it tests nothing. Reformulate it to compile."))
+                failures += 1
+                continue
+            if passed:
+                rows.append((label, "SURVIVED",
+                             "no case exercises the check this mutation removes"))
+                failures += 1
+            else:
+                rows.append((label, "killed", ""))
+
+    return failures, total
 
 
 def load(path: pathlib.Path):
@@ -133,6 +293,10 @@ def main() -> int:
                 failures += 1
             else:
                 rows.append((label, "killed", ""))
+
+    goFailures, goTotal = go_mutations(rows)
+    failures += goFailures
+    total += goTotal
 
     width = max(width, max((len(r[0]) for r in rows), default=10))
     print(f"{'mutation':<{width}}  {'result':<12}  note")

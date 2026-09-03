@@ -8,6 +8,31 @@ import (
 	"github.com/effaaykhan/cvap/internal/target"
 )
 
+// Mutations, declared beside the tests that must kill them.
+//
+// This driver WAS a paraphrase of the wrong expression for one session — it
+// called Canonicalise where offerWork calls Matches, so the Core half of
+// ADR-024's two-site agreement was asserted against a path Core does not run.
+// An ADR-compliance pass found it by reading. The first mutation below is that
+// exact drift, so the next one is found by the build.
+//
+// mutate:subject internal/dispatch/dispatch.go
+// mutate:test    ./internal/dispatch/ -run TestCoreSiteAgreesWithTheSharedTable|TestOutOfScopeTaskIsRefused|TestANonCanonicalTaskTargetRefusesTheJob
+//
+// mutate:case    Core validates the canonical form instead of re-computing it
+// mutate:old     canon, canonical := target.Matches(t.TaskTarget)
+// mutate:new     canon, canonical := func(v string) (target.Canonical, bool) { c, err := target.Canonicalise(v); return c, err == nil }(t.TaskTarget)
+//
+// mutate:case    Core does not check canonicality at all
+// mutate:old     ok, why := canonical, "target is not in canonical form"
+// mutate:new     ok, why := true, ""
+//
+// mutate:subject internal/scope/scope.go
+//
+// mutate:case    exclusions no longer take precedence over allows
+// mutate:old     if matchesExclusion(e, targetStr, addr, isAddr) {
+// mutate:new     if false {
+//
 // TestCoreSiteAgreesWithTheSharedTable is one half of ADR-024's "both sides must
 // evaluate identically".
 //
