@@ -297,6 +297,52 @@ the producer is a subprocess parsing hostile input by design.
 **How to apply:** for every bounded buffer, walk BACKWARDS to where the data is first held and
 check for a cap there. A per-message cap is not a per-stream cap.
 
+**24. A counter whose whole job is to record a FAILURE, written inside the transaction that
+the failure then rolls back.** `api.login` calls `Credentials.RecordFailure` and immediately
+`return errors.New("password mismatch")` from the `db.Write` closure; `DB.inTx` does
+`if fnErr != nil { return fnErr }` BEFORE `tx.Commit`, so the deferred rollback discards the
+increment. Measured on the dev DB: `failed_attempts = 0` and `locked_until = NULL` after 15
+wrong passwords, and the 16th with the correct password returns 200. Identical shape in
+`api.changePassword`. The lockout was a table, two constants, a correct single-statement
+UPDATE and a call site — everything except a commit.
+**Why:** the surrounding style in this repo is "the audit event goes in the SAME transaction
+as the thing it records", which is right for success paths and exactly wrong for failure
+counters, so the wrong version looks like the house style.
+**How to apply:** for every write whose purpose is to record that something went wrong, trace
+the enclosing transaction to its commit. If the same code path returns an error, the write is
+gone. The fix is a separate short transaction (or a `RecordFailure` after `Write` returns),
+not a wider one.
+
+**25. A deliberately expensive pre-auth computation held inside a pooled database
+transaction.** `verifyPassword` runs argon2id at RFC 9106's 64 MiB / t=3 / p=4 *inside*
+`s.db.Write`, so each unauthenticated wrong-password attempt against a KNOWN email holds one
+of the pool's 16 connections (`store.Config.MaxConns` default) for ~48 ms and 64 MiB.
+Measured: 24 concurrent login attempts took an unrelated `SELECT 1` from 0.73 ms to 5.1 s.
+Core is one process — dispatch, ingest, lease renewal and the sweeper share that pool — so the
+consequence is a fleet-wide stall and, via failed lease renewal, scan-point self-abort
+(invariant 8). Class 8 with the cost chosen by *us* rather than by the attacker, which is why
+the "bound the input" reflex does not help.
+**Why:** the KDF cost is a feature and the transaction is there because `RecordFailure` needs
+one, so both halves read as correct in isolation.
+**How to apply:** for any pre-auth handler, list what it holds while it computes: a pool
+connection, a lock, a goroutine. Read the row, close the transaction, THEN hash. And check for
+a rate limiter — this package has none anywhere.
+
+**26. An oracle closed carefully at one layer and reopened by the status code the layer above
+chooses.** `tenant_for_domain` returns NULL identically for unknown, suspended and closed, and
+`resolvePreTenant` collapses every failure to one sentinel — genuinely non-distinguishing. Then
+`resolveTenant` maps that sentinel to 404 while every live tenant's login refusal is 401, so
+`POST /v1/auth/login` with junk credentials answers "does a customer exist at this hostname"
+exactly. Measured: 401 vs 404. Same shape one level down: `login` collapses unknown-user and
+wrong-password to one body, and the argon2 that only runs for a real user separates them by
+28x in wall time (48 ms vs 1.7 ms). `TestLoginIsOneRefusalForEveryFailure` compares status and
+body and passes.
+**Why:** each layer's author verified the property at their own layer, and the ADR text
+("indistinguishable by design") describes the resolver, not the response.
+**How to apply:** state the oracle as an end-to-end experiment — two requests differing in one
+secret — and compare *everything* observable: status, body, headers, Set-Cookie, and elapsed
+time. A test that asserts an indistinguishability property and only diffs the body is class 9.
+
 **Constraint on fixes:** `proto/` is frozen additive-only within a major version (ADR-022),
 enforced by `buf breaking` with the FILE category and a baseline established at bd0e4f9.
 So a proto finding almost never gets fixed by removing or retyping a field. Acceptable fixes

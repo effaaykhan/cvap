@@ -1,6 +1,6 @@
 # ADR-042: Targets are canonicalised once at planning, and re-canonicalised at the scan point
 
-**Status:** Accepted
+**Status:** Superseded by ADR-044
 **Date:** 2026-09-03
 
 ## Context

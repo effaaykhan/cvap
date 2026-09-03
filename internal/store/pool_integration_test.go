@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,7 +43,10 @@ func newTenant(t *testing.T, db *store.DB, name string) store.TenantID {
 		t.Fatalf("new tenant id: %v", err)
 	}
 	err = db.Write(context.Background(), id, func(ctx context.Context, c *store.Conn) error {
-		_, err := (store.Tenants{}).Create(ctx, c, name, store.DeploymentSaaS)
+		// The domain is derived from the ID rather than the name, because
+		// tenants.domain is globally unique and these tests reuse names.
+		_, err := (store.Tenants{}).Create(ctx, c, name,
+			"t"+strings.ReplaceAll(id.String(), "-", "")[:20]+".test", store.DeploymentSaaS)
 		return err
 	})
 	if err != nil {

@@ -113,7 +113,8 @@ func tenantWithZone(t *testing.T, db *store.DB) (store.TenantID, uuid.UUID) {
 	}
 	var zoneID uuid.UUID
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		if _, err := (store.Tenants{}).Create(ctx, c, "enr-"+uuid.NewString()[:8], store.DeploymentOnPrem); err != nil {
+		if _, err := (store.Tenants{}).Create(ctx, c, "enr-"+uuid.NewString()[:8],
+			"enr"+strings.ReplaceAll(uuid.NewString(), "-", "")[:20]+".test", store.DeploymentOnPrem); err != nil {
 			return err
 		}
 		z, err := (store.Zones{}).Create(ctx, c, "enr-zone", store.ZoneInternal, 50, "")

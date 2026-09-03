@@ -81,8 +81,23 @@ decision through `reassign_safe`, not this runtime's. An exit 0 without the `don
 counts as failure too: reporting a partial scan as a whole one is under-scanning that looks
 like a clean run, which is the worst failure this system has.
 
+**Targets arrive CANONICAL, and the runtime re-computes rather than validating** (ADR-044,
+superseding ADR-042).
+`target.Matches` canonicalises the received string with the same function Core ran at planning
+and requires the result to equal what arrived, **byte for byte, with no trimming before the
+comparison**. Asking instead "is this string canonical" would accept a canonical form of the
+WRONG host — which is what a bug in Core's canonicalisation produces — so the comparison is what
+makes this an independent computation whose answer may disagree, rather than a check of Core's
+homework. A mismatch refuses the job the same way an out-of-scope target does —
+`SCOPE_VIOLATION_HALT`, because the wire enum is frozen and a new reason is a proto change —
+but the error text says which of the two it was. That distinction matters to whoever reads it:
+a scope violation means policy and plan disagree, while a canonicalisation mismatch means
+something between Core and this scan point changed the string.
+
 **Scope is enforced here, once, through `internal/scope`** — the same matcher Core uses, so the
-two sites cannot disagree about a rule. Targets are checked before they reach the engine's
+two sites cannot disagree about a rule. Since ADR-044 that matcher is narrower: it compares one
+canonical string per host against operator-written rules and no longer parses ports, brackets,
+URLs or notation at all. Targets are checked before they reach the engine's
 stdin, and a target an engine discovers mid-scan comes back as an `authorise` request answered
 here. A target Core assigned that fails this check **refuses the whole job** with
 `SCOPE_VIOLATION_HALT` rather than being trimmed: a disagreement between the two enforcement

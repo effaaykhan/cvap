@@ -29,8 +29,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -40,6 +42,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	scanpointv1 "github.com/effaaykhan/cvap/gen/cybersentinel/scanpoint/v1"
+	"github.com/effaaykhan/cvap/internal/control/api"
 	"github.com/effaaykhan/cvap/internal/control/ca"
 	"github.com/effaaykhan/cvap/internal/control/enrollment"
 	"github.com/effaaykhan/cvap/internal/dispatch"
@@ -107,7 +110,7 @@ func run(log *slog.Logger) error {
 		slog.String("protocol_version", protocolVersion))
 
 	for _, k := range []string{
-		"CVAP_CORE_ENROLL_LISTEN", "CVAP_CORE_MTLS_LISTEN",
+		"CVAP_CORE_ENROLL_LISTEN", "CVAP_CORE_MTLS_LISTEN", "CVAP_CORE_API_LISTEN",
 		"CVAP_CORE_CA_CERT", "CVAP_CORE_CA_KEY", "APP_DATABASE_URL",
 	} {
 		if os.Getenv(k) == "" {
@@ -221,6 +224,25 @@ func run(log *slog.Logger) error {
 	sweeper := dispatch.NewSweeper(db, log)
 	go sweeper.Run(ctx)
 
+	// The operator API. Everything ADR-024 control 4 and ADR-021 require existed
+	// in the store and was unreachable from production until this listener.
+	//
+	// It is a SEPARATE listener from the two gRPC ones and always will be. A
+	// scan point reaches Core over mTLS with a certificate this deployment
+	// issued; an operator reaches it over server TLS with a session. Serving
+	// both on one port would mean one TLS configuration for two trust models,
+	// and the weaker one would win.
+	apiSrv, err := api.New(db, log, api.Config{
+		Version:          version,
+		LocalAuthEnabled: os.Getenv("CVAP_CORE_LOCAL_AUTH") == "1",
+		Insecure:         os.Getenv("CVAP_CORE_API_INSECURE") == "1",
+		ListenAddr:       os.Getenv("CVAP_CORE_API_LISTEN"),
+		SessionTTL:       apiSessionTTL(),
+	})
+	if err != nil {
+		return fmt.Errorf("cvap-core: operator api: %w", err)
+	}
+
 	var wg sync.WaitGroup
 	serve := func(name, addr string, s *grpc.Server) error {
 		ln, err := net.Listen("tcp", addr)
@@ -245,12 +267,71 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	httpSrv := &http.Server{
+		Addr:    os.Getenv("CVAP_CORE_API_LISTEN"),
+		Handler: apiSrv.Handler(),
+
+		// Bounded, because an operator API is reachable from a browser and
+		// therefore from anything that can talk to a browser's network. A
+		// connection that sends one byte of a header and waits holds a goroutine
+		// and a file descriptor until something times it out; these are what
+		// times it out.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	// The same server key pair the enrollment listener presents, and NO client
+	// certificate: an operator authenticates with a session, not with a
+	// certificate this deployment issued to a scan point.
+	httpSrv.TLSConfig = &tls.Config{
+		Certificates: []tls.Certificate{keyPair},
+		MinVersion:   tls.VersionTLS13,
+		ClientAuth:   tls.NoClientCert,
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		log.Info("listening", slog.String("service", "operator api"), slog.String("addr", httpSrv.Addr))
+		// TLS always, and the certificate is the same server certificate the
+		// enrollment listener presents. A session cookie is a bearer credential
+		// and Secure is set on it, so a plaintext listener would issue cookies
+		// no browser would ever send back.
+		if err := httpSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("server stopped", slog.String("service", "operator api"), slog.Any("error", err))
+		}
+	}()
+
 	<-ctx.Done()
 	log.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		log.Error("operator api shutdown", slog.Any("error", err))
+	}
 	enrollServer.GracefulStop()
 	mtlsServer.GracefulStop()
 	wg.Wait()
 	return nil
+}
+
+// apiSessionTTL reads CVAP_CORE_SESSION_TTL_SECONDS.
+//
+// Defaults to eight hours, and cannot exceed twelve: the sessions table has a
+// CHECK constraint saying so, and api.New refuses a larger value rather than
+// clamping it, so a deployment does not believe something about its own
+// configuration that the database will later contradict at login time.
+func apiSessionTTL() time.Duration {
+	v := os.Getenv("CVAP_CORE_SESSION_TTL_SECONDS")
+	if v == "" {
+		return 8 * time.Hour
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 8 * time.Hour
+	}
+	return time.Duration(n) * time.Second
 }
 
 // rotateOnly serves RotateCertificate and refuses Enroll.

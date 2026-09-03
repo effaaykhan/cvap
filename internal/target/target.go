@@ -23,9 +23,19 @@
 // # Refusing is part of the contract
 //
 // A string that NAMES an address and will not parse as one is refused rather
-// than passed along as a hostname (ADR-040). Refusal happens at scan creation,
-// where an operator is standing in front of the error, instead of at dispatch
-// hours later — which is the whole reason canonicalisation moved to planning.
+// than passed along as a hostname (ADR-040), at three places and for three
+// different audiences:
+//
+//   - at scan CREATION, where an operator is standing in front of the error;
+//   - at PLANNING, because a scan_targets row can be written by something other
+//     than that handler, and because that is where the canonical form is
+//     produced (ADR-044);
+//   - at the scan point, where the question is not "is this canonical" but
+//     "is this MY canonical form of this" — see Matches.
+//
+// The first of those is a courtesy and the other two are the control. An earlier
+// version of this comment claimed only the first, at a time when the handler did
+// not call this package at all.
 //
 // This package is a leaf. Both Core and the scan point runtime import it, so it
 // may depend on neither.

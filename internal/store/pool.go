@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -452,8 +454,8 @@ func (db *DB) inTx(ctx context.Context, tenant TenantID, opts pgx.TxOptions, fn 
 // ---------------------------------------------------------------------------
 //
 // A closed class of lookups that run BEFORE any tenant is known, because
-// deriving the tenant is their whole job. Two members today, and a third
-// requires amending ADR-033 rather than adding a function here.
+// deriving the tenant is their whole job. Three members today, and a fourth
+// requires amending ADR-041 rather than adding a function here.
 //
 // Every member obeys the same shape, and the shape is the control:
 //
@@ -475,7 +477,7 @@ func (db *DB) inTx(ctx context.Context, tenant TenantID, opts pgx.TxOptions, fn 
 // resolvePreTenant is the single implementation every member shares.
 //
 // It runs on the raw pool rather than through Read or Write, which is the only
-// place in this package that happens. That is the exception ADR-033 describes,
+// place in this package that happens. That is the exception ADR-041 describes,
 // and keeping it in one function is what stops it becoming a habit: a new member
 // calls this, and gets the shape for free.
 func (db *DB) resolvePreTenant(ctx context.Context, query string, arg any) (TenantID, error) {
@@ -534,4 +536,58 @@ func (db *DB) ResolveEnrollmentTokenTenant(ctx context.Context, tokenHash []byte
 		return TenantID{}, ErrTenantNotResolved
 	}
 	return db.resolvePreTenant(ctx, `SELECT tenant_for_enrollment_token($1)`, tokenHash)
+}
+
+// ResolveDomainTenant resolves a request hostname to its tenant, so the API
+// middleware can open a transaction before any handler runs (ADR-041).
+//
+// This is the third member of the class and by far the hottest: it runs on every
+// API request, not only at login, because a session cookie is scoped to the
+// tenant that issued it and cannot be validated until the tenant is known.
+//
+// The host arrives from the network. Port stripping and lowercasing happen here
+// AND in SQL — here because the caller has a Host header rather than a hostname,
+// in SQL because a caller that forgot would produce NULL for a correctly
+// configured deployment, which presents as a broken deployment rather than as a
+// bug and gets "fixed" by relaxing the comparison.
+//
+// An unknown host, a suspended tenant and a closed one are one outcome. A
+// deployment reached by a hostname nobody configured is indistinguishable from
+// one whose tenant was suspended this morning, which is what stops this being an
+// oracle for which customers exist.
+func (db *DB) ResolveDomainTenant(ctx context.Context, host string) (TenantID, error) {
+	h := canonicalHost(host)
+	if h == "" {
+		return TenantID{}, ErrTenantNotResolved
+	}
+	return db.resolvePreTenant(ctx, `SELECT tenant_for_domain($1)`, h)
+}
+
+// canonicalHost reduces a Host header to the hostname tenants.domain holds.
+//
+// Deliberately narrow. It strips a port, surrounding brackets and a trailing
+// root label, lowercases, and does nothing else — no unicode normalisation, no
+// IDN decoding, no whitespace tolerance. Anything it does not recognise is
+// passed through to the lookup, which returns NULL and refuses the request:
+// a host this function does not understand must fail to resolve, not resolve to
+// something approximate.
+func canonicalHost(host string) string {
+	h := strings.TrimSpace(host)
+	if h == "" {
+		return ""
+	}
+	// A port, but not the colons of a bare IPv6 literal — which cannot be a
+	// tenants.domain value anyway, since the CHECK constraint forbids one.
+	if hostOnly, _, err := net.SplitHostPort(h); err == nil {
+		h = hostOnly
+	}
+	h = strings.TrimPrefix(h, "[")
+	h = strings.TrimSuffix(h, "]")
+	// "corp.example." and "corp.example" are the same name. The constraint on
+	// tenants.domain forbids the trailing dot, so without this a fully
+	// qualified request would fail to resolve.
+	if len(h) > 1 {
+		h = strings.TrimSuffix(h, ".")
+	}
+	return strings.ToLower(h)
 }

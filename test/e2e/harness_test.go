@@ -64,6 +64,7 @@ type harness struct {
 
 	enrollAddr string
 	mtlsAddr   string
+	apiAddr    string
 
 	coreCmd *exec.Cmd
 	spCmd   *exec.Cmd
@@ -146,7 +147,8 @@ func (h *harness) seed() {
 
 	if err := h.db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 		tid := c.Tenant().UUID()
-		if _, err := (store.Tenants{}).Create(ctx, c, "e2e-"+uuid.NewString()[:8], store.DeploymentOnPrem); err != nil {
+		if _, err := (store.Tenants{}).Create(ctx, c, "e2e-"+uuid.NewString()[:8],
+			"e2e"+strings.ReplaceAll(uuid.NewString(), "-", "")[:20]+".test", store.DeploymentOnPrem); err != nil {
 			return err
 		}
 		z, err := (store.Zones{}).Create(ctx, c, "e2e-zone", store.ZoneInternal, 50, "")
@@ -235,12 +237,18 @@ func (h *harness) startCore() {
 	h.t.Helper()
 	h.enrollAddr = freePort(h.t)
 	h.mtlsAddr = freePort(h.t)
+	h.apiAddr = freePort(h.t)
 
 	cmd := exec.Command(filepath.Join(h.dir, "cvap-core"))
 	cmd.Env = append(os.Environ(),
 		"APP_DATABASE_URL="+os.Getenv("CVAP_TEST_DATABASE_URL"),
 		"CVAP_CORE_ENROLL_LISTEN="+h.enrollAddr,
 		"CVAP_CORE_MTLS_LISTEN="+h.mtlsAddr,
+		// The operator API listener. Not exercised by this suite, and Core
+		// refuses to start without it — which is the point of requiring it
+		// rather than defaulting: a deployment that forgot gets a startup
+		// failure instead of a control surface nobody can reach.
+		"CVAP_CORE_API_LISTEN="+h.apiAddr,
 		"CVAP_CORE_CA_CERT="+h.caCert,
 		"CVAP_CORE_CA_KEY="+h.caKey,
 		"CVAP_CORE_SERVER_HOSTS=localhost,127.0.0.1",

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -182,7 +183,8 @@ func enrolledScanPoint(t *testing.T, db *store.DB) (store.TenantID, *x509.Certif
 	}
 	var zoneID uuid.UUID
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		if _, err := (store.Tenants{}).Create(ctx, c, "disp-"+uuid.NewString()[:8], store.DeploymentOnPrem); err != nil {
+		if _, err := (store.Tenants{}).Create(ctx, c, "disp-"+uuid.NewString()[:8],
+			"disp"+strings.ReplaceAll(uuid.NewString(), "-", "")[:20]+".test", store.DeploymentOnPrem); err != nil {
 			return err
 		}
 		z, err := (store.Zones{}).Create(ctx, c, "z", store.ZoneInternal, 50, "")
@@ -608,6 +610,83 @@ func TestMissingZeroisationAttestationIsAudited(t *testing.T) {
 	if !found {
 		t.Error("a JobTerminal without credentials_zeroised raised no audit event; " +
 			"an unchecked attestation is worse than no field at all")
+	}
+
+	fs.closeInbound()
+	cancel()
+	<-done
+}
+
+// TestTheTerminalDetailIsPersisted.
+//
+// ============================================================================
+// JobTerminal.detail was produced by the runtime and read by Core nowhere.
+// ============================================================================
+//
+// The proto defines it as "operator-facing detail: which engine failed, which
+// target halted the scan"; onTerminal read job id, reason, epoch and the
+// zeroisation attestation, and dropped this. An ADR-compliance pass found it.
+//
+// It matters most for the case ADR-044 corrects: a canonicalisation mismatch and
+// a scope violation share SCOPE_VIOLATION_HALT, so this field is the only thing
+// that tells an operator which of the two happened — and the two need different
+// responses.
+func TestTheTerminalDetailIsPersisted(t *testing.T) {
+	db := testDB(t)
+	svc := newService(t, db)
+	tenant, leaf, spID := enrolledScanPoint(t, db)
+	jobID := seedQueuedJob(t, db, tenant, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fs := newFakeStream(peerCtx(ctx, leaf))
+	done := make(chan error, 1)
+	go func() { done <- svc.Connect(fs) }()
+
+	fs.push(&scanpointv1.ScanPointMessage{
+		Msg: &scanpointv1.ScanPointMessage_Hello{Hello: &scanpointv1.Hello{
+			ScanPointId: spID.String(), ProtocolVersion: testVersion,
+			Capabilities: []*scanpointv1.Capability{
+				{Engine: "discovery", EngineVersion: "0.1.0", Enabled: true},
+			},
+		}},
+	})
+	assign := fs.waitFor(t, "JobAssignment", func(m *scanpointv1.CoreMessage) bool {
+		return m.GetJob() != nil
+	}).GetJob()
+
+	const detail = "target is not in canonical form: 192.000.2.5"
+	fs.push(&scanpointv1.ScanPointMessage{
+		Msg: &scanpointv1.ScanPointMessage_Terminal{
+			Terminal: &scanpointv1.JobTerminal{
+				JobId:               jobID.String(),
+				LeaseEpoch:          assign.GetLeaseEpoch(),
+				Reason:              scanpointv1.TerminationReason_SCOPE_VIOLATION_HALT,
+				CredentialsZeroised: true,
+				Detail:              detail,
+			},
+		},
+	})
+
+	deadline := time.Now().Add(10 * time.Second)
+	var got string
+	for time.Now().Before(deadline) && got == "" {
+		if err := db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+			return c.QueryRow(ctx,
+				`SELECT coalesce(detail->>'detail', '') FROM audit_events
+				  WHERE tenant_id = $1 AND action = 'job.terminated' AND resource_id = $2`,
+				tenant.UUID(), jobID).Scan(&got)
+		}); err != nil && !errors.Is(err, store.ErrNotFound) {
+			t.Fatal(err)
+		}
+		if got == "" {
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
+	if got != detail {
+		t.Errorf("the terminal detail was stored as %q, want %q. Without it a scope violation "+
+			"and a canonicalisation mismatch are one indistinguishable outcome in the audit "+
+			"log, and they need different responses.", got, detail)
 	}
 
 	fs.closeInbound()

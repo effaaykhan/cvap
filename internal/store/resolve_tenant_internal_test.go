@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -52,7 +53,8 @@ func TestResolveTenant(t *testing.T) {
 	revokedFP := "resolve-revoked-" + uuid.NewString()
 
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *Conn) error {
-		if _, err := (Tenants{}).Create(ctx, c, "resolve-"+uuid.NewString()[:8], DeploymentOnPrem); err != nil {
+		if _, err := (Tenants{}).Create(ctx, c, "resolve-"+uuid.NewString()[:8],
+			"res"+strings.ReplaceAll(uuid.NewString(), "-", "")[:20]+".test", DeploymentOnPrem); err != nil {
 			return err
 		}
 		z, err := (Zones{}).Create(ctx, c, "resolve-zone", ZoneInternal, 1, "")

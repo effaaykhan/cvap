@@ -228,3 +228,162 @@ func (Policies) ScopeRules(ctx context.Context, c *Conn, policyID uuid.UUID) ([]
 	}
 	return out, nil
 }
+
+// PolicySpec is a policy as an operator writes it.
+//
+// AllowedEngines, AllowedZones and TimeWindows are raw jsonb, for the reason
+// Policy.TimeWindows gives: the store does not own the encoding. The API
+// validates the shapes it accepts before they get here.
+type PolicySpec struct {
+	Name                   string
+	SafetyMode             SafetyMode
+	MaxRatePPS             *int
+	MaxConcurrentPerTarget *int
+	TimeWindows            []byte
+	AllowedEngines         []byte
+	AllowedZones           []byte
+}
+
+// Create writes a policy.
+//
+// safety_mode is settable here, unlike on a scan, and the asymmetry is ADR-021's:
+// the policy is the CEILING an operator sets deliberately, and the per-scan
+// opt-in is what has to be explicit each time. A policy created as intrusive
+// authorises nothing on its own — every scan under it still defaults to safe.
+func (Policies) Create(ctx context.Context, c *Conn, spec PolicySpec) (*Policy, error) {
+	const q = `
+		INSERT INTO scan_policies
+			(tenant_id, name, safety_mode, max_rate_pps, max_concurrent_per_target,
+			 time_windows, allowed_engines, allowed_zones)
+		VALUES ($1, $2, $3::text::safety_mode, $4, $5,
+		        coalesce($6::jsonb, '[]'::jsonb),
+		        coalesce($7::jsonb, '[]'::jsonb),
+		        coalesce($8::jsonb, '[]'::jsonb))
+		RETURNING policy_id, name, safety_mode, max_rate_pps, max_concurrent_per_target, time_windows`
+
+	var p Policy
+	err := c.QueryRow(ctx, q, c.Tenant().UUID(), spec.Name, string(spec.SafetyMode),
+		spec.MaxRatePPS, spec.MaxConcurrentPerTarget,
+		nullJSON(spec.TimeWindows), nullJSON(spec.AllowedEngines), nullJSON(spec.AllowedZones)).
+		Scan(&p.ID, &p.Name, &p.SafetyMode, &p.MaxRatePPS, &p.MaxConcurrentPerTarget, &p.TimeWindows)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return &p, nil
+}
+
+// Update replaces a policy's fields.
+//
+// A full replacement rather than a patch. A patch over a policy means a client
+// that omits allowed_zones leaves the old value — which for a field where empty
+// means unrestricted (ADR-037) makes "I did not send it" and "I sent nothing"
+// two different things that look identical in a request body.
+func (Policies) Update(ctx context.Context, c *Conn, policyID uuid.UUID, spec PolicySpec) (*Policy, error) {
+	const q = `
+		UPDATE scan_policies
+		   SET name = $3, safety_mode = $4::text::safety_mode,
+		       max_rate_pps = $5, max_concurrent_per_target = $6,
+		       time_windows    = coalesce($7::jsonb, '[]'::jsonb),
+		       allowed_engines = coalesce($8::jsonb, '[]'::jsonb),
+		       allowed_zones   = coalesce($9::jsonb, '[]'::jsonb),
+		       updated_at = now()
+		 WHERE tenant_id = $1 AND policy_id = $2
+		RETURNING policy_id, name, safety_mode, max_rate_pps, max_concurrent_per_target, time_windows`
+
+	var p Policy
+	err := c.QueryRow(ctx, q, c.Tenant().UUID(), policyID, spec.Name, string(spec.SafetyMode),
+		spec.MaxRatePPS, spec.MaxConcurrentPerTarget,
+		nullJSON(spec.TimeWindows), nullJSON(spec.AllowedEngines), nullJSON(spec.AllowedZones)).
+		Scan(&p.ID, &p.Name, &p.SafetyMode, &p.MaxRatePPS, &p.MaxConcurrentPerTarget, &p.TimeWindows)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return &p, nil
+}
+
+// Get returns one policy.
+func (Policies) Get(ctx context.Context, c *Conn, policyID uuid.UUID) (*Policy, error) {
+	const q = `
+		SELECT policy_id, name, safety_mode, max_rate_pps, max_concurrent_per_target, time_windows
+		  FROM scan_policies WHERE tenant_id = $1 AND policy_id = $2`
+
+	var p Policy
+	err := c.QueryRow(ctx, q, c.Tenant().UUID(), policyID).
+		Scan(&p.ID, &p.Name, &p.SafetyMode, &p.MaxRatePPS, &p.MaxConcurrentPerTarget, &p.TimeWindows)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return &p, nil
+}
+
+// List returns every policy for the tenant, by name.
+func (Policies) List(ctx context.Context, c *Conn) ([]Policy, error) {
+	const q = `
+		SELECT policy_id, name, safety_mode, max_rate_pps, max_concurrent_per_target, time_windows
+		  FROM scan_policies WHERE tenant_id = $1 ORDER BY name, policy_id`
+
+	rows, err := c.Query(ctx, q, c.Tenant().UUID())
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+
+	var out []Policy
+	for rows.Next() {
+		var p Policy
+		if err := rows.Scan(&p.ID, &p.Name, &p.SafetyMode, &p.MaxRatePPS,
+			&p.MaxConcurrentPerTarget, &p.TimeWindows); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, p)
+	}
+	return out, mapError(rows.Err())
+}
+
+// AddScopeRule appends one allow or deny entry to a policy.
+func (Policies) AddScopeRule(ctx context.Context, c *Conn, policyID uuid.UUID, r ScopeRule) (*ScopeRule, error) {
+	const q = `
+		INSERT INTO policy_scope_rules
+			(tenant_id, policy_id, effect, match_type, match_value, precedence)
+		VALUES ($1, $2, $3::text::scope_rule_effect, $4::text::scope_match_type, $5, $6)
+		RETURNING scope_rule_id, effect, match_type, match_value, precedence`
+
+	var out ScopeRule
+	err := c.QueryRow(ctx, q, c.Tenant().UUID(), policyID, string(r.Effect),
+		string(r.MatchType), r.MatchValue, r.Precedence).
+		Scan(&out.ID, &out.Effect, &out.MatchType, &out.MatchValue, &out.Precedence)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return &out, nil
+}
+
+// DeleteScopeRule removes one entry.
+//
+// ============================================================================
+// Deleting a DENY rule widens what may be scanned.
+// ============================================================================
+//
+// It returns ErrNotFound rather than succeeding silently when nothing matched,
+// because "the exclusion is gone" and "the exclusion was never there" are the
+// same observable outcome for a caller that does not check — and an operator who
+// believes they removed the wrong rule will go looking for a different
+// explanation for the scan that follows.
+func (Policies) DeleteScopeRule(ctx context.Context, c *Conn, policyID, ruleID uuid.UUID) error {
+	const q = `
+		DELETE FROM policy_scope_rules
+		 WHERE tenant_id = $1 AND policy_id = $2 AND scope_rule_id = $3
+		RETURNING scope_rule_id`
+
+	var got uuid.UUID
+	return mapError(c.QueryRow(ctx, q, c.Tenant().UUID(), policyID, ruleID).Scan(&got))
+}
+
+// nullJSON turns an empty byte slice into a NULL, so the coalesce in each
+// statement supplies the column default rather than failing on invalid JSON.
+func nullJSON(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
+}

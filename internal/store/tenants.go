@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,7 +35,14 @@ type Tenant struct {
 	Name           string
 	DeploymentMode DeploymentMode
 	Status         TenantStatus
-	CreatedAt      time.Time
+
+	// Domain is the hostname this tenant is reached at, lowercased.
+	//
+	// Resolved to a tenant by tenant_for_domain() before any handler runs
+	// (ADR-041). Every deployment has one, on-prem included, where it is
+	// typically localhost.
+	Domain    string
+	CreatedAt time.Time
 }
 
 // Tenants is a stateless repository. It takes a *Conn per call rather than
@@ -48,16 +57,32 @@ type Tenants struct{}
 // every other table. So the caller generates the id, opens Write with it, and
 // inserts a row whose tenant_id is that same id — which the policy permits. No
 // unscoped path is needed, and none exists.
-func (Tenants) Create(ctx context.Context, c *Conn, name string, mode DeploymentMode) (*Tenant, error) {
+// The domain is REQUIRED, and there is no overload that omits it.
+//
+// ADR-041: a login request carries a hostname, a form and nothing else, so the
+// hostname is the only thing that can name a tenant before authentication. A
+// tenant created without one is a tenant nobody can sign in to — and a nullable
+// column with a "set it later" convention would make that a runtime surprise
+// rather than a compile error. On-prem sets one too, usually localhost; the
+// single-tenant path that skips this is the branch ADR-017 exists to prevent.
+//
+// Lowercased here as well as in SQL, because a caller with a mixed-case hostname
+// would otherwise write a row that tenant_for_domain can never match.
+func (Tenants) Create(ctx context.Context, c *Conn, name, domain string, mode DeploymentMode) (*Tenant, error) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return nil, fmt.Errorf("store: a tenant needs a domain (ADR-041); on-prem deployments use localhost")
+	}
+
 	const q = `
-		INSERT INTO tenants (tenant_id, name, deployment_mode)
-		VALUES ($1, $2, $3)
-		RETURNING tenant_id, name, deployment_mode, status, created_at`
+		INSERT INTO tenants (tenant_id, name, domain, deployment_mode)
+		VALUES ($1, $2, $3, $4)
+		RETURNING tenant_id, name, domain, deployment_mode, status, created_at`
 
 	var t Tenant
 	var id uuid.UUID
-	err := c.QueryRow(ctx, q, c.Tenant().UUID(), name, string(mode)).
-		Scan(&id, &t.Name, &t.DeploymentMode, &t.Status, &t.CreatedAt)
+	err := c.QueryRow(ctx, q, c.Tenant().UUID(), name, domain, string(mode)).
+		Scan(&id, &t.Name, &t.Domain, &t.DeploymentMode, &t.Status, &t.CreatedAt)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -73,14 +98,14 @@ func (Tenants) Create(ctx context.Context, c *Conn, name string, mode Deployment
 // method would be a way to write code that looks like it works and never does.
 func (Tenants) Get(ctx context.Context, c *Conn) (*Tenant, error) {
 	const q = `
-		SELECT tenant_id, name, deployment_mode, status, created_at
+		SELECT tenant_id, name, domain, deployment_mode, status, created_at
 		  FROM tenants
 		 WHERE tenant_id = $1`
 
 	var t Tenant
 	var id uuid.UUID
 	err := c.QueryRow(ctx, q, c.Tenant().UUID()).
-		Scan(&id, &t.Name, &t.DeploymentMode, &t.Status, &t.CreatedAt)
+		Scan(&id, &t.Name, &t.Domain, &t.DeploymentMode, &t.Status, &t.CreatedAt)
 	if err != nil {
 		return nil, mapError(err)
 	}

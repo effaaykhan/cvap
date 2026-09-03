@@ -48,6 +48,8 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 037 | Empty means deny for permission lists, unrestricted for constraint lists | Accepted |
 | 038 | A secret field is a func of a type that can be zeroised | Accepted |
 | 039 | Translated address forms expand exclusions and do not expand allows | Accepted |
-| 040 | A target that names an address must parse as one, or the job is refused | Accepted |
+| 040 | A target that names an address must parse as one, or the job is refused | Accepted; consequences amended by ADR-044 |
 | 041 | Pre-tenant resolution is a closed class of three (supersedes 033) | Accepted |
-| 042 | Targets are canonicalised once at planning, and re-canonicalised at the scan point | Accepted |
+| 042 | Targets are canonicalised once at planning, and re-canonicalised at the scan point | Superseded by ADR-044 |
+| 043 | The route registry is the API contract, and the OpenAPI document is emitted from it | Accepted |
+| 044 | Target canonicalisation, restated with three claims corrected (supersedes 042) | Accepted |

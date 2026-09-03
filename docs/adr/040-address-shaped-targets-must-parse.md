@@ -1,6 +1,6 @@
 # ADR-040: A target that names an address must parse as one, or the job is refused
 
-**Status:** Accepted
+**Status:** Accepted; consequences amended by ADR-044
 **Date:** 2026-09-03
 
 ## Context

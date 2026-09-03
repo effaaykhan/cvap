@@ -21,16 +21,37 @@ import (
 // coreVerdict is deliberately the expression offerWork uses, not a paraphrase of
 // it. If that line changes, this test has to change with it, which is the point:
 // the assertion is about the call site, not about the matcher.
+//
+// It was a paraphrase for one session, and an ADR-compliance pass caught it.
+// The driver called Canonicalise where offerWork calls Matches — which normalises
+// AND requires equality with the received bytes — so the two gave opposite
+// answers for every non-canonical case in the table, and the assertion was
+// against a code path Core does not run.
+//
+// The shape below is what actually happens, in order:
+//
+//  1. PLANNING canonicalises the operator's string and writes the result to
+//     scan_tasks.task_target (ADR-044). The table's Target column is that
+//     operator string, so this step belongs here.
+//  2. offerWork re-computes over the stored value with target.Matches and then
+//     matches, because the row can be written by something that skipped step 1.
+//
+// Both steps, because leaving either out tests something Core does not do.
 func TestCoreSiteAgreesWithTheSharedTable(t *testing.T) {
 	coreVerdict := func(raw string, allowed, exclusions []string) bool {
-		// The expression offerWork uses: canonicalise, then match. A target
-		// that will not canonicalise refuses the job (ADR-040), which is a
-		// denial here.
-		c, err := target.Canonicalise(raw)
+		// Step 1: planning. A target with no canonical form is not planned at
+		// all (ADR-040), which is a denial here.
+		planned, err := target.Canonicalise(raw)
 		if err != nil {
 			return false
 		}
-		ok, _ := scope.Permits(c, allowed, exclusions)
+		// Step 2: the expression offerWork uses, verbatim, over what planning
+		// stored.
+		canon, canonical := target.Matches(planned.Value)
+		if !canonical {
+			return false
+		}
+		ok, _ := scope.Permits(canon, allowed, exclusions)
 		return ok
 	}
 

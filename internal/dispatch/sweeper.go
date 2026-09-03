@@ -91,6 +91,26 @@ func (s *Sweeper) Sweep(ctx context.Context) {
 			return
 		}
 		s.sweepTenant(ctx, tenant)
+
+		// Planning runs in its own transactions, AFTER the lease pass.
+		//
+		// Not folded into sweepTenant's transaction: planning a /16 writes
+		// 65,536 rows, and holding the lease-expiry transaction open for that
+		// would delay ADR-012's at-most-once enforcement behind an operator's
+		// large scan.
+		//
+		// It is still SERIAL with the lease pass, and that is a decision rather
+		// than an oversight. This package's CLAUDE.md requires Interval to stay
+		// below store.LeaseTTL, because a sweep slower than the TTL delays the
+		// escalation on a job that must not retry — and planning work can now
+		// push a PASS past the interval whatever Interval is set to. Accepted
+		// because the alternative, a second ticker, means two goroutines writing
+		// to the same tenant's rows on independent schedules, and the ordering
+		// between "this scan was cancelled" and "this scan was planned" stops
+		// being decided by one loop. PlanBatchLimit bounds how far one tenant can
+		// push a pass; if that stops being enough, the fix is a separate ticker
+		// with the ordering thought through, not a bigger limit.
+		PlanPending(ctx, s.db, s.log, tenant, PlanBatchLimit)
 	}
 }
 

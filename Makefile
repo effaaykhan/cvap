@@ -286,9 +286,15 @@ dev-ca: ## Generate a development CA into ./secrets (gitignored)
 	@mkdir -p secrets
 	go run ./cmd/cvap-cli dev-ca ./secrets
 
-store-test: ## Run internal/store against the dev database as the application role
+# Every package whose tests SKIP without a database. They skip silently, which
+# is the hazard: a suite that skips looks exactly like a suite that passes in
+# `make test`, and internal/dispatch sat unrun in CI for that reason. Adding a
+# package here is what makes its integration tests actually execute.
+DB_TEST_PKGS = ./internal/store/... ./internal/control/... ./internal/dispatch/...
+
+store-test: ## Run the database-backed suites against the dev database as the application role
 	@test -n "$(APP_DATABASE_URL)" || { echo "APP_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
-	CVAP_TEST_DATABASE_URL="$(APP_DATABASE_URL)" go test ./internal/store/... -count=1 $(GOTEST_FLAGS)
+	CVAP_TEST_DATABASE_URL="$(APP_DATABASE_URL)" go test $(DB_TEST_PKGS) -count=1 $(GOTEST_FLAGS)
 
 migrate-new: ## Scaffold a migration pair: make migrate-new NAME=snake_case
 	@test -n "$(NAME)" || { echo "usage: make migrate-new NAME=snake_case"; exit 1; }

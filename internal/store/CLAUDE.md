@@ -154,17 +154,25 @@ peer that cannot authenticate, and one pointing at no certificate at all is an i
 no issuance record. `TestScanPointAndCertificateHistoryAgree` asserts the agreement after both
 enrolment and rotation.
 
-## Pre-tenant resolution is a closed class (ADR-033)
+## Pre-tenant resolution is a closed class of three (ADR-041, superseding ADR-033)
 
-Two lookups run before any tenant is known, because deriving the tenant is their whole job:
-`ResolveScanPointTenant` (certificate fingerprint) and `ResolveEnrollmentTokenTenant` (token
-hash). Both are thin wrappers over one unexported implementation, `resolvePreTenant`, which is
-the only place in this package that queries the raw pool.
+Three lookups run before any tenant is known, because deriving the tenant is their whole job:
+`ResolveScanPointTenant` (certificate fingerprint), `ResolveEnrollmentTokenTenant` (token hash)
+and `ResolveDomainTenant` (request hostname). All three are thin wrappers over one unexported
+implementation, `resolvePreTenant`, which is the only place in this package that queries the
+raw pool.
 
 Every member returns exactly `(TenantID, error)` and nothing wider, and every resolution
 failure is the same sentinel — distinguishing "unknown" from "expired" from "revoked" is an
-oracle. A third member amends ADR-033; `encapsulation_test.go` checks the class, so adding one
+oracle. A FOURTH member amends ADR-041; `encapsulation_test.go` checks the class, so adding one
 without reading the ADR fails the build.
+
+`ResolveDomainTenant` is by far the hottest: it runs on every operator API request, not only at
+login, because a session cookie is scoped to the tenant that issued it and cannot be validated
+until the tenant is known. **`Tenants.Create` therefore requires a domain and has no overload
+that omits one** — on-prem included, where it is usually `localhost`. A tenant created without
+one is a tenant nobody can sign in to, and the single-tenant path that skips resolution is the
+branch ADR-017 exists to prevent.
 
 Resolution is **not** redemption. `ResolveEnrollmentTokenTenant` says which tenant to open a
 transaction as; single-use is enforced inside it by `EnrollmentTokens.Redeem`, a conditional
@@ -178,7 +186,10 @@ say very different things about what went wrong. Every one of them is also a sch
 
 **The API layer must not return these verbatim.** Map to a sentinel, log the detail, return
 something that does not describe the schema to whoever sent the request. Written down here
-while the constraint is being created rather than left to be remembered when the API lands.
+while the constraint was being created rather than left to be remembered when the API landed —
+and it landed: `internal/control/api/errors.go` is the one-way mapping, and
+`TestErrorBodiesNeverCarrySchemaDetail` drives it with an error carrying a constraint name, a
+column name and a message.
 
 Two errors are deliberately conflated and two deliberately are not:
 

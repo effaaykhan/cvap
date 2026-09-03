@@ -32,7 +32,7 @@ func TestRuntimeSiteAgreesWithTheSharedTable(t *testing.T) {
 
 	for _, tc := range scopetest.Cases {
 		t.Run(tc.Name, func(t *testing.T) {
-			// The runtime is fed what the WIRE would carry, which since ADR-042
+			// The runtime is fed what the WIRE would carry, which since ADR-044
 			// is the canonical form Core wrote at planning — not the operator's
 			// raw string. A case Core refuses to canonicalise never reaches a
 			// scan point at all, and the table records that as a denial.
@@ -82,7 +82,6 @@ func TestTheRuntimeRecomputesRatherThanValidating(t *testing.T) {
 		"https://corp.example/x", // a URL survived planning
 		"CORP.example",           // case survived planning
 		" 192.0.2.5",             // whitespace was reintroduced on the wire
-		"192.0.2.0/24",           // a prefix where planning should have decomposed
 	} {
 		h := newEngineHost(log, "/nonexistent", "job-1", allowed, nil)
 		if ok, _ := h.authorise(raw); ok {

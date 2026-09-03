@@ -293,17 +293,20 @@ func TestNoConnectionTypeInInterfacesAliasesOrVars(t *testing.T) {
 	}
 }
 
-// preTenantMembers is the ADR-033 closed class: the lookups that run BEFORE any
+// preTenantMembers is the ADR-041 closed class: the lookups that run BEFORE any
 // tenant is known, because deriving the tenant is their whole job.
 //
-// A third member is an amendment to ADR-033, not an addition to this list — but
+// A FOURTH member is an amendment to ADR-041, not an addition to this list — but
 // the list is checked, so adding one without reading the ADR fails here with a
-// message pointing at it.
+// message pointing at it. ADR-033 closed the class at two and was superseded
+// when the operator API needed the third; that is the process working, and the
+// number in this comment is the thing to change when it happens again.
 var preTenantMembers = map[string]bool{
 	"resolvePreTenant":             true, // the shared implementation
 	"resolveTenant":                true, // unexported: fingerprint
 	"ResolveScanPointTenant":       true, // exported member: fingerprint
 	"ResolveEnrollmentTokenTenant": true, // exported member: token hash
+	"ResolveDomainTenant":          true, // exported member: request hostname
 }
 
 // Every member of the class returns exactly (TenantID, error) and nothing wider.
@@ -314,7 +317,7 @@ var preTenantMembers = map[string]bool{
 // — it would reopen exactly the hole Read and Write close.
 //
 // The unexported implementation must stay unexported, and the exported wrappers
-// must stay exactly two: they are the only way to reach a SECURITY DEFINER
+// must stay exactly three: they are the only way to reach a SECURITY DEFINER
 // function from outside this package.
 func TestPreTenantClassStaysNarrow(t *testing.T) {
 	fset, files := parsePackage(t)
@@ -333,21 +336,21 @@ func TestPreTenantClassStaysNarrow(t *testing.T) {
 				if fn.Type.Results != nil {
 					got = len(fn.Type.Results.List)
 				}
-				t.Errorf("%s: %s returns %d results; every ADR-033 member returns exactly "+
+				t.Errorf("%s: %s returns %d results; every ADR-041 member returns exactly "+
 					"(TenantID, error)", name, fn.Name.Name, got)
 				continue
 			}
 
 			first := fn.Type.Results.List[0].Type
 			if id, ok := first.(*ast.Ident); !ok || id.Name != "TenantID" {
-				t.Errorf("%s: %s must return TenantID and nothing wider (ADR-033). Returning "+
+				t.Errorf("%s: %s must return TenantID and nothing wider (ADR-041). Returning "+
 					"the row turns a pre-tenant lookup into a cross-tenant read primitive.",
 					name, fn.Name.Name)
 			}
 			for _, res := range fn.Type.Results.List {
 				if bad := typeMentions(fset, res.Type); bad != "" {
 					t.Errorf("%s: %s returns %s. A pre-tenant path that hands back a "+
-						"connection has no tenant on it (ADR-033).", name, fn.Name.Name, bad)
+						"connection has no tenant on it (ADR-041).", name, fn.Name.Name, bad)
 				}
 			}
 		}
@@ -355,8 +358,8 @@ func TestPreTenantClassStaysNarrow(t *testing.T) {
 
 	for member := range preTenantMembers {
 		if !seen[member] {
-			t.Errorf("ADR-033 names %s as a member of the pre-tenant class, but it is not in "+
-				"this package. Amend ADR-033 and this list together.", member)
+			t.Errorf("ADR-041 names %s as a member of the pre-tenant class, but it is not in "+
+				"this package. Amend ADR-041 and this list together.", member)
 		}
 	}
 }
@@ -366,7 +369,7 @@ func TestPreTenantClassStaysNarrow(t *testing.T) {
 // This is the check that makes "the guard checks the class" true. The test above
 // only inspects four names it already knows, so a fifth wrapper —
 // ResolveApiKeyTenant, say — would pass it while being exactly the unreviewed
-// third member ADR-033 exists to catch.
+// fourth member ADR-041 exists to catch.
 //
 // db.pool is the seam: every pre-tenant lookup reaches it, and everything else
 // in the package goes through Read or Write. So any function that touches
@@ -382,7 +385,7 @@ func TestNothingElseTouchesTheRawPool(t *testing.T) {
 	poolLifecycle := map[string]bool{
 		"Open": true, "verifyRole": true, "Close": true, "Ping": true, "inTx": true,
 	}
-	// ADR-036: the sweep enumerator. A separate class from ADR-033 because it is
+	// ADR-036: the sweep enumerator. A separate class from ADR-041 because it is
 	// enumeration rather than resolution, and its shape is pinned by
 	// TestSweepEnumeratorStaysNarrow rather than by the pre-tenant checks.
 	for m := range sweepEnumerators {
@@ -407,7 +410,7 @@ func TestNothingElseTouchesTheRawPool(t *testing.T) {
 				if sel.Sel.Name == "pool" {
 					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "db" {
 						t.Errorf("%s: %s touches db.pool directly. Either it is an undeclared "+
-							"member of the ADR-033 pre-tenant class or the ADR-036 sweep class — "+
+							"member of the ADR-041 pre-tenant class or the ADR-036 sweep class — "+
 							"amend that ADR — or it is a query with no tenant context, which Read "+
 							"and Write exist to prevent.",
 							name, fn.Name.Name)
@@ -415,7 +418,7 @@ func TestNothingElseTouchesTheRawPool(t *testing.T) {
 				}
 				if sel.Sel.Name == "resolvePreTenant" {
 					t.Errorf("%s: %s calls resolvePreTenant but is not a declared member of the "+
-						"ADR-033 class. Adding a member is an amendment to that ADR.",
+						"ADR-041 class. Adding a member is an amendment to that ADR.",
 						name, fn.Name.Name)
 				}
 				return true

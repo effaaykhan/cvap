@@ -529,6 +529,38 @@ func (s *Service) onTerminal(ctx context.Context, sess *session, t *scanpointv1.
 			return err
 		}
 
+		// JobTerminal.detail is PERSISTED, for every abnormal reason.
+		//
+		// The proto defines it as "operator-facing detail: which engine failed,
+		// which target halted the scan", the runtime fills it in — and Core read
+		// it nowhere at all, so every one of those sentences was dropped on
+		// arrival. An ADR-compliance pass found it, and it matters most for the
+		// case ADR-044 corrects: a canonicalisation mismatch and a scope
+		// violation share SCOPE_VIOLATION_HALT, and this field is the only thing
+		// that tells them apart.
+		//
+		// Not recorded for an ordinary completion: an event per finished job is
+		// noise that makes the abnormal ones harder to find, and there is
+		// nothing to say about a job that ended the way it was meant to.
+		if reason != store.TerminationCompleted {
+			detail := map[string]any{"reason": string(reason)}
+			if d := t.GetDetail(); d != "" {
+				// Bounded. It arrives from the network and lands in jsonb that
+				// an operator UI renders.
+				detail["detail"] = truncate(d, MaxTerminalDetail)
+			}
+			if err := (store.AuditEvents{}).Record(ctx, c, store.AuditEvent{
+				ActorID:      &sess.spID,
+				ActorType:    store.ActorScanPoint,
+				Action:       "job.terminated",
+				ResourceType: "scan_job",
+				ResourceID:   &jobID,
+				Detail:       detail,
+			}); err != nil {
+				return err
+			}
+		}
+
 		// credentials_zeroised is an ATTESTATION. A compromised scan point can
 		// set it and lie, and nothing here would catch that. It exists to catch
 		// OUR bugs: ADR-020 requires zeroisation on completion, lease loss and
@@ -916,7 +948,7 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 				// row can be written by something that skipped planning:
 				// scan_tasks.task_target is free text with no constraint tying
 				// it to its scan_targets row. The scan point runs the same
-				// comparison again on its own machine (ADR-024, ADR-042).
+				// comparison again on its own machine (ADR-024, ADR-044).
 				canon, canonical := target.Matches(t.TaskTarget)
 				ok, why := canonical, "target is not in canonical form"
 				if canonical {
@@ -1295,4 +1327,19 @@ func clamp(s string) string {
 		return s
 	}
 	return s[:max]
+}
+
+// MaxTerminalDetail bounds JobTerminal.detail before it is stored.
+//
+// It is scan-point-supplied text that ends up in a jsonb column an operator UI
+// renders. 1 KiB is far more than any message the runtime produces and far less
+// than a scan point could send.
+const MaxTerminalDetail = 1024
+
+// truncate bounds a string from the wire.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
