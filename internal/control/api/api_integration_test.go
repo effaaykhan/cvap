@@ -917,12 +917,30 @@ func TestLoginDoesNotHoldADatabaseConnectionWhileHashing(t *testing.T) {
 		<-done
 	}
 
-	// A generous bound: the point is orders of magnitude, not milliseconds. The
-	// broken version produced 1.1s against a 1.8ms baseline.
-	if worst > 250*time.Millisecond {
+	// TWO conditions, both required, and the reason is that the first version of
+	// this bound was an absolute 250ms tuned on a four-core developer machine —
+	// which failed in CI at 325ms against a 12.9ms baseline, on a two-core
+	// runner under -race where everything is an order of magnitude slower and
+	// maxConcurrentHashes is 1.
+	//
+	// The property is not "this is fast". It is "an unauthenticated endpoint does
+	// not starve an authenticated one by orders of magnitude", and that has to be
+	// asked relative to the machine. The broken version produced 1.1s against a
+	// 1.8ms baseline — 600x — and the CI number that provoked this rewrite was
+	// 25x, which is what a busy two-core box looks like rather than what a
+	// starved pool looks like.
+	//
+	// A floor as well as a ratio, because a very fast baseline makes a small
+	// absolute delay look enormous.
+	const (
+		floor = 500 * time.Millisecond
+		ratio = 30
+	)
+	if worst > floor && worst > ratio*baseline {
 		t.Errorf("under %d unauthenticated login attempts an unrelated authenticated read took "+
-			"%v (baseline %v). The password hash is holding a pooled connection, so anyone who "+
-			"can reach the login endpoint can starve the deployment.", attackers, worst, baseline)
+			"%v — %.0fx the %v baseline. The password hash is holding a pooled connection, so "+
+			"anyone who can reach the login endpoint can starve the deployment.",
+			attackers, worst, float64(worst)/float64(baseline), baseline)
 	}
 }
 
