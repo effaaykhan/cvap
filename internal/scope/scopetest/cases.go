@@ -369,6 +369,254 @@ var Cases = []Case{
 		Exclusions: []string{"64:ff9b::"},
 		Want:       true,
 	},
+	// ------------------------------------------------------------------
+	// Notation that names an address (ADR-040).
+	//
+	// These all reached hostname equality before, where no address or CIDR
+	// exclusion could touch them — a bypass reachable through supported
+	// configuration, since a hostname- or url-typed allow can carry the same
+	// string. Both directions matter: the exclusion must reach them, and the
+	// allow must too, because they name a host the operator authorised.
+	// ------------------------------------------------------------------
+	{
+		Name:       "a port does not carry a target past an exclusion",
+		Target:     "192.0.2.5:443",
+		Allowed:    []string{"192.0.2.0/24"},
+		Exclusions: []string{"192.0.2.5"},
+		Want:       false,
+	},
+	{
+		Name:    "and a port does not put an allowed host out of scope",
+		Target:  "192.0.2.5:443",
+		Allowed: []string{"192.0.2.0/24"},
+		Want:    true,
+	},
+	{
+		Name:       "brackets do not either",
+		Target:     "[192.0.2.5]",
+		Allowed:    []string{"192.0.2.0/24"},
+		Exclusions: []string{"192.0.2.5"},
+		Want:       false,
+	},
+	{
+		Name:       "nor a bracketed IPv6 address with a port",
+		Target:     "[2001:db8::1]:8443",
+		Allowed:    []string{"2001:db8::/32"},
+		Exclusions: []string{"2001:db8::1"},
+		Want:       false,
+	},
+	{
+		Name:       "nor the DNS root label",
+		Target:     "192.0.2.5.",
+		Allowed:    []string{"192.0.2.0/24"},
+		Exclusions: []string{"192.0.2.5"},
+		Want:       false,
+	},
+	{
+		// A URL is judged on the host it would reach, not on its punctuation.
+		Name:       "a URL is judged on its host",
+		Target:     "https://192.0.2.5/admin",
+		Allowed:    []string{"192.0.2.0/24"},
+		Exclusions: []string{"192.0.2.5"},
+		Want:       false,
+	},
+	{
+		Name:    "and an allowed URL host is in scope",
+		Target:  "https://192.0.2.5/admin",
+		Allowed: []string{"192.0.2.0/24"},
+		Want:    true,
+	},
+	{
+		// The branch that closes the bypass: address-shaped and unparseable is
+		// REFUSED, never compared as a hostname. A leading zero is the case the
+		// audit named — netip rejects it, some resolvers accept it.
+		Name:    "an address-shaped target that will not parse is refused",
+		Target:  "192.000.2.5",
+		Allowed: []string{"192.0.2.0/24", "192.000.2.5"},
+		Want:    false,
+	},
+	{
+		Name:    "even when a hostname rule spells it identically",
+		Target:  "192.0.2.5.999",
+		Allowed: []string{"192.0.2.5.999"},
+		Want:    false,
+	},
+	{
+		Name:    "an unbalanced bracket is address-shaped and refused",
+		Target:  "[192.0.2.5",
+		Allowed: []string{"[192.0.2.5"},
+		Want:    false,
+	},
+	{
+		Name:    "a malformed IPv6 address is refused",
+		Target:  "2001:db8::zz",
+		Allowed: []string{"2001:db8::/32", "2001:db8::zz"},
+		Want:    false,
+	},
+	{
+		// A genuine hostname is untouched, including one beginning with a
+		// digit — the obvious leading-character test would have refused it.
+		Name:    "a hostname starting with a digit is still a hostname",
+		Target:  "1host.corp.example",
+		Allowed: []string{"1host.corp.example"},
+		Want:    true,
+	},
+	{
+		Name:       "and is still excluded by a hostname rule",
+		Target:     "1host.corp.example",
+		Allowed:    []string{"corp.example", "1host.corp.example"},
+		Exclusions: []string{"1host.corp.example"},
+		Want:       false,
+	},
+	{
+		// A URL is judged on the host it would reach, in BOTH directions.
+		// Scope authorises hosts; what is requested from a host is
+		// safety_mode's question, not this one.
+		Name:       "an exclusion reaches the host inside a URL",
+		Target:     "https://printer.corp.example/setup",
+		Allowed:    []string{"https://printer.corp.example/setup"},
+		Exclusions: []string{"printer.corp.example"},
+		Want:       false,
+	},
+	{
+		Name:    "and an allow of the host authorises a URL on it",
+		Target:  "https://scanner.corp.example/status",
+		Allowed: []string{"scanner.corp.example"},
+		Want:    true,
+	},
+	{
+		Name:       "a URL on an excluded address is excluded",
+		Target:     "http://evil.example@192.0.2.5/admin",
+		Allowed:    []string{"192.0.2.0/24"},
+		Exclusions: []string{"192.0.2.5"},
+		Want:       false,
+	},
+	{
+		Name:    "an ordinary hostname is unaffected",
+		Target:  "scanner.corp.example",
+		Allowed: []string{"scanner.corp.example"},
+		Want:    true,
+	},
+	{
+		// Translation and notation compose: a NAT64 form with a port is still
+		// the v4 host behind it.
+		Name:       "a translated form with a port is still excluded",
+		Target:     "[64:ff9b::192.0.2.5]:443",
+		Allowed:    []string{"64:ff9b::/96"},
+		Exclusions: []string{"192.0.2.5"},
+		Want:       false,
+	},
+	// ------------------------------------------------------------------
+	// Notations an audit walked past when the shape test was a character
+	// set rather than a component test (ADR-040). Every one of these
+	// reaches 192.0.2.5, or a range containing it, through inet_aton
+	// semantics — and every one fell through to hostname equality, where
+	// no address exclusion could touch it.
+	// ------------------------------------------------------------------
+	{
+		Name:    "a hex integer address form is refused",
+		Target:  "0xC0000205",
+		Allowed: []string{"192.0.2.0/24", "0xC0000205"},
+		Want:    false,
+	},
+	{
+		Name:    "a decimal integer address form is refused",
+		Target:  "3221225989",
+		Allowed: []string{"192.0.2.0/24", "3221225989"},
+		Want:    false,
+	},
+	{
+		Name:    "dotted hex components are refused",
+		Target:  "0xC0.0x00.0x02.0x05",
+		Allowed: []string{"192.0.2.0/24", "0xC0.0x00.0x02.0x05"},
+		Want:    false,
+	},
+	{
+		Name:    "a mixed decimal and hex form is refused",
+		Target:  "192.0.0x2.5",
+		Allowed: []string{"192.0.2.0/24", "192.0.0x2.5"},
+		Want:    false,
+	},
+	{
+		Name:    "an octal component form is refused",
+		Target:  "0300.0.2.5",
+		Allowed: []string{"192.0.2.0/24", "0300.0.2.5"},
+		Want:    false,
+	},
+	{
+		// How an operator writes a range by hand, and it names up to 256
+		// hosts — the worst of these to leave reachable.
+		Name:    "a hyphen range is refused",
+		Target:  "192.0.2.1-50",
+		Allowed: []string{"192.0.2.0/24", "192.0.2.1-50"},
+		Want:    false,
+	},
+	{
+		Name:    "a full-address hyphen range is refused",
+		Target:  "10.0.0.0-10.0.0.255",
+		Allowed: []string{"10.0.0.0/24", "10.0.0.0-10.0.0.255"},
+		Want:    false,
+	},
+	{
+		Name:    "a comma list is refused",
+		Target:  "192.0.2.5,192.0.2.6",
+		Allowed: []string{"192.0.2.0/24", "192.0.2.5,192.0.2.6"},
+		Want:    false,
+	},
+	{
+		// UTS-46 maps these to ASCII before resolution.
+		Name:    "fullwidth digits are refused",
+		Target:  "２.０.２.５",
+		Allowed: []string{"2.0.2.0/24", "２.０.２.５"},
+		Want:    false,
+	},
+	{
+		// Bare hex is not a number to inet_aton either, so these stay
+		// hostnames — which is what stops the component test over-refusing.
+		Name:    "a hostname of hex letters is still a hostname",
+		Target:  "dead.beef",
+		Allowed: []string{"dead.beef"},
+		Want:    true,
+	},
+	{
+		Name:    "and one that merely starts with a digit",
+		Target:  "1host.corp.example",
+		Allowed: []string{"1host.corp.example"},
+		Want:    true,
+	},
+	{
+		// SplitHostPort does not validate the port: it splits on the last
+		// colon and returns whatever follows. A malformed URL therefore
+		// normalised to its SCHEME, which disabled both the exclusion check
+		// and the shape test at once.
+		Name:       "a malformed URL does not normalise to its scheme",
+		Target:     "https://printer.corp.example /x",
+		Allowed:    []string{"https", "https://printer.corp.example /x"},
+		Exclusions: []string{"printer.corp.example"},
+		Want:       false,
+	},
+	{
+		Name:       "nor when the escape is invalid",
+		Target:     "https://%70rinter.corp.example/",
+		Allowed:    []string{"https", "https://%70rinter.corp.example/"},
+		Exclusions: []string{"printer.corp.example"},
+		Want:       false,
+	},
+	{
+		// Brackets are consumed by normalisation, so the fact of them has to
+		// travel — otherwise "[ 192.0.2.5 ]" loses its strongest signal.
+		Name:       "whitespace inside brackets does not defeat an exclusion",
+		Target:     "[ 192.0.2.5 ]",
+		Allowed:    []string{"192.0.2.0/24"},
+		Exclusions: []string{"192.0.2.5"},
+		Want:       false,
+	},
+	{
+		Name:    "a bracketed hex form is refused",
+		Target:  "[0xC0000205]",
+		Allowed: []string{"192.0.2.0/24", "[0xC0000205]"},
+		Want:    false,
+	},
 	{
 		Name:    "an IPv6 target inside an IPv6 allow",
 		Target:  "2001:db8::5",

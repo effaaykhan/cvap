@@ -87,13 +87,17 @@ because it records what the failures looked like, not because they are live.
 - `::/96` guards `::` and `::1`. `2002::`/`64:ff9b::` extract 0.0.0.0 and `2001::` extracts
   255.255.255.255 with no equivalent guard, but all three over-match, which is fail-closed.
 
-## Standing class, wider than this diff
+## Standing class, wider than this diff — PARTLY closed by ADR-040
 
 An IP-shaped target string that `netip` REJECTS falls to `matches`'s case-insensitive string
 equality, where no IP exclusion can reach it. `192.0.2.5:443`, `[192.0.2.5]`, `192.0.2.5.` and
 `64:ff9b::192.000.2.5` all get past denies of `192.0.2.5` and `192.0.2.0/24` when a
 `hostname`- or `url`-typed allow rule carries the identical string. `MatchURL` is an accepted
 match type in `scopePlan`, so this is reachable through supported configuration.
+
+ADR-040 closed the notations without letters. The ones with letters, plus hyphen ranges and a
+new scheme-as-host defect, are recorded in [[scope-target-notation-bypasses]] — read that first
+on any `internal/scope` diff.
 
 Related: [[dispatch-scope-and-kill-gaps]], [[scanpoint-runtime-bypasses]],
 [[lab-scope-guard-bypasses]]

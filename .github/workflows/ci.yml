@@ -354,3 +354,14 @@ jobs:
       # cases that SKIP locally actually run here.
       - name: Frozen contract verifier (PostToolUse)
         run: python3 .claude/hooks/test_verify_contracts.py
+
+      # Mutation testing for the guard scripts, and it earns its place: these
+      # suites have been green over checks they never reached three sessions
+      # running, every time because each existing case was caught by a
+      # DIFFERENT check first. A surviving mutation fails the build naming the
+      # check nothing exercises.
+      #
+      # It runs the secret-logging suite too, which is the gate standing
+      # between an enrollment token and a log line.
+      - name: Guard suites actually reach their checks
+        run: make mutate

@@ -9,7 +9,7 @@
         proto proto-tools proto-gen proto-lint proto-breaking proto-verify \
         secret-logging secret-logging-test \
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
-        env-check app-role store-test e2e dev-ca gosec \
+        env-check app-role store-test e2e dev-ca gosec mutate \
         contract-guard-test
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
@@ -79,7 +79,7 @@ fmt: ## Format and tidy
 tidy: fmt
 
 ci: build vet test lint gosec proto frontmatter gitignore-test scope-guard-test \
-    contract-guard-test secret-logging secret-logging-test env-check ## Everything CI runs, locally
+    contract-guard-test secret-logging secret-logging-test mutate env-check ## Everything CI runs, locally
 
 ## ---------- wire contract ----------
 
@@ -342,6 +342,21 @@ gitignore-test: ## Assert .gitignore still covers what it must
 
 scope-guard-test: ## Test the lab scope guard against its case table
 	python3 .claude/hooks/test_lab_scope_guard.py
+
+# Mutation testing for the guard scripts.
+#
+# A suite that has never failed proves nothing, and these suites have been green
+# over checks they never reached three sessions running — the in-HEAD test, the
+# dedup key, and "exactly one line changed" — each time because every existing
+# case was caught by a DIFFERENT check first. Running the mutations by hand is
+# what let that happen twice more after the first discovery.
+#
+# Each suite declares its own mutation list beside itself, so adding a check
+# means adding the mutation that proves the check is reached, in the same diff.
+# A surviving mutation fails the build with the name of the check nothing
+# exercises.
+mutate: ## Assert every guard check is actually reached by its test suite
+	python3 .claude/hooks/mutate.py
 
 contract-guard-test: ## Test both halves of the frozen-contract guard
 	python3 .claude/hooks/test_protect_contracts.py

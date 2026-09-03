@@ -36,6 +36,55 @@ HOOK = pathlib.Path(os.environ.get("CVAP_VERIFY_HOOK") or
 
 ALLOW, BLOCK, SKIP = "ALLOW", "BLOCK", "SKIP"
 
+# --- mutation testing (make mutate) -----------------------------------------
+#
+# This list is why the suite is worth anything. Running it by hand found three
+# real coverage gaps in three sessions — the in-HEAD check, the dedup key, and
+# "exactly one line changed" — and in each the existing cases were caught by a
+# DIFFERENT check first, so the one under test was never reached.
+#
+# Adding a check to verify-contracts.py means adding its mutation here.
+MUTATION_SUBJECT = ".claude/hooks/verify-contracts.py"
+MUTATION_ENV = "CVAP_VERIFY_HOOK"
+
+MUTATIONS = [
+    ("reports nothing at all",
+     "    if not reportable:\n        return 0",
+     "    if True:\n        return 0"),
+    ("ADRs are not watched",
+     '        elif ADR_RE.match(path):\n            out.append((path, "adr"))\n',
+     ""),
+    ("dedup keys on the path rather than the content",
+     'fresh = [(p, k) for p, k in reportable if "%s:%s" % (p, _fingerprint(p)) not in seen]\n'
+     '    if not fresh:\n        return 0\n\n'
+     '    for path, _ in reportable:\n'
+     '        seen.add("%s:%s" % (path, _fingerprint(path)))',
+     'fresh = [(p, k) for p, k in reportable if p not in seen]\n'
+     '    if not fresh:\n        return 0\n\n'
+     '    for path, _ in reportable:\n'
+     '        seen.add(path)'),
+    ("an uncommitted draft is treated as frozen",
+     "if not path or not _in_head(path):",
+     "if not path:"),
+    ("the proto escape also excuses ADRs",
+     'if kind == "proto" and escaped:',
+     "if escaped:"),
+    ("supersession permits any edit to the named ADR",
+     "    changed = [(b, a) for b, a in zip(before, after) if b != a]\n"
+     "    if len(changed) != 1:\n        return False",
+     "    changed = [(b, a) for b, a in zip(before, after) if b != a]\n"
+     "    if False:\n        return False"),
+    ("supersession ignores which ADR was named",
+     "        if int(want) != int(have):\n            return False",
+     "        if False:\n            return False"),
+    ("supersession ignores the line count",
+     "    if len(before) != len(after):\n        return False",
+     "    if False:\n        return False"),
+    ("supersession ignores whether the changed line is the status",
+     "    return bool(status.match(was.strip()) and status.match(is_.strip()))",
+     "    return True"),
+]
+
 PROTO = "proto/cybersentinel/scanpoint/v1/frozen.proto"
 ADR = "docs/adr/900-committed.md"
 DRAFT = "docs/adr/901-draft.md"

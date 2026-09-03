@@ -15,12 +15,45 @@ Run: python3 .github/scripts/test_check_secret_logging.py
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
 import sys
 import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location("csl", HERE / "check_secret_logging.py")
+SUBJECT = pathlib.Path(os.environ.get("CVAP_SECRET_LOGGING_SCRIPT") or
+                       HERE / "check_secret_logging.py")
+
+# --- mutation testing (make mutate) -----------------------------------------
+#
+# The gate that stops a secret-bearing protobuf type reaching a log call. Its
+# case table is the only thing standing between an enrollment token and a log
+# line, so it gets the same treatment as the contract guards: each mutation
+# removes one check, and the suite must go red for every one.
+#
+# Adding a check to check_secret_logging.py means adding its mutation here.
+MUTATION_SUBJECT = ".github/scripts/check_secret_logging.py"
+MUTATION_ENV = "CVAP_SECRET_LOGGING_SCRIPT"
+
+MUTATIONS = [
+    ("nothing is ever flagged",
+     "def check_sources() -> list[str]:",
+     "def check_sources() -> list[str]:\n    return []\n"),
+    ("fmt calls are not logging calls",
+     r"|fmt\.(?:Print|Printf|Println|Sprint|Sprintf|Sprintln|Errorf|Fprint|Fprintf|Fprintln)",
+     r"|fmt\.(?:NeverMatchesAnything)"),
+    ("slog calls are not logging calls",
+     r"slog\.(?:Any|Info|Debug|Warn|Error|Log|InfoContext|DebugContext|WarnContext|ErrorContext|Group|String)",
+     r"slog\.(?:NeverMatchesAnything)"),
+    ("identifiers declared as a secret type are not tracked",
+     "    return {i for i in idents if i not in {\"_\", \"err\", \"ctx\"}}",
+     "    return set()"),
+    ("string literals are not stripped before the search",
+     "def without_strings(text: str) -> str:",
+     "def without_strings(text: str) -> str:\n    return text\n"),
+]
+
+spec = importlib.util.spec_from_file_location("csl", SUBJECT)
 csl = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(csl)
 

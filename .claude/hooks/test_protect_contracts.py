@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -25,7 +26,71 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-HOOK = ROOT / ".claude" / "hooks" / "protect-contracts.py"
+HOOK = pathlib.Path(os.environ.get("CVAP_PROTECT_HOOK") or
+                    ROOT / ".claude" / "hooks" / "protect-contracts.py")
+
+# --- mutation testing (make mutate) -----------------------------------------
+#
+# Each entry removes one check this suite is supposed to exercise. `make mutate`
+# applies them one at a time and requires the suite to go RED for every one; a
+# survivor names a check no case reaches.
+#
+# Adding a check to protect-contracts.py means adding its mutation here, in the
+# same diff. That is the whole discipline: a case table can be green over a
+# check it never reaches, and running this by hand is how three real gaps
+# survived three sessions.
+MUTATION_SUBJECT = ".claude/hooks/protect-contracts.py"
+MUTATION_ENV = "CVAP_PROTECT_HOOK"
+
+MUTATIONS = [
+    ("blocks nothing at all",
+     "        print(message, file=sys.stderr)\n        return 2",
+     "        print(message, file=sys.stderr)\n        return 0"),
+    ("proto files are not protected",
+     "    if is_protected_proto(path):\n        return PROTO_MSG",
+     "    if False:\n        return PROTO_MSG"),
+    ("ADRs are not protected",
+     "    if is_protected_adr(path):\n        return ADR_MSG",
+     "    if False:\n        return ADR_MSG"),
+    ("the escape is honoured from inside the command",
+     'return os.environ.get(ESCAPE_VAR, "0") == "1"',
+     'return os.environ.get(ESCAPE_VAR, "0") == "1" or True'),
+    # Anchored on the surrounding block, because the same line appears in both
+    # file_path and command mode — and the driver treats a non-unique anchor as
+    # a failure, since a mutation that matches twice is one that tested nothing
+    # in particular. Both modes get their own entry.
+    ("the proto escape also opens ADRs, file_path mode",
+     "        message = classify(file_path)\n"
+     "        if message is None:\n"
+     "            return 0\n"
+     "        if message is PROTO_MSG and escaped():",
+     "        message = classify(file_path)\n"
+     "        if message is None:\n"
+     "            return 0\n"
+     "        if escaped():"),
+    ("the proto escape also opens ADRs, command mode",
+     "            message = classify(candidate)\n"
+     "            if message is None:\n"
+     "                continue\n"
+     "            if message is PROTO_MSG and escaped():",
+     "            message = classify(candidate)\n"
+     "            if message is None:\n"
+     "                continue\n"
+     "            if escaped():"),
+    ("supersession ignores which ADR was named",
+     "        return int(want) == int(have)",
+     "        return True"),
+    ("an uncommitted draft check that always says draft",
+     '    return _is_committed("docs/adr/" + p.name)',
+     "    return False"),
+    ("the repository toplevel is not checked",
+     "        if pathlib.Path(top.stdout.strip()).resolve() != ROOT:\n            return True",
+     "        if False:\n            return True"),
+    ("command mode reads no commands",
+     "    for segment in _segments(command):",
+     "    for segment in []:"),
+]
+
 
 ALLOW, BLOCK = "ALLOW", "BLOCK"
 
