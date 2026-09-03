@@ -295,5 +295,36 @@ BEGIN
 
     INSERT INTO audit_events (tenant_id, actor_id, actor_type, action, resource_type, resource_id, detail)
         VALUES (p_tenant, v_user, 'user', 'scan.start', 'scan', v_scan, '{"fixture":true}'::jsonb);
+
+    -- The operator API's three tenant-scoped tables (migration 0026). Each
+    -- needs a row or case 1's sweep proves nothing for it — which is how the
+    -- sweep found them missing rather than a reviewer having to.
+
+    INSERT INTO tenant_auth_config (tenant_id, method, oidc_issuer, oidc_client_id)
+        VALUES (p_tenant, 'oidc', 'https://idp.invalid/', 'fixture-client-' || p_tag);
+
+    -- A real argon2id verifier of no particular password. The CHECK requires the
+    -- $argon2id$ prefix, and a fixture that satisfied it with a placeholder
+    -- would teach the wrong shape to whoever copies this row.
+    INSERT INTO user_credentials (tenant_id, user_id, password_hash)
+        VALUES (p_tenant, v_user,
+                '$argon2id$v=19$m=65536,t=3,p=1$' ||
+                'ZmFrZXNhbHRmYWtlc2FsdA$' ||
+                'ZmFrZWtleWZha2VrZXlmYWtla2V5ZmFrZWtleWZha2VrZXk');
+
+    -- EXPIRED and revoked, and expiring within the 12-hour cap the CHECK
+    -- enforces — a fixture that violated it would be a fixture teaching a
+    -- session lifetime the schema forbids.
+    -- EXPIRED and revoked. A live session in the fixtures is a working
+    -- credential in every database loaded with them, and the token hash below is
+    -- the SHA-256 of a known string — which is exactly why it must not
+    -- authenticate anything. Same reasoning as the resolved kill switch above.
+    INSERT INTO sessions (tenant_id, user_id, token_hash, csrf_hash,
+                          issued_at, expires_at, revoked_at, revoked_reason)
+        VALUES (p_tenant, v_user,
+                sha256(('fixture-session-' || p_tag)::bytea),
+                sha256(('fixture-csrf-' || p_tag)::bytea),
+                now() - interval '2 days', now() - interval '2 days' + interval '1 hour',
+                now() - interval '2 days', 'fixture: never valid');
 END
 $proc$;

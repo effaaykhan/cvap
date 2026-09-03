@@ -39,10 +39,14 @@ CREATE TEMP TABLE rls_fixture (label text PRIMARY KEY, id uuid NOT NULL);
 GRANT SELECT ON rls_fixture TO cvap_app;
 
 WITH a AS (
-    INSERT INTO tenants (name, deployment_mode) VALUES ('rls-test-A', 'saas')
+    -- domain is NOT NULL since 0026: every tenant is reachable at a hostname,
+    -- because that is what names it before a request is authenticated (ADR-041).
+    INSERT INTO tenants (name, domain, deployment_mode)
+    VALUES ('rls-test-A', 'rls-test-a.invalid', 'saas')
     RETURNING tenant_id
 ), b AS (
-    INSERT INTO tenants (name, deployment_mode) VALUES ('rls-test-B', 'onprem')
+    INSERT INTO tenants (name, domain, deployment_mode)
+    VALUES ('rls-test-B', 'rls-test-b.invalid', 'onprem')
     RETURNING tenant_id
 )
 INSERT INTO rls_fixture (label, id)
