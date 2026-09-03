@@ -143,7 +143,12 @@ func (s *IngestService) SubmitResults(stream scanpointv1.Ingest_SubmitResultsSer
 			// pending, which is the point of the pending state: nothing
 			// half-uploaded reaches the finding pipeline, and the rows remain as
 			// the record of what was received (ADR-026).
-			if sub != nil {
+			// Only when the terminal chunk never arrived. This warned on
+			// every NORMAL completion too, because it checked that a
+			// submission existed rather than that it had finished — and a
+			// warning that fires on the happy path is one operators learn to
+			// scroll past, which is worse than no warning at all.
+			if sub != nil && !sub.finished {
 				s.log.WarnContext(ctx, "submission stream ended without a final chunk",
 					slog.String("submission_id", sub.id),
 					slog.Int("chunks", sub.chunks))
@@ -260,8 +265,35 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 		// hide the attempt; dropping would lose the record. The contract
 		// prescribes exactly this handling, and it is the same reasoning
 		// checkEpoch uses for its own reasons.
+		// An UNSET zone_id is not a mismatch. It asserts nothing, so there is
+		// nothing to disagree with, and Core substitutes the zone this scan
+		// point was enrolled into.
+		//
+		// The field exists "because a scan point may straddle segments and
+		// knows which interface saw the host, which Core cannot derive — not so
+		// that it may choose" (ingest.proto). A runtime with one zone and one
+		// vantage point has nothing to add, and EnrollResponse carries no zone
+		// for it to echo — deliberately, since EnrollRequest carries none
+		// either and a scan point must not influence its own vantage point
+		// (ADR-008). Rejecting an empty value as malformed would leave the
+		// contract with no way for a single-zone scan point to submit anything
+		// at all.
+		//
+		// The security property is untouched: a scan point still cannot name a
+		// zone it was not enrolled into, because a NON-empty value is compared
+		// exactly as before and a mismatch still quarantines. What is given up
+		// is catching a runtime bug that forgets to set the field — and in the
+		// single-zone case the substituted answer is the correct one anyway.
+		//
+		// When a scan point genuinely straddles segments it will need to name
+		// one of several, which needs its enrolled zones in EnrollResponse — an
+		// additive field, and the point at which this substitution should
+		// narrow to "unset means the sole enrolled zone".
 		if !sub.quarantined {
 			for _, o := range chunk.GetObservations() {
+				if o.GetZoneId() == "" {
+					continue
+				}
 				if o.GetZoneId() != enrolledZone.String() {
 					sub.quarantined = true
 					sub.reason = "observation names a zone this scan point was not enrolled into"
@@ -326,7 +358,7 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 			}
 		}
 
-		obs, err := s.toObservations(spID, submissionID, chunk)
+		obs, err := s.toObservations(spID, enrolledZone, submissionID, chunk)
 		if err != nil {
 			// Also a sentinel, and also to force a rollback: Begin may have
 			// just created the ledger row, and a malformed chunk must not leave
@@ -608,7 +640,7 @@ func (s *IngestService) tasksBelongToJob(ctx context.Context, c *store.Conn, job
 // The wire deliberately carries an open string, because engines are extensible
 // and a closed enum would make every new observation type a protocol change.
 // Core validating it here is the other half of that arrangement (ADR-006).
-func (s *IngestService) toObservations(spID uuid.UUID, submissionID string, chunk *scanpointv1.ResultChunk) ([]store.Observation, error) {
+func (s *IngestService) toObservations(spID, enrolledZone uuid.UUID, submissionID string, chunk *scanpointv1.ResultChunk) ([]store.Observation, error) {
 	out := make([]store.Observation, 0, len(chunk.GetObservations()))
 	for i, o := range chunk.GetObservations() {
 		if !store.ValidObservationType(o.GetObservationType()) {
@@ -622,9 +654,15 @@ func (s *IngestService) toObservations(spID uuid.UUID, submissionID string, chun
 		if err != nil {
 			return nil, fmt.Errorf("observation %d: malformed task_id", i)
 		}
-		zoneID, err := uuid.Parse(o.GetZoneId())
-		if err != nil {
-			return nil, fmt.Errorf("observation %d: malformed zone_id", i)
+		// Unset means "the zone this scan point was enrolled into" — see the
+		// substitution in handleChunk. A non-empty value that will not parse is
+		// still malformed.
+		zoneID := enrolledZone
+		if raw := o.GetZoneId(); raw != "" {
+			zoneID, err = uuid.Parse(raw)
+			if err != nil {
+				return nil, fmt.Errorf("observation %d: malformed zone_id", i)
+			}
 		}
 
 		// Every one of these has a typed column behind it with a constraint. A

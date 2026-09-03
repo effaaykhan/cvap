@@ -63,6 +63,7 @@ import (
 	scanpointv1 "github.com/effaaykhan/cvap/gen/cybersentinel/scanpoint/v1"
 	"github.com/effaaykhan/cvap/internal/control/enrollment"
 	"github.com/effaaykhan/cvap/internal/logging"
+	"github.com/effaaykhan/cvap/internal/scope"
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
@@ -910,7 +911,7 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 			// runtime that is not written yet. That is precisely the
 			// "enforce at the Scan Point only" alternative ADR-024 rejected.
 			for _, t := range tasks {
-				ok, why := permits(t.TaskTarget, constraints.GetAllowedTargets(), constraints.GetExclusions())
+				ok, why := scope.Permits(t.TaskTarget, constraints.GetAllowedTargets(), constraints.GetExclusions())
 				if ok {
 					continue
 				}

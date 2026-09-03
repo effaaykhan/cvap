@@ -43,6 +43,7 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 032 | The store package exposes no path to a raw connection | Accepted |
 | 033 | Pre-tenant resolution is a closed class | Accepted |
 | 034 | No interceptor, middleware or tracing layer may render message bodies | Accepted |
-| 035 | A hand-written type holding a secret stores it in a func() string | Accepted |
+| 035 | A hand-written type holding a secret stores it in a func() string | Superseded by ADR-038 |
 | 036 | The sweep enumerates tenants, and that is the only unscoped read | Accepted |
 | 037 | Empty means deny for permission lists, unrestricted for constraint lists | Accepted |
+| 038 | A secret field is a func of a type that can be zeroised | Accepted |

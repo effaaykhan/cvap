@@ -208,6 +208,15 @@ jobs:
       - name: Store integration tests (race detector)
         run: make store-test GOTEST_FLAGS=-race
 
+      # The two-process end-to-end suite: real binaries, real TLS, enrolment
+      # through to rows in Postgres, plus the two failure modes that only
+      # exist across a process boundary — a severed lease discovered at
+      # renewal, and an engine subprocess killed from outside.
+      - name: End-to-end (two processes, real TLS)
+        env:
+          CVAP_TEST_DATABASE_URL: postgres://cvap_app_login:cvap_dev_only_app_password@localhost:5432/cvap?sslmode=disable
+        run: go test ./test/e2e/... -count=1 -timeout 10m
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

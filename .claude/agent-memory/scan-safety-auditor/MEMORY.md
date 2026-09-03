@@ -1,3 +1,4 @@
-- [Engine import guard bypasses](bypass_engine_import_guard.md) — six confirmed ways an engine reaches the network past `internal/engines/import_policy_test.go`
-- [Dispatch scope and kill gaps](dispatch_scope_and_kill_gaps.md) — four bypasses found and fixed in session 8e (do not re-report); remaining gaps are fragile concurrency, no operator trigger, match_type on the wire
+- [Scan point runtime bypasses](scanpoint_runtime_bypasses.md) — the terminal-path spawn race, unbounded grace_ms, missing rate aggregate; reproduced 2026-09-03
+- [Engine import guard](bypass_engine_import_guard.md) — now an allowlist in internal/enginepolicy; the `os` exception leaks os/exec by prefix match
+- [Dispatch scope and kill gaps](dispatch_scope_and_kill_gaps.md) — session 8e fixes (do not re-report); open: fragile concurrency, no operator trigger, IPv6 zone and NAT64 matcher edges
 - [Lab scope guard bypasses](lab_scope_guard_bypasses.md) — quoting, hostnames and integer IPs get past `.claude/hooks/lab-scope-guard.py`

@@ -238,6 +238,65 @@ look bounded, and the parse is cheap for the shape anyone tests with.
 ask how often the parse runs and whether a DB transaction is open across it, and check whether
 an expensive resolver inside the loop (tz, regex, DNS) is memoised.
 
+**19. A stop path that races the start path it is meant to stop, so the stop is recorded and
+then forgotten.** `runtime.onAssignment` puts the job in the table and `go r.runJob`s it;
+`runJob` only assigns `j.host` and `j.cancel` several statements later. A `CancelJob` or
+`KillSwitch` on the very next stream message finds `j.host == nil`, skips the stop, zeroises,
+sends `JobTerminal{CANCELLED}` + `CancelAck{tasks_halted:N}` — and `runJob` then spawns the
+engine and scans every target. `engineHost.stop` DOES set `stopRequested` when `h.cmd == nil`,
+but `engineHost.start` never reads it. Reproduced 5/5 with a shell "engine" that touches a
+marker file.
+**Why:** the abort path is written as "stop the thing that is running", and the window where
+the job exists but the thing does not is invisible from either function alone.
+**How to apply:** for every "stop X" path, ask what happens if it runs before X exists. The fix
+is a start that refuses when the stop flag is already set, not a wider mutex.
+
+**20. A secret holder REPLACED rather than retired, so the zeroisation attestation answers
+about the replacement.** `Runtime.onCredential` does `j.cred = NewCredential(...)` with no
+check and no `Zeroise()` of the previous holder. Two `CredentialGrant`s for one job (an SSH key
+and an SNMP community, say) leave the first material resident for the life of the process while
+`j.cred.Zeroised()` returns true and `JobTerminal.credentials_zeroised` is sent as true.
+Demonstrated: the first grant's bytes are still readable after the terminal path ran.
+**Why:** `Credential` is carefully closed against every rendering path, which makes the holder
+look like the whole control; the *lifecycle* of holders is a separate, unwritten concern.
+**How to apply:** for any field holding a zeroisable secret, grep every assignment to it, not
+just the reads. An assignment that is not preceded by a retire of the old value is a leak, and
+any derived attestation is then false rather than merely incomplete.
+
+**21. Crash-safety ordering reasoned about for the FIRST write and wrong for the second.**
+`SaveIdentity` writes key, cert, chain, identity-last, arguing that a crash leaves
+`ErrNoIdentity` and re-enrols cleanly. True at enrolment. At ROTATION the identity file already
+exists, so it gates nothing: a crash between the `key.pem` and `cert.pem` renames leaves a new
+key beside an old certificate, `LoadIdentity` succeeds, `MutualTLS` fails with "private key does
+not match public key", and ADR-018 has no re-enrolment path — the scan point is permanently
+dead. Reproduced. The durable fix is one rename that swaps both (a combined PEM), or a
+`.prev` pair to fall back to; the parent directory is also never fsynced after `Rename`.
+**How to apply:** for any multi-file atomic-ish write, run the argument a SECOND time with the
+files already present. The sentinel that gates the first write usually does not gate the second.
+
+**22. A conformance suite claimed at N sites and implemented at N-1.** `internal/scope` was
+extracted so Core and the runtime share one matcher, and four comments
+(`internal/scope/scope.go`, `internal/scope/scopetest/cases.go`, `internal/dispatch/scope.go`,
+`internal/dispatch/scope_conformance_test.go`, plus `internal/scanpoint/CLAUDE.md`) state that
+BOTH call sites run the shared table. `grep -rn scopetest` finds only the matcher's own test and
+the Core-side one. The scan point — the site ADR-024 added *because* Core cannot be trusted
+alone — has no call-site test at all.
+**Why:** sharing an implementation removes the drift the comments worry about and creates the
+illusion that the call sites are covered too; the shared package's own test looks like coverage.
+**How to apply:** when a doc says "both sides are tested against X", grep for X's importers and
+count them. Class 9 with a different surface.
+
+**23. Unbounded accumulation UPSTREAM of the bounded buffer.** `submit.Submitter` is carefully
+bounded (soft 16 MiB / hard 64 MiB, refuse rather than drop) and `enginewire.MaxLine` bounds one
+message at 4 MiB — but `engineHost.pump` appends every observation to a slice with no count or
+byte cap, and `Enqueue` is only reached after the job ends. Measured: a shell "engine" put
+187 MiB into the runtime, 3x the hard bound, against a 512 MB RSS ceiling — in the process that
+holds every job's credentials. `Enqueue`'s `&& len(s.queue) > 0` then accepts it unconditionally.
+**Why:** the bound is placed at the queue because that is where the ADR talks about buffering;
+the producer is a subprocess parsing hostile input by design.
+**How to apply:** for every bounded buffer, walk BACKWARDS to where the data is first held and
+check for a cap there. A per-message cap is not a per-stream cap.
+
 **Constraint on fixes:** `proto/` is frozen additive-only within a major version (ADR-022),
 enforced by `buf breaking` with the FILE category and a baseline established at bd0e4f9.
 So a proto finding almost never gets fixed by removing or retyping a field. Acceptable fixes

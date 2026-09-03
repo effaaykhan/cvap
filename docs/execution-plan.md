@@ -478,6 +478,14 @@ Each needs an explicit assertion, and the epoch rejection path needs a test that
 
 Version comparator property tests against the public dpkg and rpm test vectors — required before Phase 3 ships. DAST crawler coverage scoring against a benchmark application — required before Phase 7. Neither belongs in the eight weeks.
 
+**Encrypted local result durability on the scan point (ADR-026).** The scan point buffers results in memory and submits with the full five-outcome retry semantics, but a restart loses whatever had not been uploaded. ADR-026 requires a scan point that finishes a two-hour job and cannot reach Core to persist to local **encrypted** storage and retry, and that is not implemented.
+
+Deferred rather than done badly. The only key custody available on a scan point today is a key file sitting next to its ciphertext at `0600`, which protects a stolen backup or a captured disk image and nothing else — an attacker on the host reads both. Shipping it would let the ADR read as satisfied while the property it names does not hold, which is worse than the gap being visible.
+
+Also deferred from the same session, all recorded in `.claude/agent-memory/scan-safety-auditor/scanpoint_runtime_bypasses.md`: the runtime does not yet stop at `ScanConstraints.window_ends_unix` (a MUST in `dispatch.proto`, and `WINDOW_EXPIRED` is produced by nothing); `safety_mode` reaches the runtime and dead-ends because the engine job contract has no field for it; constraints are captured at claim time and never re-pushed, so a deny rule added mid-scan reaches no running engine; and `internal/scope` unmaps `::ffff:` only, so NAT64 and 6to4 notations still bypass a v4 exclusion when an IPv6 allow covers them.
+
+What unblocks it: a decision on key custody, recorded as an ADR. The candidates are a TPM-sealed key where hardware allows, a key derived from the enrollment private key with the resulting threat model stated honestly, or Core issuing a wrapping key at enrollment so a scan point that is revoked cannot decrypt its own backlog. Until then the buffer is bounded at `BufferHardBytes` and a full buffer **refuses new work rather than dropping observations** — the failure mode ADR-026 exists to prevent — reporting `BACKPRESSURE_STATE_HARD` so Core stops assigning.
+
 ### 6.6 Practical note on AI-generated code at this scale
 
 Codebase coherence across many sessions is a real failure mode. Mitigations that work: keep module boundaries hard and interfaces explicit so any one module fits comfortably in context; maintain a `CLAUDE.md` per module stating its contract and invariants; require generated code to arrive with tests; and re-read the ADR index at the start of any session touching a cross-cutting concern. Drift shows up first as two modules disagreeing about a data contract, so contract tests between modules are worth more here than they would be with a human team.

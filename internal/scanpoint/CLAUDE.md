@@ -47,3 +47,55 @@ Rules:
 This package concentrates scope, rate and credential enforcement in one component, which
 makes it the one whose correctness carries the most. Run `scan-safety-auditor` on any
 change here.
+
+## What exists, and the shape of it
+
+`Runtime` owns a job table keyed by `job_id`. That table is what makes reconnect safe.
+
+**Reconnect carries no new wire message, because renewal already IS the reconciliation.** On a
+fresh stream the runtime renews every job it holds and Core answers from
+`job_leases.holder_scan_point`, which survives the disconnect: `GRANTED` means carry on, `LOST`
+or `UNKNOWN_JOB` means self-abort. An assignment for a `job_id` already in the table is never
+started twice — the same epoch is a duplicate delivery and is ignored, a higher epoch means the
+held incarnation lost its lease and is aborted before the new one starts, a lower epoch is a
+stale message and is ignored. Jobs are **not** cancelled when the stream drops: a network blip
+is not lease loss, and the lease clock decides rather than the socket.
+
+**Self-abort is a timer, not an event.** The failure that matters is the one where nothing
+arrives — the stream is down, so no `LeaseGrant` will ever say `LOST`. `watchLeases` compares
+the clock against each job's expiry minus `LeaseSafetyMargin` and aborts on its own. The margin
+is not decoration: Core may reassign the instant its own clock passes the expiry, so a runtime
+scanning until the same instant would still be sending packets while a second scan point had
+started the same work.
+
+**The abort ORDER is load-bearing**: stop the engine (SIGTERM, then SIGKILL after the grace),
+**zeroise**, then submit. Zeroisation comes before submission because an upload against an
+unreachable Core can block for a long time, and credential lifetime must not be tied to how
+long an upload takes. `sync.Once` guards the whole terminal path, because lease loss, a
+`CancelJob` and a kill switch race by construction.
+
+**An engine that dies on its own is `ENGINE_FAILURE`** — a third outcome, not folded into lease
+loss or completion — and the engine is **not restarted**. A crashed engine restarted under the
+same lease is duplicate execution against the same targets; whether the work re-runs is Core's
+decision through `reassign_safe`, not this runtime's. An exit 0 without the `done` message
+counts as failure too: reporting a partial scan as a whole one is under-scanning that looks
+like a clean run, which is the worst failure this system has.
+
+**Scope is enforced here, once, through `internal/scope`** — the same matcher Core uses, so the
+two sites cannot disagree about a rule. Targets are checked before they reach the engine's
+stdin, and a target an engine discovers mid-scan comes back as an `authorise` request answered
+here. A target Core assigned that fails this check **refuses the whole job** with
+`SCOPE_VIOLATION_HALT` rather than being trimmed: a disagreement between the two enforcement
+sites is the most important thing an operator could be told. `internal/scope/scopetest` holds
+the case table both sites are tested against.
+
+**Credentials** live in `Credential`, whose material sits behind two func fields and no byte
+field — ADR-038, superseding ADR-035's `func() string`, because a Go string cannot be zeroised
+at all. `creds_test.go` repeats the verb enumeration in every position including an unexported
+field, which is the one place no method of ours can run.
+
+**The buffer is bounded and refuses work at the bound.** ADR-026's encrypted local durability is
+**not implemented** — deferred in `docs/execution-plan.md` §6.5 with what unblocks it, because
+the only key custody available on a scan point today is a key file beside its ciphertext. A
+full buffer reports `BACKPRESSURE_STATE_HARD` and refuses assignments rather than dropping
+observations, which is the failure ADR-026 exists to prevent.

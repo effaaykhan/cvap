@@ -1,6 +1,6 @@
 # ADR-035: A hand-written type holding a secret stores it in a `func() string`
 
-**Status:** Accepted
+**Status:** Superseded by ADR-038
 **Date:** 2026-09-01
 
 ## Context

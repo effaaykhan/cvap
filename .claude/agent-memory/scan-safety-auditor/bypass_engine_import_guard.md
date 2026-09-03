@@ -1,38 +1,49 @@
 ---
 name: bypass-engine-import-guard
-description: Confirmed bypasses of internal/engines/import_policy_test.go — check these first on any engine change
+description: State of the engine import guard (now internal/enginepolicy). The six old bypasses are closed by inverting to an allowlist; the new exception mechanism leaks os/exec by prefix match.
 metadata:
   type: project
 ---
 
-`internal/engines/import_policy_test.go` is a **deny-list on direct imports only**. Six
-bypasses confirmed by experiment on 2026-09-02 (probe module replicating the walk; all
-PASSED the guard when they should have failed):
+The guard moved from `internal/engines/import_policy_test.go` to
+`internal/enginepolicy/policy_test.go` and was **inverted into an allowlist**. Its roots are
+`internal/engines` plus every `cmd/cvap-engine*`, which closes the boundary problem the old
+note ended on — the binary is now covered, not just the library.
 
-1. **Transitive imports.** `build.ImportDir` returns direct imports. An engine importing
-   `internal/somehelper` that imports `net` passes clean. The doc comment on
-   `internal/engines/noop/noop.go` claims the guard "walks the import graph" — it does not.
-2. **Build-tag-hidden files.** `//go:build scanmode` on a file importing `net` is invisible:
-   `build.ImportDir(dir, 0)` uses the host build context, so constrained-out files land in
-   `IgnoredGoFiles` and their imports are never read. Same trick hides a whole package.
-3. **Third-party network libraries.** Only `golang.org/x/sys` is forbidden.
-   `golang.org/x/net/icmp`, `github.com/miekg/dns`, `github.com/google/gopacket/pcap` all pass.
-4. **cgo.** `import "C"` plus `C.socket(...)` passes; `"C"` is not in `forbidden`.
-5. **`unsafe` + `go:linkname`**, and **`plugin`** (dlopen a .so), neither forbidden.
-6. **`os`** — not forbidden, and `os.StartProcess` is `os/exec` without the import.
+## Closed — do NOT re-report
 
-`neutralPrefixes` in that file is the correct fix and is explicitly documented as *not
-enforced*. Inverting it (allow-list of import prefixes, deny everything else) closes 1, 3, 4,
-5 and 6 at once. `packages.Load` with `NeedDeps|NeedImports` closes 1 properly; iterating
-build contexts or reading `pkg.IgnoredGoFiles` closes 2.
+The six bypasses confirmed 2026-09-02 are all closed by the inversion plus one extra check:
+transitive laundering through a helper package, third-party network libraries, cgo,
+`unsafe`/`plugin`, and bare `os` all fail now because the import is not on `permitted`.
+Build-tag-hidden files are caught explicitly — a non-empty `pkg.IgnoredGoFiles` is an error.
+Test imports (`TestImports`, `XTestImports`) are checked too.
+
+## Open — confirmed by experiment 2026-09-03
+
+**`exceptions` matches by PREFIX, so granting `os` also grants `os/exec` and `os/signal`.**
+`isException` does `imp == a || strings.HasPrefix(imp, a+"/")`. The entry added for
+`cmd/cvap-engine-noop` is `{"os", "…/internal/enginewire"}`, and its own comment says
+"Deliberately NOT granted: os/exec, os/signal, syscall, net" — the code grants the first
+two. Proved by dropping a file importing both into `cmd/cvap-engine-noop`: the guard passed.
+`os/exec` is the case the guard exists for ("shelling out escapes the runtime's rate
+allocation entirely"). Fix is exact match for exceptions, or explicit sub-path entries.
+
+**The allowlist is still direct-imports-only, and `internal/enginewire` now sits outside the
+guard's roots.** Anything on `permitted` (`internal/domain`, `internal/logging`,
+`internal/engines`) or granted by exception is trusted wholesale — its own imports are never
+walked. `enginewire` is the engine-facing IPC package and the most likely place someone
+later adds a socket ("gRPC instead of pipes"); the exception's justification, that it
+"imports nothing that could reach a network", is true today and enforced by nothing.
 
 **Why:** an engine reaching the network outside the runtime's rate allocation defeats
 ADR-024's ceilings and ADR-027's allocation model entirely — the runtime cannot rate-limit a
-socket or a subprocess it does not mediate.
+socket or a subprocess it does not mediate. That mattes more now that the runtime exists and
+is the second scope enforcement site: the guard is the only thing making "engines receive
+pre-authorised targets and construct none" structural rather than a convention.
 
-**How to apply:** on any diff under `internal/engines`, or any diff to the guard itself,
-re-test these six specifically rather than trusting a green test run. Also check whether the
-engine's `cmd/` main package is covered — the guard's boundary is a directory, the deliverable
-is a process, and the main package that wires an engine to IPC sits outside `internal/engines`.
+**How to apply:** on any diff to `internal/enginepolicy`, `internal/engines`,
+`internal/enginewire` or a `cmd/cvap-engine-*`, test the prefix leak first (add an import,
+run the guard, expect a failure), then check whether a newly-permitted first-party package
+is itself walked.
 
-Related: [[dispatch-scope-and-kill-gaps]]
+Related: [[scanpoint-runtime-bypasses]], [[dispatch-scope-and-kill-gaps]]

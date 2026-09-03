@@ -78,7 +78,25 @@ var permitted = []string{
 //
 // An entry is package path -> import paths that package alone may add.
 var exceptions = map[string][]string{
-	// "internal/engines/discovery": {"net", "golang.org/x/net/icmp"},  // ADR-0xx
+	// The engine PROCESS shell, and only the shell.
+	//
+	// ADR-027 decides that engines are separate processes hosted by the scan
+	// point runtime. A process needs its pipes, and os.Stdin/os.Stdout are the
+	// only way to reach them in Go — so this exception is forced by that ADR
+	// rather than chosen. It is granted to cmd/cvap-engine-noop alone, which
+	// holds no engine logic: it reads a job, calls internal/engines/noop, and
+	// writes back what that returns. The logic package stays under the full
+	// allowlist, which is where the "could not send a packet" property lives.
+	//
+	// Deliberately NOT granted: os/exec, os/signal, syscall, net. The binary
+	// handles no signals precisely so that syscall stays off this list — see
+	// the comment in main.go. `os` alone still permits os.StartProcess, which
+	// is why it is on notablyForbidden; the mitigation is that this package is
+	// a page of I/O a reviewer can read in full, not a place logic accumulates.
+	//
+	// enginewire is the ADR-027 job contract. It parses JSON over two pipes it
+	// did not open and imports nothing that could reach a network.
+	"cmd/cvap-engine-noop": {"os", "github.com/effaaykhan/cvap/internal/enginewire"},
 }
 
 // notablyForbidden exists only to give a better message for the imports someone
@@ -204,9 +222,20 @@ func isPermitted(imp string) bool {
 	return false
 }
 
+// isException matches EXACTLY, unlike isPermitted.
+//
+// It used to share the prefix rule, so granting "os" also granted os/exec,
+// os/signal and everything else under it — while the comment three lines above
+// the entry said those were deliberately NOT granted. A scan-safety audit
+// dropped a file importing os/exec into cmd/cvap-engine-noop and the guard
+// passed. os/exec is the single import this whole guard exists to stop, since
+// shelling out escapes the runtime's rate allocation entirely.
+//
+// An exception names one import. If a package needs a subpackage, it gets its
+// own line, which is exactly the diff a reviewer should see.
 func isException(pkgPath, imp string) bool {
 	for _, a := range exceptions[pkgPath] {
-		if imp == a || strings.HasPrefix(imp, a+"/") {
+		if imp == a {
 			return true
 		}
 	}

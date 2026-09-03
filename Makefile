@@ -9,7 +9,7 @@
         proto proto-tools proto-gen proto-lint proto-breaking proto-verify \
         secret-logging secret-logging-test \
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
-        env-check app-role store-test \
+        env-check app-role store-test e2e dev-ca \
         contract-guard-test
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
@@ -246,6 +246,28 @@ app-role: ## Create the LOGIN role the application connects as (dev and CI)
 # until the race detector ran over these tests. Reasoned-not-demonstrated is the
 # gap the tenant-context bugs sat in.
 GOTEST_FLAGS ?=
+
+# The end-to-end suite runs the REAL binaries as two OS processes over real TLS:
+# enrolment, mTLS dispatch, an engine subprocess, chunked submission, and rows in
+# Postgres at the end. Everything below the process boundary — certificate
+# loading, the handshake, SIGTERM reaching an engine's process group, a
+# subprocess dying and the runtime noticing — is what an in-process test cannot
+# reach, and all of it is where a scan point actually fails.
+#
+# It builds what it runs rather than assuming a prior `make build`, so the suite
+# is honest about which source it exercised. Slow by construction: two of the
+# three tests wait out a 20s lease renewal, because that is the mechanism under
+# test rather than an inconvenience.
+e2e: ## Run the two-process end-to-end suite against the dev database
+	@test -n "$(APP_DATABASE_URL)" || { echo "APP_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
+	CVAP_TEST_DATABASE_URL="$(APP_DATABASE_URL)" go test ./test/e2e/... -count=1 -timeout 10m -v
+
+# A development CA and an enrollment token, for running the two binaries by hand.
+# NEVER a production CA key: this one mints identities into a fleet, and Core
+# holds a map of a customer's weaknesses plus credentials to their estate.
+dev-ca: ## Generate a development CA into ./secrets (gitignored)
+	@mkdir -p secrets
+	go run ./cmd/cvap-cli dev-ca ./secrets
 
 store-test: ## Run internal/store against the dev database as the application role
 	@test -n "$(APP_DATABASE_URL)" || { echo "APP_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }

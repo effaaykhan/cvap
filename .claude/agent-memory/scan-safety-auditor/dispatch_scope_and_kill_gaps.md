@@ -1,12 +1,17 @@
 ---
 name: dispatch-scope-and-kill-gaps
-description: Standing gaps in internal/dispatch and internal/store. The four bypasses this file named were fixed in session 8e — read the closed list first so they are not re-reported.
+description: Standing gaps in internal/dispatch and internal/store. The bypasses this file named were fixed in sessions 8e/8f — read the closed list first so they are not re-reported.
 metadata:
   type: project
 ---
 
 Rebased 2026-09-02 after session 8e (`windows.go`, `LiveFor`, `cancel_acks`, migrations
 0024/0025, ADR-037). Verified against a live Postgres via `make store-test`.
+
+Amended 2026-09-03: the scan point runtime now exists, so the second enforcement site is
+real. `permits`/`scopeMatches` moved out of `scope.go` into `internal/scope` and both sites
+call `scope.Permits` — the matcher findings recorded here now apply to BOTH sites at once.
+Runtime-side defects live in [[scanpoint-runtime-bypasses]].
 
 ## Closed since earlier audits — do NOT re-report
 
@@ -72,6 +77,14 @@ mode and zones. Revoking `authorization_verified`, adding a deny rule or narrowi
 `allowed_zones` mid-scan reaches no in-flight task; a closing WINDOW now does, through the
 renewal refusal, and that is the only dimension with a mid-scan lever.
 
+**Matcher edges that survived the move to `internal/scope`.** CIDR boundary arithmetic is
+correct (network, broadcast, off-by-one, non-canonical prefixes). An IPv6 ZONE defeats
+exclusions outright — `Prefix.Contains` returns false for any zoned address and `Addr`
+equality includes the zone. NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) notation of an
+excluded v4 address is not unmapped, so it walks past the exclusion when an IPv6 allow
+covers it; `Unmap()` handles `::ffff:` only. A trailing-dot FQDN is a different string from
+the same name without one.
+
 **`match_type` is still unrepresentable on the wire**, and hostname rules deliberately resolve
 nothing — so an allowed hostname covers whatever DNS says at scan time, in either direction.
 `allowed_engines` is still selected by nothing. Adaptive rate limiting (ADR-024 control 2) has
@@ -87,11 +100,11 @@ range sweep reads it before it writes one — but the behaviour is unchanged.
 `constraintsFor` errors, then `refuseJob`). Safe direction, but a typo'd IANA zone name is a
 self-inflicted scan outage with `scope_violation_halt` as its reason.
 
-**How to apply:** on any `internal/dispatch`, `internal/store` or engine diff, re-check the
+**How to apply:** on any `internal/dispatch`, `internal/store`, `internal/scope` or engine diff, re-check the
 confirmed bypasses first, then the open list. Separate "wrong now" from "wrong the moment a
 real engine lands" — for this codebase most of it is the latter, and saying which is which is
 the useful part. A live dev Postgres is usually up (`docker ps` shows `cvap-postgres-1`);
 `make store-test` runs the integration half, and a throwaway `zz_*_test.go` probe in
 `internal/store` or `internal/dispatch` is the fastest way to prove a bypass — delete it after.
 
-Related: [[bypass-engine-import-guard]], [[lab-scope-guard-bypasses]]
+Related: [[scanpoint-runtime-bypasses]], [[bypass-engine-import-guard]], [[lab-scope-guard-bypasses]]
