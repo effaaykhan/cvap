@@ -6,6 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"os"
@@ -34,7 +37,7 @@ import (
 // Mutations, declared beside the tests that must kill them.
 //
 // mutate:subject internal/scanpoint/corpus.go
-// mutate:test    ./internal/scanpoint/ -run TestAProbeTo|TestAnOversized|TestAProbeWithNoPorts|TestAnUnsigned|TestTheSignature|TestAPackFromTheFuture|TestABuiltinProbeName|TestARuleThatIsSoft|TestZeroConfidence|TestABadPackLeaves|TestAProbeThatSendsNothing|TestAProbeGrows|TestAPortOutsideTheRange
+// mutate:test    ./internal/scanpoint/ -run TestAProbeTo|TestAnOversized|TestAProbeWithNoPorts|TestAnUnsigned|TestTheSignature|TestAPackFromTheFuture|TestABuiltinProbeName|TestARuleThatIsSoft|TestZeroConfidence|TestABadPackLeaves|TestAProbeThatSendsNothing|TestAProbeOfAnUnknownKind|TestAProbeGrows|TestAPortOutsideTheRange
 //
 // mutate:case    the non-inert port denylist is consulted and ignored
 // mutate:old     if bad, why := firstNonInertPort(p.Ports); why != "" {
@@ -43,6 +46,10 @@ import (
 // mutate:case    an oversized payload is not bounded at all
 // mutate:old     grown > MaxProbePayload {
 // mutate:new     grown > 1<<30 {
+//
+// mutate:case    a probe of an unknown kind is run rather than refused
+// mutate:old     if !knownProbeKind(p.Kind) {
+// mutate:new     if false {
 //
 // mutate:case    a probe naming no ports is sent to every open one
 // mutate:old     if len(p.Ports) == 0 {
@@ -66,12 +73,12 @@ import (
 // mutate:new     if false {
 //
 // mutate:case    a probe that sends nothing is accepted and costs a connect per port
-// mutate:old     if !p.TLS && len(p.Payload) == 0 {
+// mutate:old     if p.Kind == enginewire.ProbeKindPayload && !p.TLS && len(p.Payload) == 0 {
 // mutate:new     if false {
 //
 // mutate:case    the payload bound ignores what target substitution adds
-// mutate:old     if grown := substitutedSize(p.Payload); grown > MaxProbePayload {
-// mutate:new     if grown := len(p.Payload); grown > MaxProbePayload {
+// mutate:old     if grown := substitutedSize(p.Payload); p.Kind == enginewire.ProbeKindPayload &&
+// mutate:new     if grown := len(p.Payload); p.Kind == enginewire.ProbeKindPayload &&
 //
 // mutate:case    a port outside the range reaches the engine to be truncated there
 // mutate:old     if bad, ok := firstImpossiblePort(p.Ports); !ok {
@@ -400,6 +407,37 @@ func TestAProbeThatSendsNothingIsRefused(t *testing.T) {
 	}
 }
 
+// TestAProbeOfAnUnknownKindIsRefused.
+//
+// A kind this build cannot bound is a probe whose behaviour is unknown, and the
+// safe reading of unknown is no — the same direction the pack format version
+// takes. A payload bound written about bytes says nothing about an exchange
+// (ADR-049), so a kind that arrives without an implementation must not fall
+// through to the payload path.
+func TestAProbeOfAnUnknownKindIsRefused(t *testing.T) {
+	pub, priv := testKey(t)
+	path := writePack(t, priv, validPack(
+		enginewire.Probe{
+			Name: "from-the-future", Kind: "quantum_handshake", Ports: []uint32{8080},
+			Matches: []enginewire.Match{{Pattern: `^x`, Service: "x", Confidence: 0.9}},
+		},
+		enginewire.Probe{
+			Name: "known-kind", Kind: enginewire.ProbeKindSSHHostKey, Ports: []uint32{22},
+		},
+	))
+
+	pack, rejected, err := LoadFingerprintPack(path, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pack.Probes) != 1 || pack.Probes[0].Name != "known-kind" {
+		t.Fatalf("surviving probes: %+v", pack.Probes)
+	}
+	if len(rejected) != 1 || !strings.Contains(rejected[0], "does not implement") {
+		t.Errorf("rejections: %v", rejected)
+	}
+}
+
 // TestNoPackConfiguredIsStillReported.
 //
 // Offline import means Core never knows what is live unless it is told, so
@@ -682,6 +720,7 @@ func TestTheCorpusContainsWhatThisBuildShipped(t *testing.T) {
 		"smb2-negotiate":   {},
 		"rdp-connect":      {},
 		"dns-version-bind": {},
+		"ssh-hostkey":      {},
 		"newline":          {},
 	}
 
@@ -739,6 +778,75 @@ func TestTheCorpusContainsWhatThisBuildShipped(t *testing.T) {
 		if !services[s] {
 			t.Errorf("no banner rule for %q, which ADR-048 lists among the seven services that "+
 				"volunteer — safe mode would not identify it", s)
+		}
+	}
+}
+
+// TestTheSSHProbeImplementsNothingPastTheKeyExchange.
+//
+// ============================================================================
+// Invariant 9, asserted as a property of the source rather than promised.
+// ============================================================================
+//
+// An SSH probe that proceeded past the key exchange would be touching
+// authentication, and "we do not send credentials" is a promise. What makes it a
+// property is that the engine contains no code able to send a fourth message —
+// no service request, no userauth, no key derivation, no password or public-key
+// path. `golang.org/x/crypto/ssh` would have read a host key in six lines and
+// can do all of those; that is why it was refused (ADR-049).
+//
+// Parsed rather than grepped, so the file's own COMMENTS — which discuss the
+// messages it deliberately omits — do not count as implementing them. The
+// engine-side half of this assertion is in ssh_test.go, at the wire: the client
+// sends KEXINIT and KEX_ECDH_INIT and then nothing.
+//
+// Here rather than beside the engine because it needs `os` and `go/parser`, and
+// the engine import allowlist refuses both. The guard fired when it was written
+// the other way round.
+func TestTheSSHProbeImplementsNothingPastTheKeyExchange(t *testing.T) {
+	fset := token.NewFileSet()
+	// parser.SkipObjectResolution and no ParseComments: the AST below holds
+	// identifiers and literals, and not a word of prose.
+	file, err := parser.ParseFile(fset, "../engines/fingerprint/ssh.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var idents, literals []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.Ident:
+			idents = append(idents, v.Name)
+		case *ast.BasicLit:
+			literals = append(literals, v.Value)
+		}
+		return true
+	})
+	if len(idents) < 100 {
+		t.Fatalf("parsed only %d identifiers from ssh.go; this test has stopped checking "+
+			"anything", len(idents))
+	}
+
+	// Identifiers and literals are checked separately, because they mean
+	// different things. `priv.PublicKey()` is the EPHEMERAL X25519 key the
+	// exchange requires and has nothing to do with SSH's `publickey`
+	// authentication method — a blunt substring over both flagged it, which
+	// would have made this test something people delete.
+	for _, tok := range idents {
+		for _, f := range []string{"userauth", "servicerequest", "newkeys", "derivekey", "sessionkey"} {
+			if strings.Contains(strings.ToLower(tok), f) {
+				t.Errorf("ssh.go declares or calls %q, which is past the key exchange. That "+
+					"exchange is abandoned once the host key arrives, and it is meant to be "+
+					"structural: no authentication path exists to decline.", tok)
+			}
+		}
+	}
+	for _, lit := range literals {
+		for _, f := range []string{"publickey", "keyboard-interactive", "ssh-userauth", "ssh-connection", "password"} {
+			if strings.Contains(strings.ToLower(lit), f) {
+				t.Errorf("ssh.go contains the literal %s, which names an authentication "+
+					"method or the service that carries one.", lit)
+			}
 		}
 	}
 }

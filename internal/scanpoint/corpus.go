@@ -285,7 +285,17 @@ func applyProbePolicy(pack *FingerprintPack) []string {
 			rejected = append(rejected, "a probe with no name: it could not be traced from the observation it produced")
 			continue
 		}
-		if grown := substitutedSize(p.Payload); grown > MaxProbePayload {
+		if !knownProbeKind(p.Kind) {
+			// A kind this build cannot bound is a probe whose behaviour is
+			// unknown, and the safe reading of unknown is no. Same direction the
+			// pack format version takes, and for the same reason: what runs must
+			// be what was authored, not a best-effort reading of it.
+			rejected = append(rejected, fmt.Sprintf(
+				"probe %q has kind %q, which this build does not implement", p.Name, p.Kind))
+			continue
+		}
+		if grown := substitutedSize(p.Payload); p.Kind == enginewire.ProbeKindPayload &&
+			grown > MaxProbePayload {
 			rejected = append(rejected, fmt.Sprintf(
 				"probe %q: payload is %d bytes and %d after target substitution, limit is %d",
 				p.Name, len(p.Payload), grown, MaxProbePayload))
@@ -305,7 +315,7 @@ func applyProbePolicy(pack *FingerprintPack) []string {
 					"those where bytes are not inert", p.Name))
 			continue
 		}
-		if !p.TLS && len(p.Payload) == 0 {
+		if p.Kind == enginewire.ProbeKindPayload && !p.TLS && len(p.Payload) == 0 {
 			// A probe that sends nothing is a connect, and the engine already
 			// connects to every port it examines — so this is a second full
 			// connection bought for nothing, per port, per host.
@@ -381,6 +391,22 @@ func firstNonInertPort(ports []uint32) (uint32, string) {
 		}
 	}
 	return 0, ""
+}
+
+// knownProbeKind reports whether this build implements a probe kind.
+//
+// A CLOSED set, checked the same way the pack format version is: a kind this
+// build cannot bound is a probe whose behaviour is unknown, and the safe reading
+// of unknown is no. Adding one is an amendment (ADR-049), not a config value —
+// the same rule the port denylist is under, because a kind is exactly a
+// statement about what may leave the socket.
+func knownProbeKind(k string) bool {
+	switch k {
+	case enginewire.ProbeKindPayload, enginewire.ProbeKindSSHHostKey:
+		return true
+	default:
+		return false
+	}
 }
 
 // badPatterns rejects a rule whose regexp will not compile or has no service.

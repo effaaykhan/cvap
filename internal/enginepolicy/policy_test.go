@@ -150,10 +150,38 @@ var exceptions = map[string][]string{
 	"internal/engines/fingerprint": {
 		"net", "crypto/tls", "crypto/x509", "crypto/rsa", "crypto/ecdsa",
 		"crypto/rand", "crypto/elliptic", "crypto/x509/pkix",
+
+		// Identity, added for asset resolution (ADR-049).
+		//
+		// crypto/sha256 and encoding/base64 fingerprint a certificate and an SSH
+		// host key — the only two identity keys ADR-007 ranks above weak that a
+		// network scan can reach at all.
+		//
+		// crypto/ecdh generates the ephemeral X25519 key for an SSH key
+		// exchange. It is here INSTEAD of golang.org/x/crypto/ssh, which was the
+		// obvious way to read a host key and is refused: that package can
+		// authenticate, and an engine that contains no authentication code
+		// cannot attempt authentication by mistake. See ADR-049.
+		"crypto/sha256", "encoding/base64", "crypto/ecdh",
+
+		// encoding/binary frames the SSH binary packet protocol. Pure byte
+		// arithmetic over a slice; it opens nothing and parses nothing on its
+		// own.
+		"encoding/binary",
 	},
 
 	// The engine PROCESS shell, and only the shell.
-	"cmd/cvap-engine-fingerprint": {"os", "github.com/effaaykhan/cvap/internal/enginewire"},
+	//
+	// `reflect` is TEST-only, and it is listed rather than waved through because
+	// this guard checks test imports on purpose. It asserts that no field is
+	// dropped when a wire probe is translated into an engine probe — the failure
+	// that silently removed the SSH host-key probe from every chain, and one a
+	// hand-written field list cannot catch, since the person who forgets to
+	// translate a field is the same person who would forget to list it.
+	//
+	// It reads types and never constructs behaviour: no reflect.Value.Call, no
+	// unsafe, nothing that could reach a socket.
+	"cmd/cvap-engine-fingerprint": {"os", "reflect", "github.com/effaaykhan/cvap/internal/enginewire"},
 
 	// The engine PROCESS shell, and only the shell.
 	//

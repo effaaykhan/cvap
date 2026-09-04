@@ -52,6 +52,26 @@ const MaxLine = 4 << 20
 // Kind values. Strings rather than an enum because this contract crosses a
 // process boundary between independently-built binaries, and a numeric value
 // whose meaning shifts between versions is the failure ADR-022 describes.
+// Probe kinds. Strings for the reason the message kinds are: this contract
+// crosses a process boundary between independently-built binaries.
+const (
+	// ProbeKindPayload sends bytes and reads a bounded reply. The default, and
+	// the only kind ADR-048's payload bound applies to.
+	ProbeKindPayload = ""
+
+	// ProbeKindSSHHostKey performs an SSH key exchange far enough to receive the
+	// host key and then ABANDONS it (ADR-049).
+	//
+	// It exists because ADR-007's `ssh_hostkey` is the only identity key most
+	// Linux hosts can offer — every strong key needs an agent or cloud metadata
+	// — and without it asset resolution cannot merge a host across a DHCP change.
+	//
+	// The abandonment is structural rather than promised: the engine implements
+	// no message past the key-exchange reply, so there is no authentication path
+	// to decline to take.
+	ProbeKindSSHHostKey = "ssh_hostkey"
+)
+
 const (
 	// Runtime to engine.
 	KindJob        = "job"
@@ -238,6 +258,25 @@ type Probe struct {
 	// wins.
 	Matches []Match `json:"matches,omitempty"`
 
+	// Kind is what this probe IS. Empty means a payload probe.
+	//
+	// ========================================================================
+	// A key exchange is not a payload, and pretending otherwise stretched a
+	// bound written about bytes over a conversation (ADR-049).
+	// ========================================================================
+	//
+	// ADR-048's policy — a payload bound, a non-inert port denylist, nothing in
+	// safe mode, nothing at a fragile target — was written when every probe was
+	// a byte string. Three of those four apply to any kind. The payload bound
+	// applies only to a payload, so the kind has to be explicit rather than
+	// inferred from which fields happen to be set.
+	//
+	// A kind this build does not recognise is REFUSED by the runtime's static
+	// policy, not ignored: a pack from the future naming a kind we cannot bound
+	// is a probe whose behaviour is unknown, and the safe reading of unknown is
+	// no.
+	Kind string `json:"kind,omitempty"`
+
 	// TLS wraps the connection in a TLS handshake before Payload is sent.
 	//
 	// A separate flag rather than a payload, because a handshake is a
@@ -250,6 +289,10 @@ type Probe struct {
 	// a fragile target, never to a port on the non-inert denylist.
 	TLS bool `json:"tls,omitempty"`
 
+	// Note that TLS is a TRANSPORT MODIFIER and Kind is the exchange: an HTTPS
+	// probe is a payload probe with TLS set. They are separate fields because
+	// they answer different questions.
+	//
 	// Rarity orders the probe chain: lower is tried first. A probe naming this
 	// port is tried before a generic one regardless, so this orders within
 	// those groups.

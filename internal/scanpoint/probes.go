@@ -286,6 +286,31 @@ func ProbeCorpus() []enginewire.Probe {
 		},
 		{
 			// ============================================================
+			// A KEY EXCHANGE, not a payload. Its own kind (ADR-049).
+			// ============================================================
+			//
+			// ADR-007's `ssh_hostkey` is the only identity key most Linux hosts
+			// can offer: every strong key needs an agent or cloud metadata, and
+			// without a moderate key asset resolution cannot merge a host across
+			// a DHCP change. That is week 5's deliverable, so this probe is the
+			// difference between a resolver that works for TLS-bearing hosts and
+			// one that works.
+			//
+			// The engine offers curve25519 and nothing else, attempts no
+			// authentication ever, and abandons the exchange once the host key
+			// arrives — structurally, by implementing no message past the reply.
+			// See internal/engines/fingerprint/ssh.go.
+			//
+			// Rarity 2: after the banner, which usually names OpenSSH and its
+			// version already. This probe is for the KEY, not the name.
+			Name:      "ssh-hostkey",
+			Kind:      enginewire.ProbeKindSSHHostKey,
+			Ports:     []uint32{22, 2222, 22222},
+			ReadBytes: 4 << 10,
+			Rarity:    2,
+		},
+		{
+			// ============================================================
 			// A newline is NOT inert, and this probe is port-scoped for it.
 			// ============================================================
 			//

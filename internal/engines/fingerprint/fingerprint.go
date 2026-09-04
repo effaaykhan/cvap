@@ -61,14 +61,39 @@ type Target struct {
 
 // Probe is a payload the runtime has authorised this job to send.
 type Probe struct {
-	Name      string
+	Name string
+
+	// Kind is what this probe IS: a payload exchange, or a key exchange. Empty
+	// is a payload probe. See ADR-049 — a bound written about bytes does not
+	// stretch over a conversation.
+	Kind string
+
 	Ports     []uint16
 	Payload   []byte
 	ReadBytes uint32
-	TLS       bool
-	Rarity    int
-	Matches   []Match
+
+	// TLS is a TRANSPORT MODIFIER on a payload probe, not a kind.
+	TLS bool
+
+	Rarity  int
+	Matches []Match
 }
+
+// Probe kinds this engine implements. Mirrors enginewire's constants, which this
+// package cannot import.
+const (
+	probeKindPayload    = ""
+	probeKindSSHHostKey = "ssh_hostkey"
+)
+
+// confProtocolOnlySSH is a completed key exchange: the protocol is certain and
+// the product is not.
+//
+// Higher than the corpus's protocol-only band because this is not a pattern that
+// matched some bytes — the host performed an SSH key exchange, which nothing but
+// an SSH server does. It lives here rather than in a rule because no corpus
+// entry can express "we completed a handshake".
+const confProtocolOnlySSH = 0.90
 
 // Config is the job's whole allowance.
 type Config struct {
@@ -327,6 +352,10 @@ func identifyPort(ctx context.Context, cfg Config, limiter *enginerate.Bucket, t
 	var (
 		bestConf float32
 		haveBest bool
+
+		// identified is set once a probe or banner has named a PRODUCT. It stops
+		// identification probes and deliberately does not stop identity ones.
+		identified bool
 	)
 
 	// ------------------------------------------------------------------
@@ -342,11 +371,7 @@ func identifyPort(ctx context.Context, cfg Config, limiter *enginerate.Bucket, t
 		if r, ok := evaluate(cfg.BannerMatches, raw, port); ok {
 			applyResult(&best, r)
 			bestConf, haveBest = r.Confidence, true
-			if !r.Soft {
-				// Named itself, with a product. Nothing a probe could add is
-				// worth the packets.
-				return []Observation{observation(t.TaskID, "service", best, bestConf)}, false
-			}
+			identified = !r.Soft
 		}
 	}
 
@@ -356,6 +381,25 @@ func identifyPort(ctx context.Context, cfg Config, limiter *enginerate.Bucket, t
 	for _, p := range chainFor(cfg.Probes, port, cfg.MaxProbesPerPort) {
 		if ctx.Err() != nil {
 			break
+		}
+		// ================================================================
+		// IDENTIFICATION stops at a hard match. IDENTITY does not.
+		// ================================================================
+		//
+		// Measured against the lab's OpenSSH host: its banner names the product
+		// and the version, so the chain ended before the host-key probe ran and
+		// the ONE identity key that host can offer was never collected. The
+		// service was perfectly identified and the asset could not be merged
+		// across a DHCP change, which is week 5's whole deliverable.
+		//
+		// They are different questions. "What is this?" is answered by a name
+		// and buying more names is waste. "Which host is this?" is answered by a
+		// fingerprint, and no amount of naming produces one.
+		//
+		// The cap still bounds the total, so this cannot turn into an unbounded
+		// chain — it changes which probes are inside the cap, not how many.
+		if identified && !identityBearing(p) {
+			continue
 		}
 		// ================================================================
 		// Solicited is true because we SENT something, not because a rule
@@ -386,10 +430,20 @@ func identifyPort(ctx context.Context, cfg Config, limiter *enginerate.Bucket, t
 		if err := limiter.TakeN(ctx, probePrepaid); err != nil {
 			break
 		}
-		r, tlsInfo, resp, cost, ok := runProbe(ctx, cfg, address, port, p)
+		o := runProbe(ctx, cfg, address, port, p)
+		r, tlsInfo, resp, cost, ok := o.result, o.tls, o.response, o.cost, o.matched
 		count(cost)
 		if err := limiter.Settle(ctx, probePrepaid, cost); err != nil {
 			break
+		}
+		if o.ssh != nil {
+			// Recorded whether or not a rule fired, for the same reason the
+			// certificate is: a host key is evidence in its own right, and it is
+			// the identity key asset resolution needs.
+			best.SSH = o.ssh
+			if best.Method == "" {
+				best.Method = "ssh-kex"
+			}
 		}
 		if tlsInfo != nil {
 			// Recorded even when no rule matched. A certificate is evidence in
@@ -418,8 +472,10 @@ func identifyPort(ctx context.Context, cfg Config, limiter *enginerate.Bucket, t
 			best.Method = "tls-probe"
 		}
 		if !r.Soft {
+			identified = true
 			// ============================================================
-			// A HARD match stops the chain. A SOFT one does not.
+			// A HARD match stops IDENTIFICATION. A SOFT one does not, and
+			// neither stops an identity probe.
 			// ============================================================
 			//
 			// The product name is precisely what the later, rarer probes exist
@@ -432,7 +488,7 @@ func identifyPort(ctx context.Context, cfg Config, limiter *enginerate.Bucket, t
 			// early exit on any match at all: at most MaxProbesPerPort probes
 			// reach one port, cheapest and most likely first, and a softmatch
 			// is a reportable terminal answer when the cap runs out.
-			break
+			continue
 		}
 	}
 
@@ -481,13 +537,48 @@ func better(r Result, heldSoft bool, heldConf float32) bool {
 // already sent a greeting is in a protocol state, and a second unrelated payload
 // on the same connection produces a response neither probe can be said to have
 // caused — which makes the provenance in the observation a fiction.
-func runProbe(ctx context.Context, cfg Config, address string, port uint16, p Probe) (r Result, tlsInfo *tlsPayload, resp []byte, cost uint32, ok bool) {
+// probeOutcome is what one probe produced.
+//
+// A struct rather than six positional returns, which is what this became once a
+// probe could yield a certificate, a host key, or neither.
+type probeOutcome struct {
+	result   Result
+	matched  bool
+	tls      *tlsPayload
+	ssh      *sshPayload
+	response []byte
+	cost     uint32
+}
+
+func runProbe(ctx context.Context, cfg Config, address string, port uint16, p Probe) probeOutcome {
 	conn, cost, _, err := dial(ctx, address, port, cfg.ConnectTimeout)
 	if err != nil {
-		return Result{}, nil, nil, cost, false
+		return probeOutcome{cost: cost}
 	}
 	defer func() { _ = conn.Close() }()
 
+	if p.Kind == probeKindSSHHostKey {
+		// A key exchange, abandoned once the host key is in hand. See ssh.go:
+		// nothing past the reply is implemented, so there is no authentication
+		// path to decline.
+		info, err := sshHostKey(ctx, conn, cfg.ConnectTimeout)
+		cost += SSHProbeCost
+		if err != nil {
+			return probeOutcome{cost: cost}
+		}
+		// A SOFT match: completing a key exchange proves the protocol beyond
+		// doubt and says nothing about the product. The banner rules name
+		// OpenSSH; this names ssh.
+		return probeOutcome{
+			result: Result{
+				Service: "ssh", Soft: true,
+				Confidence: confProtocolOnlySSH, Pattern: "ssh key exchange",
+			},
+			matched: true, ssh: info, cost: cost,
+		}
+	}
+
+	var tlsInfo *tlsPayload
 	rw := conn
 	if p.TLS {
 		tc, info, err := dialTLS(ctx, conn, address, cfg.ConnectTimeout)
@@ -496,7 +587,7 @@ func runProbe(ctx context.Context, cfg Config, address string, port uint16, p Pr
 			// Not TLS, or a handshake this client cannot complete. Either is a
 			// finding-shaped fact and neither is an error worth abandoning the
 			// chain for.
-			return Result{}, nil, nil, cost, false
+			return probeOutcome{cost: cost}
 		}
 		rw, tlsInfo = tc, info
 	}
@@ -504,10 +595,10 @@ func runProbe(ctx context.Context, cfg Config, address string, port uint16, p Pr
 	if len(p.Payload) > 0 {
 		payload := substituteTarget(p.Payload, address)
 		if err := rw.SetWriteDeadline(time.Now().Add(cfg.ConnectTimeout)); err != nil {
-			return Result{}, tlsInfo, nil, cost, false
+			return probeOutcome{tls: tlsInfo, cost: cost}
 		}
 		if _, err := rw.Write(payload); err != nil {
-			return Result{}, tlsInfo, nil, cost, false
+			return probeOutcome{tls: tlsInfo, cost: cost}
 		}
 		cost++
 	}
@@ -516,21 +607,21 @@ func runProbe(ctx context.Context, cfg Config, address string, port uint16, p Pr
 	if limit <= 0 || limit > maxResponseBytes {
 		limit = maxResponseBytes
 	}
-	resp = readResponse(ctx, rw, cfg.ConnectTimeout, limit)
+	resp := readResponse(ctx, rw, cfg.ConnectTimeout, limit)
 	if len(resp) == 0 {
-		return Result{}, tlsInfo, nil, cost, false
+		return probeOutcome{tls: tlsInfo, cost: cost}
 	}
 
 	// The probe's own rules first, then the banner rules — a probe response is
 	// often a greeting the banner rules already know how to read, which is what
 	// makes the `newline` probe useful without carrying any rules of its own.
 	if r, ok := evaluate(p.Matches, resp, port); ok {
-		return r, tlsInfo, resp, cost, true
+		return probeOutcome{result: r, matched: true, tls: tlsInfo, response: resp, cost: cost}
 	}
 	if r, ok := evaluate(cfg.BannerMatches, resp, port); ok {
-		return r, tlsInfo, resp, cost, true
+		return probeOutcome{result: r, matched: true, tls: tlsInfo, response: resp, cost: cost}
 	}
-	return Result{}, tlsInfo, resp, cost, false
+	return probeOutcome{tls: tlsInfo, response: resp, cost: cost}
 }
 
 // withheldProbes applies the engine's own copy of the three send-side controls.
@@ -550,10 +641,18 @@ func withheldProbes(cfg Config) []Probe {
 	}
 	kept := make([]Probe, 0, len(cfg.Probes))
 	for _, p := range cfg.Probes {
+		switch p.Kind {
+		case probeKindPayload, probeKindSSHHostKey:
+		default:
+			// A kind this build does not implement would fall through to the
+			// payload path and send nothing, which looks like a probe that
+			// found nothing rather than one that never ran.
+			continue
+		}
 		if len(p.Ports) == 0 || anyNonInert(p.Ports) {
 			continue
 		}
-		if substitutedSize(p.Payload) > maxProbePayload {
+		if p.Kind == probeKindPayload && substitutedSize(p.Payload) > maxProbePayload {
 			continue
 		}
 		kept = append(kept, p)
@@ -611,6 +710,9 @@ func substitutedSize(payload []byte) int {
 // never costs the ceiling.
 func probeCost(p Probe, timeout time.Duration) uint32 {
 	full := uint32(1 + enginerate.EstablishedCost)
+	if p.Kind == probeKindSSHHostKey {
+		full += SSHProbeCost
+	}
 	if p.TLS {
 		full += TLSHandshakeCost
 	}
@@ -621,6 +723,18 @@ func probeCost(p Probe, timeout time.Duration) uint32 {
 		return syn
 	}
 	return full
+}
+
+// identityBearing reports whether a probe yields an ADR-007 identity key.
+//
+// Derived from what the probe is rather than declared on the wire. Both cases
+// produce a fingerprint the engine computes itself — a certificate's, or an SSH
+// host key's — and both are engine-implemented, so a pack cannot invent a third
+// without a new probe kind, which is amendment-gated (ADR-049). That is tighter
+// than a boolean any pack could set to make its probe exempt from the chain's
+// economy.
+func identityBearing(p Probe) bool {
+	return p.Kind == probeKindSSHHostKey || p.TLS
 }
 
 // chainFor orders the probes that apply to one port, and caps them.

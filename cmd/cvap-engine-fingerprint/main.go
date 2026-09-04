@@ -77,18 +77,7 @@ func run() error {
 	// job this slice is empty and the engine has nothing to send. That is the
 	// enforcement, not the SafetyMode string, which travels only so an
 	// observation can record how it was made (ADR-021).
-	probes := make([]fingerprint.Probe, 0, len(msg.Probes))
-	for _, p := range msg.Probes {
-		probes = append(probes, fingerprint.Probe{
-			Name:      p.Name,
-			Ports:     toPorts(p.Ports),
-			Payload:   p.Payload,
-			ReadBytes: p.ReadBytes,
-			TLS:       p.TLS,
-			Rarity:    p.Rarity,
-			Matches:   toMatches(p.Matches),
-		})
-	}
+	probes := toProbes(msg.Probes)
 
 	cfg := fingerprint.Config{
 		RatePPS:                float64(msg.RateBudgetPPS),
@@ -173,6 +162,41 @@ func toMatches(in []enginewire.Match) []fingerprint.Match {
 			Confidence: m.Confidence,
 			OSHint:     m.OSHint,
 			Ports:      toPorts(m.Ports),
+		})
+	}
+	return out
+}
+
+// toProbes translates the wire's probes into the engine's.
+//
+// Named and separate so translate_test.go can assert, by reflection, that no
+// field is dropped — which is the failure this had.
+func toProbes(in []enginewire.Probe) []fingerprint.Probe {
+	out := make([]fingerprint.Probe, 0, len(in))
+	for _, p := range in {
+		out = append(out, fingerprint.Probe{
+			Name: p.Name,
+
+			// Kind, and it was missing.
+			//
+			// Dropping it here turned an ssh_hostkey probe into a payload probe
+			// with no payload, which the engine then withheld — so the probe was
+			// silently absent from every chain and the one identity key most
+			// Linux hosts can offer was never collected. Found by pointing the
+			// engine at the lab and reading a capture with one connection in it
+			// where there should have been two.
+			//
+			// A translation that drops a field is invisible by construction:
+			// both sides compile, and the receiver simply sees a zero value.
+			// probeTranslationTest covers every field for that reason.
+			Kind: p.Kind,
+
+			Ports:     toPorts(p.Ports),
+			Payload:   p.Payload,
+			ReadBytes: p.ReadBytes,
+			TLS:       p.TLS,
+			Rarity:    p.Rarity,
+			Matches:   toMatches(p.Matches),
 		})
 	}
 	return out

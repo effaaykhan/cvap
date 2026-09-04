@@ -83,6 +83,7 @@ GO_SUITES = [
     "internal/engines/fingerprint/tls_test.go",
     "internal/engines/fingerprint/payload_test.go",
     "internal/scanpoint/corpus_test.go",
+    "internal/domain/identity_test.go",
 ]
 
 # The declaration shape, in comments beside the tests:

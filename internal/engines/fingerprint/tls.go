@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"time"
@@ -140,6 +142,22 @@ const (
 // to ask about a certificate, and nothing that would let this become a store of
 // key material.
 type certPayload struct {
+	// ====================================================================
+	// Fingerprint: the only identity key a network scan can produce that
+	// ADR-007 ranks above weak.
+	// ====================================================================
+	//
+	// SHA-256 over the leaf's DER, rendered the way OpenSSH renders one, so an
+	// operator can compare it against what a host reports about itself.
+	//
+	// It was missing, and the absence was invisible until asset resolution
+	// needed it: every strong key in ADR-007 needs an agent or cloud metadata,
+	// `mac` needs ARP and `netbios` needs an SMB name query, so without this the
+	// only key a scan yields is `ip_window` — which ADR-007 says never merges
+	// alone. Week 5's deliverable, one asset across a DHCP change, was
+	// unreachable for want of a hash.
+	Fingerprint string `json:"fingerprint"`
+
 	Subject   string `json:"subject"`
 	Issuer    string `json:"issuer"`
 	Serial    string `json:"serial,omitempty"`
@@ -224,12 +242,18 @@ func describeTLS(st tls.ConnectionState) *tlsPayload {
 }
 
 func describeCert(c *x509.Certificate) certPayload {
+	// Over Raw — the DER exactly as the host sent it — because that is what the
+	// peer's own tooling hashes. Re-encoding the parsed structure would produce
+	// a different, correct-looking hash that matches nothing.
+	sum := sha256.Sum256(c.Raw)
+
 	out := certPayload{
-		Subject:   truncate(c.Subject.String(), MaxNameLength),
-		Issuer:    truncate(c.Issuer.String(), MaxNameLength),
-		NotBefore: c.NotBefore.UTC().Format(time.RFC3339),
-		NotAfter:  c.NotAfter.UTC().Format(time.RFC3339),
-		IsCA:      c.IsCA,
+		Fingerprint: "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:]),
+		Subject:     truncate(c.Subject.String(), MaxNameLength),
+		Issuer:      truncate(c.Issuer.String(), MaxNameLength),
+		NotBefore:   c.NotBefore.UTC().Format(time.RFC3339),
+		NotAfter:    c.NotAfter.UTC().Format(time.RFC3339),
+		IsCA:        c.IsCA,
 		// Self-signed by NAME, which is what it means before any verification:
 		// the subject and issuer are the same distinguished name. Not a
 		// signature check — that would be verification, and this engine does

@@ -75,6 +75,12 @@ type servicePayload struct {
 
 	OS  *osHint     `json:"os,omitempty"`
 	TLS *tlsPayload `json:"tls,omitempty"`
+
+	// SSH carries the host key, which is ADR-007's `ssh_hostkey` identity key —
+	// moderate strength, and the only one most Linux hosts can offer. Inside the
+	// service payload for the same reason the certificate is (ADR-048 §5): it is
+	// a property of a service on a port.
+	SSH *sshPayload `json:"ssh,omitempty"`
 }
 
 // osHint is a platform a banner SUGGESTED. It is not OS detection.
