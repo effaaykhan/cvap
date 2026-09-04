@@ -510,19 +510,33 @@ The third — the rate budget counting connect attempts while ADR-024's ceilings
 
 - **Core does not tell the fingerprint engine which ports are open.** `ToEngine.Ports` exists and the runtime fills it; nothing plans a fingerprint job from discovery's observations, so the engine falls back to its own port list and re-establishes what discovery already knew. **The unblocker is week 5's second half** — observation to asset to plan. The cost until then is a duplicated connect per port, which is visible in the packet budget rather than hidden.
 
-- **Per-target rate is not aggregated across concurrent jobs.** `internal/scanpoint/allocator.go`
+- **Per-target rate does not aggregate across concurrent jobs.** `internal/scanpoint/allocator.go`
   divides ADR-024's 1,000 pps per-SCAN-POINT ceiling between jobs. Nothing divides the 50/10 pps
-  per-TARGET ceiling, so two jobs covering one host each get the full allowance. Measured: two
-  concurrent engine processes, one fragile target, each budgeted 10 pps — `mean 8.75 pps, max in
-  any 1.0s window = 18`. Linear in job count.
+  per-TARGET ceiling, so two jobs covering one host each receive the full allowance.
 
-  This was theoretical while discovery was the only engine and is concrete now, because ADR-048's
-  fallback means a fingerprint job re-connects to ports a discovery job already found — the two
-  cover the same host by design. **The unblocker is a decision about where it belongs**: Core can
-  decline to dispatch two concurrent jobs covering one target, or the runtime can hold a
-  per-target bucket shared across engine processes. The second is cross-process shared rate state,
-  which ADR-027 rejects between processes for good reasons, so the first is probably right — and
-  it is a planning change, not a runtime one. Deferred rather than guessed at.
+  **Measured**, not reasoned about: two concurrent engine processes against one fragile target,
+  each handed exactly what `job.budget()` produces for a 10 pps fragile job — `mean 8.75 pps, max
+  in any 1.0s window = 18`. Linear in job count, so three jobs is 27 and the ceiling that protects
+  a delicate device is whatever Core happened to dispatch.
+
+  It was theoretical while discovery was the only engine that could send a packet. It is concrete
+  now: ADR-048's port fallback means **a fingerprint job re-scans ports a discovery job just
+  found**, so the two cover the same host by design rather than by accident.
+
+  **The likely fix is a claim predicate at Core**: `Jobs.Claim` declines to hand out a job whose
+  targets overlap a job already running on the same host. That is the same shape as
+  `allowed_zones` and the kill-switch scope — a condition inside the claim rather than a check
+  after it — and `internal/dispatch/CLAUDE.md` records why that shape is the right one: a job
+  claimed and then released increments `attempt` on every poll and hits `MaxAttempts` in seconds,
+  so the protection destroys the scan it was written to protect.
+
+  The alternative is a per-target bucket in the runtime, shared across engine processes. That is
+  cross-process shared mutable rate state, which ADR-027 rejects between processes for reasons
+  that have not weakened, so it is named here only to record that it was considered and refused.
+
+  **This belongs wherever session 14 touches planning**, since asset identity resolution is what
+  will start producing fingerprint jobs from discovery's observations — which is exactly the
+  moment two jobs covering one host stops being hypothetical.
 
 - **Four probes have never fired against a live server**: SMB, RDP, MSSQL and DNS. The lab has no target for any of them. Their payloads are the standard opening packet of each protocol, sent before authentication, and the static policy bounds them regardless of what their patterns do — but a rule nothing has exercised may silently match nothing, which is the failure this codebase keeps finding. **The unblocker is lab targets**, and it belongs with week 8's golden corpus.
 

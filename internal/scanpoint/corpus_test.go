@@ -646,3 +646,99 @@ func TestTheEngineDenylistMatchesTheRuntimes(t *testing.T) {
 		}
 	}
 }
+
+// TestTheCorpusContainsWhatThisBuildShipped.
+//
+// ============================================================================
+// Every other test in this file asserts a PROPERTY of the corpus. This one
+// asserts the corpus has contents.
+// ============================================================================
+//
+// The distinction is not pedantic and it cost a session. A stray `git checkout`
+// reverted probes.go from the ten entries this build ships to the two it had
+// before, and nothing noticed: `make ci` was green, all mutations were killed,
+// and `make safety` reported a clean run — because "every pattern compiles",
+// "every probe is bounded" and "the static policy rejects nothing" are all
+// equally true of a two-entry corpus. The gate even printed that the TLS
+// handshake was inside its capture while the corpus reaching it had no TLS probe
+// at all. A subagent audit found it by running the binary.
+//
+// So: a session that ships CONTENT needs at least one test that names what the
+// content must contain, or losing the content is indistinguishable from having
+// it. This is that test. Adding a probe means adding a line here, which is the
+// point rather than the cost.
+func TestTheCorpusContainsWhatThisBuildShipped(t *testing.T) {
+	// The probes ADR-048 describes, by name. `measured` marks the ones the ADR
+	// says were written from a captured response rather than from a protocol
+	// specification — those must carry rules, because a measured probe with no
+	// way to read its answer is a claim about a capture nobody kept.
+	want := map[string]struct{ measured, tls bool }{
+		"http-head":        {measured: true},
+		"https-head":       {measured: true, tls: true},
+		"tls-hello":        {tls: true},
+		"http-badversion":  {measured: true},
+		"postgres-startup": {measured: true},
+		"mssql-prelogin":   {},
+		"smb2-negotiate":   {},
+		"rdp-connect":      {},
+		"dns-version-bind": {},
+		"newline":          {},
+	}
+
+	corpus, rejected := BuiltinCorpus()
+	if len(rejected) > 0 {
+		t.Fatalf("the built-in corpus lost entries to its own policy: %v", rejected)
+	}
+
+	got := make(map[string]enginewire.Probe, len(corpus.Probes))
+	for _, p := range corpus.Probes {
+		got[p.Name] = p
+	}
+	for name, spec := range want {
+		p, ok := got[name]
+		if !ok {
+			t.Errorf("probe %q is not in the corpus. ADR-048 describes it; either it was lost, "+
+				"or the ADR and this list need updating together.", name)
+			continue
+		}
+		if spec.tls != p.TLS {
+			t.Errorf("probe %q: TLS = %v, want %v", name, p.TLS, spec.tls)
+		}
+		if spec.measured && len(p.Matches) == 0 {
+			t.Errorf("probe %q is described as written from a captured response and carries no "+
+				"match rules, so nothing reads what it provokes", name)
+		}
+	}
+	for name := range got {
+		if _, ok := want[name]; !ok {
+			t.Errorf("probe %q is in the corpus and not in this list. A probe nobody named here "+
+				"can be removed without anything noticing.", name)
+		}
+	}
+
+	// At least one TLS probe must exist, or the whole certificate path — the
+	// crypto/tls exception, TLSHandshakeCost, week 6's certificate rules — is
+	// unreachable from what ships. `make safety` asserts the same thing at the
+	// wire; this is the cheap half that runs everywhere.
+	var haveTLS bool
+	for _, p := range corpus.Probes {
+		if p.TLS {
+			haveTLS = true
+		}
+	}
+	if !haveTLS {
+		t.Error("no TLS probe in the corpus: the certificate path cannot be reached by any job")
+	}
+
+	// The banner rules are content too, and safe mode has nothing else.
+	services := map[string]bool{}
+	for _, m := range corpus.BannerMatches {
+		services[m.Service] = true
+	}
+	for _, s := range []string{"ssh", "smtp", "ftp", "pop3", "imap", "telnet", "mysql"} {
+		if !services[s] {
+			t.Errorf("no banner rule for %q, which ADR-048 lists among the seven services that "+
+				"volunteer — safe mode would not identify it", s)
+		}
+	}
+}
