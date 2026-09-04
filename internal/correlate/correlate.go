@@ -40,6 +40,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/effaaykhan/cvap/internal/domain"
+	"github.com/effaaykhan/cvap/internal/rules"
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
@@ -72,6 +73,14 @@ type Correlator struct {
 	db  *store.DB
 	log *slog.Logger
 	now func() time.Time
+
+	// rules is the loaded, validated rule set, refreshed once per sweep. The
+	// finding pipeline runs them over each asset as it is resolved.
+	//
+	// Held on the correlator rather than reloaded per host because they are
+	// global (ADR-009) and do not change within a sweep; a rule pack import
+	// between sweeps is picked up at the next one.
+	rules []rules.Rule
 }
 
 func New(db *store.DB, log *slog.Logger) *Correlator {
@@ -112,6 +121,24 @@ func (c *Correlator) sweep(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	// Load the rules once per sweep. Global tables have no RLS, so any tenant
+	// connection reads them; the first tenant's is as good as any. A rule that
+	// names an evaluator this build does not implement, or carries a malformed
+	// threshold, fails HERE — loudly, once a sweep — rather than silently never
+	// firing (internal/rules.Load).
+	if len(tenants) > 0 {
+		if err := c.loadRules(ctx, tenants[0]); err != nil {
+			// A bad rule set is not one tenant's problem, so it stops the sweep
+			// rather than being logged per tenant. The previous sweep's rules
+			// are not reused: running a rule set nobody validated is the failure
+			// Load exists to prevent.
+			c.rules = nil
+			c.log.ErrorContext(ctx, "rule set failed to load; no findings this sweep",
+				slog.Any("error", err))
+		}
+	}
+
 	for _, t := range tenants {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -141,6 +168,32 @@ type host struct {
 	obs     []store.Observation
 	keys    []domain.IdentityKey
 	seenAt  time.Time
+}
+
+// loadRules reads and validates the active core rules.
+func (c *Correlator) loadRules(ctx context.Context, anyTenant store.TenantID) error {
+	var rows []store.RuleRow
+	if err := c.db.Read(ctx, anyTenant, func(ctx context.Context, conn *store.Conn) error {
+		var err error
+		rows, err = (store.Rules{}).ActiveCoreRules(ctx, conn)
+		return err
+	}); err != nil {
+		return err
+	}
+	in := make([]rules.Rule, 0, len(rows))
+	for _, r := range rows {
+		in = append(in, rules.Rule{
+			ID: r.ID, Name: r.Name, Category: r.Category, Evaluator: r.Evaluator,
+			Params: r.Params, Severity: r.Severity, Confidence: r.Confidence,
+			CWE: r.CWE, Remediation: r.Remediation, Version: r.Version,
+		})
+	}
+	loaded, err := rules.Load(in, c.now())
+	if err != nil {
+		return err
+	}
+	c.rules = loaded
+	return nil
 }
 
 func (c *Correlator) correlateTenant(ctx context.Context, tenant store.TenantID) error {
@@ -175,11 +228,19 @@ func (c *Correlator) correlateTenant(ctx context.Context, tenant store.TenantID)
 		return err
 	}
 
+	// Zone types for this tenant, for the exposure rules. Loaded once per sweep
+	// per tenant and read from a closure by the evaluator, which must do no I/O
+	// of its own — that is what keeps it re-runnable over history.
+	zoneType, err := c.zoneTypes(ctx, tenant)
+	if err != nil {
+		return err
+	}
+
 	for _, h := range groupByAddress(pending) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := c.resolveHost(ctx, tenant, h, now); err != nil {
+		if err := c.resolveHost(ctx, tenant, h, zoneType, now); err != nil {
 			c.log.ErrorContext(ctx, "could not resolve a host",
 				slog.String("tenant_id", tenant.String()),
 				slog.String("address", h.address), slog.Any("error", err))
@@ -196,7 +257,7 @@ func (c *Correlator) correlateTenant(ctx context.Context, tenant store.TenantID)
 // two of them leaves the state the unique index in migration 0031 exists to
 // prevent — or an observation marked resolved against an asset that was never
 // written.
-func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h host, now time.Time) error {
+func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h host, zoneType func(uuid.UUID) string, now time.Time) error {
 	return c.db.Write(ctx, tenant, func(ctx context.Context, conn *store.Conn) error {
 		candidates, err := c.candidatesFor(ctx, conn, h)
 		if err != nil {
@@ -278,6 +339,18 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 			return err
 		}
 
+		// Findings, in the SAME transaction: the moment the derived model
+		// changed is the moment to re-judge it, and a finding written against an
+		// asset whose resolution rolled back would reference a row that never
+		// committed. Environment drives the self-signed rule's dev exemption.
+		env, err := (store.Assets{}).EnvironmentOf(ctx, conn, assetID)
+		if err != nil {
+			return err
+		}
+		if err := c.evaluateFindings(ctx, conn, assetID, env, h, zoneType, now); err != nil {
+			return err
+		}
+
 		for _, o := range h.obs {
 			if err := (store.Observations{}).Resolve(ctx, conn, o.ID, o.ObservedAt, assetID); err != nil {
 				return err
@@ -285,6 +358,30 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		}
 		return nil
 	})
+}
+
+// zoneTypes builds a zone-id -> zone-type resolver for a tenant.
+//
+// Read once per tenant per sweep and captured in a closure, so the evaluator
+// does no I/O — which is what lets a rule be re-run over history and reach the
+// same answer. A zone id the map does not know resolves to "", which the
+// exposure rule treats as not-untrusted: an unknown zone is not evidence of
+// exposure.
+func (c *Correlator) zoneTypes(ctx context.Context, tenant store.TenantID) (func(uuid.UUID) string, error) {
+	m := map[uuid.UUID]string{}
+	if err := c.db.Read(ctx, tenant, func(ctx context.Context, conn *store.Conn) error {
+		zs, err := (store.Zones{}).List(ctx, conn)
+		if err != nil {
+			return err
+		}
+		for _, z := range zs {
+			m[z.ID] = string(z.Type)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return func(id uuid.UUID) string { return m[id] }, nil
 }
 
 // candidatesFor gathers the assets this evidence could belong to.

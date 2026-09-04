@@ -540,6 +540,18 @@ The third — the rate budget counting connect attempts while ADR-024's ceilings
 
 - **Four probes have never fired against a live server**: SMB, RDP, MSSQL and DNS. The lab has no target for any of them. Their payloads are the standard opening packet of each protocol, sent before authentication, and the static policy bounds them regardless of what their patterns do — but a rule nothing has exercised may silently match nothing, which is the failure this codebase keeps finding. **The unblocker is lab targets**, and it belongs with week 8's golden corpus.
 
+**Deferred from the rule-engine session (ADR-050), each with what unblocks it:**
+
+- **Four of the ~20 non-CVE rules do not ship**, and week 8's coverage claim must exclude them. "TLS 1.0/1.1 enabled" and "weak cipher enabled" ship in the narrower negotiated form (`tls.legacy_negotiated`, `tls.weak_cipher_negotiated`) — a version-ladder probe, one handshake per version, is the unblocker for the "enabled" form. "SNMP v1/v2c default community" needs UDP discovery. "Directory listing enabled" needs a bounded GET probe kind (the HTTP probe is HEAD by design). All four are named in ADR-050.
+
+- **Two shipped HTTP rules read the sanitised evidence excerpt, not a structured field.** `http.no_https_redirect` and `http.missing_headers` parse a status line and headers out of prose, at 0.75 confidence. **The unblocker is a structured `http` object on the service payload** — status code and headers as a map — gathered by the fingerprint engine beside the `tls` object it already gathers. A latent limitation: true today, breaks when the excerpt format changes for an unrelated reason.
+
+- **A predicate language for rules.** The engine hosts closed evaluators with content parameters (ADR-050). **The unblocker is concrete: the first rule needing logic no evaluator provides where adding one would be the third of the same shape** — the certificate-threshold evaluators are the ones to watch.
+
+- **Retroactive re-evaluation over history.** `rules.Evaluate` is pure and takes `now` as a parameter specifically so a corrected rule can be replayed against stored observations (ADR-013). Nothing calls it that way yet. **The unblocker is a decision about what a re-evaluation does to findings an operator has already triaged** — reopening a `false_positive` because a rule changed is not obviously right — and it lands with signed rule-pack import.
+
+- **The management-interface rule guesses no zone trust.** It treats `external`/`dmz` as untrusted and leaves `branch`/`cloud` out. **The unblocker is a per-zone trust attribute an operator sets** — `scan_zones.trust_level` exists as an integer with no assigned meaning.
+
 **Deferred from the asset-resolution session (ADR-049), each with what unblocks it:**
 
 - **A host with one moderate key does not merge across an address change.** ADR-007 needs one strong key or corroboration among weaker ones, and a lone SSH host key is uncorroborated. The common estate — Linux, SSH, no TLS — is exactly this case, and so is the lab's own SSH host.

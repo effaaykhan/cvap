@@ -1,0 +1,142 @@
+{
+  "_comment": [
+    "Golden corpus for the non-CVE rules: labelled inputs with the findings each must",
+    "produce. Consumed by corpus_test.go NOW — a corpus with no checker is a dead file,",
+    "which is the failure this project warns against — and week 8's make corpus-check is to",
+    "drive these same cases end to end through a real scan (docs/execution-plan.md 6.2).",
+    "",
+    "Each case is one service observation and the rule names it must and must not raise.",
+    "'raises' is exact: a rule not listed must NOT fire, because a false finding costs more",
+    "than a missed one (the write-detection-rule skill)."
+  ],
+  "cases": [
+    {
+      "name": "expired-self-signed-cert",
+      "service": {
+        "port": 443, "protocol": "tcp", "service": "http",
+        "tls": {"version": "TLSv1.2", "cipher_suite": "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "chain_length": 1,
+          "chain": [{"subject": "CN=old", "issuer": "CN=old", "not_before": "2024-01-01T00:00:00Z", "not_after": "2025-01-01T00:00:00Z", "self_signed": true, "public_key_algorithm": "RSA", "key_bits": 2048}]}
+      },
+      "environment": "",
+      "raises": ["tls-certificate-expired", "tls-self-signed-non-dev"]
+    },
+    {
+      "name": "self-signed-on-dev-is-exempt",
+      "service": {
+        "port": 443, "protocol": "tcp", "service": "http",
+        "tls": {"version": "TLSv1.3", "cipher_suite": "TLS_AES_128_GCM_SHA256", "chain_length": 1,
+          "chain": [{"subject": "CN=dev", "issuer": "CN=dev", "not_before": "2026-01-01T00:00:00Z", "not_after": "2027-01-01T00:00:00Z", "self_signed": true, "public_key_algorithm": "RSA", "key_bits": 2048}]}
+      },
+      "environment": "dev",
+      "raises": []
+    },
+    {
+      "name": "ca-signed-leaf-alone-missing-chain",
+      "service": {
+        "port": 8443, "protocol": "tcp", "service": "http",
+        "tls": {"version": "TLSv1.3", "cipher_suite": "TLS_AES_128_GCM_SHA256", "chain_length": 1,
+          "chain": [{"subject": "CN=host", "issuer": "CN=Real CA", "not_before": "2026-01-01T00:00:00Z", "not_after": "2027-06-01T00:00:00Z", "self_signed": false, "public_key_algorithm": "RSA", "key_bits": 2048}]}
+      },
+      "environment": "prod",
+      "raises": ["tls-missing-chain"]
+    },
+    {
+      "name": "weak-rsa-key",
+      "service": {
+        "port": 443, "protocol": "tcp", "service": "http",
+        "tls": {"version": "TLSv1.3", "cipher_suite": "TLS_AES_128_GCM_SHA256", "chain_length": 2,
+          "chain": [{"subject": "CN=host", "issuer": "CN=CA", "not_before": "2026-01-01T00:00:00Z", "not_after": "2027-06-01T00:00:00Z", "self_signed": false, "public_key_algorithm": "RSA", "key_bits": 1024}]}
+      },
+      "environment": "prod",
+      "raises": ["tls-weak-key"]
+    },
+    {
+      "name": "unsized-key-is-not-weak",
+      "service": {
+        "port": 443, "protocol": "tcp", "service": "http",
+        "tls": {"version": "TLSv1.3", "cipher_suite": "TLS_AES_128_GCM_SHA256", "chain_length": 2,
+          "chain": [{"subject": "CN=host", "issuer": "CN=CA", "not_before": "2026-01-01T00:00:00Z", "not_after": "2027-06-01T00:00:00Z", "self_signed": false, "public_key_algorithm": "Ed25519", "key_bits": 0}]}
+      },
+      "environment": "prod",
+      "raises": []
+    },
+    {
+      "name": "tls10-negotiated",
+      "service": {
+        "port": 443, "protocol": "tcp", "service": "http",
+        "tls": {"version": "TLSv1.0", "cipher_suite": "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA", "chain_length": 2,
+          "chain": [{"subject": "CN=host", "issuer": "CN=CA", "not_before": "2026-01-01T00:00:00Z", "not_after": "2027-06-01T00:00:00Z", "self_signed": false, "public_key_algorithm": "RSA", "key_bits": 2048}]}
+      },
+      "environment": "prod",
+      "raises": ["tls-legacy-version-negotiated"]
+    },
+    {
+      "name": "weak-cipher-negotiated",
+      "service": {
+        "port": 443, "protocol": "tcp", "service": "http",
+        "tls": {"version": "TLSv1.2", "cipher_suite": "TLS_RSA_WITH_AES_128_CBC_SHA", "chain_length": 2,
+          "chain": [{"subject": "CN=host", "issuer": "CN=CA", "not_before": "2026-01-01T00:00:00Z", "not_after": "2027-06-01T00:00:00Z", "self_signed": false, "public_key_algorithm": "RSA", "key_bits": 2048}]}
+      },
+      "environment": "prod",
+      "raises": ["tls-weak-cipher-negotiated"]
+    },
+    {
+      "name": "telnet-plaintext",
+      "service": {"port": 23, "protocol": "tcp", "service": "telnet", "evidence": "login:"},
+      "environment": "prod",
+      "raises": ["plaintext-telnet"]
+    },
+    {
+      "name": "ftp-plaintext",
+      "service": {"port": 21, "protocol": "tcp", "service": "ftp", "evidence": "220 vsftpd 3.0.5"},
+      "environment": "prod",
+      "raises": ["plaintext-ftp"]
+    },
+    {
+      "name": "http-no-redirect",
+      "service": {"port": 80, "protocol": "tcp", "service": "http", "evidence": "HTTP/1.1 200 OK Server: nginx Content-Type: text/html"},
+      "environment": "prod",
+      "raises": ["http-no-https-redirect", "http-missing-security-headers"]
+    },
+    {
+      "name": "http-redirects-to-https",
+      "service": {"port": 80, "protocol": "tcp", "service": "http", "evidence": "HTTP/1.1 301 Moved Location: https://x/ Server: nginx"},
+      "environment": "prod",
+      "raises": []
+    },
+    {
+      "name": "ssh-weak-algorithms",
+      "service": {"port": 22, "protocol": "tcp", "service": "ssh",
+        "ssh": {"host_key_type": "ssh-ed25519", "fingerprint": "SHA256:x",
+          "host_key_algorithms": ["ssh-ed25519", "ssh-rsa"],
+          "kex_algorithms": ["curve25519-sha256", "diffie-hellman-group14-sha1"]}},
+      "environment": "prod",
+      "raises": ["ssh-weak-algorithms"]
+    },
+    {
+      "name": "ssh-modern-only",
+      "service": {"port": 22, "protocol": "tcp", "service": "ssh",
+        "ssh": {"host_key_type": "ssh-ed25519", "fingerprint": "SHA256:x",
+          "host_key_algorithms": ["ssh-ed25519", "rsa-sha2-512"],
+          "kex_algorithms": ["curve25519-sha256"]}},
+      "environment": "prod",
+      "raises": []
+    },
+    {
+      "name": "management-ssh-external",
+      "service": {"port": 22, "protocol": "tcp", "service": "ssh", "zone_type": "external",
+        "ssh": {"host_key_type": "ssh-ed25519", "fingerprint": "SHA256:x",
+          "host_key_algorithms": ["ssh-ed25519"], "kex_algorithms": ["curve25519-sha256"]}},
+      "environment": "prod",
+      "raises": ["management-interface-untrusted-zone"]
+    },
+    {
+      "name": "management-ssh-internal-is-fine",
+      "service": {"port": 22, "protocol": "tcp", "service": "ssh", "zone_type": "internal",
+        "ssh": {"host_key_type": "ssh-ed25519", "fingerprint": "SHA256:x",
+          "host_key_algorithms": ["ssh-ed25519"], "kex_algorithms": ["curve25519-sha256"]}},
+      "environment": "prod",
+      "raises": []
+    }
+  ]
+}

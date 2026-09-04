@@ -156,6 +156,21 @@ func (Assets) List(ctx context.Context, c *Conn, before time.Time, beforeID uuid
 
 // TouchLastSeen advances last_seen. Called by derivation when an observation
 // confirms an asset is still there.
+// EnvironmentOf returns the asset's environment, or "" if unset.
+//
+// A thin read because the finding pipeline needs one field and building a whole
+// Asset to get it would be wasteful on the hot path — every resolved host asks.
+// Empty is NOT dev: the self-signed rule treats an un-tagged asset as
+// production, because the safe default has to be the one that raises.
+func (Assets) EnvironmentOf(ctx context.Context, c *Conn, id uuid.UUID) (string, error) {
+	const q = `SELECT coalesce(environment,'') FROM assets WHERE tenant_id = $1 AND asset_id = $2`
+	var env string
+	if err := c.QueryRow(ctx, q, c.Tenant().UUID(), id).Scan(&env); err != nil {
+		return "", mapError(err)
+	}
+	return env, nil
+}
+
 func (Assets) TouchLastSeen(ctx context.Context, c *Conn, id uuid.UUID, seenAt time.Time) error {
 	const q = `
 		UPDATE assets SET last_seen = greatest(last_seen, $3)

@@ -56,3 +56,6 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 045 | OIDC identity is the subject, the client is public, and the issuer is a network the deployment trusts | Superseded by ADR-046 |
 | 046 | OIDC, restated with the SSRF guard made true and two claims corrected (supersedes 045) | Accepted |
 | 047 | The discovery engine may open sockets, and connect scanning is what it may do with them | Accepted |
+| 048 | The fingerprint corpus is signed content under a static policy it cannot widen | Accepted |
+| 049 | Probes have kinds, and a key exchange is not a payload (supersedes 048 §1 rule 2) | Accepted |
+| 050 | The rule engine is closed evaluators and open rules | Accepted |

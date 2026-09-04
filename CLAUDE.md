@@ -15,11 +15,16 @@ internal/
   control/      control plane services (auth, tenancy, asset, scan, policy)
   dispatch/     job broker + dispatch + ingest
   scanpoint/    scan point runtime, lease client, engine host
-  engines/      discovery, fingerprint, rules — separate processes (ADR-027)
+  engines/      discovery, fingerprint — separate processes (ADR-027). A scan-point
+                `rules` engine (request-coupled checks, ADR-013) is not built yet;
+                the Core-side evidence-based rule engine is internal/rules
                 enginerate/ is the shared packet budget: ONE model, because
                 make safety asserts wire-to-charged against one (ADR-048)
-  correlate/    observations -> assets. The only thing that writes an asset
-                (ADR-006); the merge DECISION is pure and lives in domain/
+  correlate/    observations -> assets, then assets -> findings. The only
+                thing that writes an asset (ADR-006); merge and rule DECISIONS are
+                pure and live in domain/ and rules/
+  rules/        Core-side evidence-based rule engine (ADR-013, ADR-050). Closed
+                evaluators, open rule rows. No I/O.
   domain/       observation, asset, finding models — no I/O in here
   store/        postgres access, RLS-aware
   logging/      slog setup + credential redaction

@@ -426,3 +426,28 @@ enforced by `buf breaking` with the FILE category and a baseline established at 
 So a proto finding almost never gets fixed by removing or retyping a field. Acceptable fixes
 are: a normative comment stating what the receiver MUST do, a new field at a new number, or
 a wrapper type in Go. Recommend fixes in that form or they cannot be applied.
+
+**32. Verdicts parsed from a prose excerpt an attacker shapes.** `internal/rules` HTTP
+evaluators (`httpResponse` in evaluators.go) reconstruct status and headers from the
+fingerprint engine's *sanitised evidence excerpt* — one line, CR/LF collapsed to spaces —
+not a structured field. The scanned host controls that byte stream. Measured (session 15
+probe): a server MISSING `Strict-Transport-Security` that puts the token
+`strict-transport-security:` inside another header value (e.g. `Server:`) makes
+`http.missing_headers` see the header as present → true finding suppressed. `fmt.Sscanf(x,"%d")`
+also parses leniently — `"3o1"` → 3, `"200OK"` → 200 — so a crafted status line shifts the
+value across the 300/400 redirect band. Both directions (false negative and false positive)
+reproduce. Documented as a latent limitation in ADR-050 with confidence 0.75, so it is a
+known-and-accepted MEDIUM, not a surprise — but the class is: any evaluator that reads a
+sanitised banner/excerpt instead of a structured field inherits the scanned host as an input
+to its own verdict. The named fix is a structured `http` object on the service payload.
+**Why:** the scanned host is attacker-controlled by CVAP's own threat model; prose heuristics
+turn that control into control over the verdict.
+**How to apply:** for each evaluator, ask "does this read a structured field or re-parse a
+string the target chose?" If the latter, the target can force both a miss and a false finding.
+
+**33. `certEvidence` nil-leaf panic is latent, not live.** `evaluators.go:certEvidence`
+discards the `ok` from `leafOf` and dereferences the leaf pointer; called on a `ServiceObservation`
+whose `TLS != nil` but `chain == []` it panics (reproduced). Currently unreachable — every
+caller guards with `leaf, ok := leafOf(s); if !ok { continue }` before building the finding —
+but it is one new cert evaluator away from a fleet-wide panic on an attacker-presented empty
+chain. Note-level defensive fix: have `certEvidence` return early on `!ok`.
