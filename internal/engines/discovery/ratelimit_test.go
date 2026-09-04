@@ -63,7 +63,21 @@ func TestTheBucketStartsWithOneTokenNotAFullOne(t *testing.T) {
 		// Correct: it is waiting for a token.
 	}
 	cancel()
-	<-done
+
+	// Bounded, not a bare receive.
+	//
+	// A bare `<-done` hangs forever against a take() that ignores cancellation —
+	// which is exactly what one of this file's own mutations produces. That hung
+	// the whole package's test binary until the 10-minute default timeout, so
+	// `go test` printed no result lines at all and `make mutate` reported the
+	// mutant as "ran no tests" rather than as killed. CI found it; running the
+	// one test locally did not, because the hang was in a different test in the
+	// same binary.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("take did not return after cancellation")
+	}
 }
 
 // TestBackOffOnlyEverLowers.

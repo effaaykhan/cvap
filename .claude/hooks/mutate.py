@@ -150,7 +150,13 @@ def run_go_suite(test_args: str, overlay: pathlib.Path | None) -> tuple[bool, in
     So the count of tests that actually ran is returned alongside the exit
     status, and a baseline that ran nothing is reported rather than trusted.
     """
-    cmd = [os.environ.get("GO", "go"), "test", "-count=1", "-v"]
+    # -timeout, because a mutant that makes the code HANG is a normal outcome —
+    # removing a cancellation check does exactly that — and without a bound it
+    # burns the default ten minutes and then prints no result lines, which this
+    # driver reads as "ran no tests" rather than as killed. CI found that; a
+    # local run of the single affected test did not, because the hang was in a
+    # different test in the same binary.
+    cmd = [os.environ.get("GO", "go"), "test", "-count=1", "-v", "-timeout", "120s"]
     if overlay is not None:
         cmd.append("-overlay=" + str(overlay))
     cmd += shlex.split(test_args)
