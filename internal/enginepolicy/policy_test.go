@@ -98,14 +98,21 @@ var exceptions = map[string][]string{
 	// This is the entry the comment below anticipated. Note what it did NOT
 	// become: a widening of `permitted`, which would have granted `net` to every
 	// engine including ones not yet written.
-	"internal/engines/discovery": {"net"},
+	// `reflect` is TEST-only. See the fingerprint entry below for the argument:
+	// it asserts that every observation payload field reaches the JSON, which is
+	// the return-path counterpart to the translation that silently dropped a
+	// probe field.
+	"internal/engines/discovery": {"net", "reflect"},
 
 	// The engine PROCESS shell, and only the shell — same grant as the no-op
 	// engine's, for the same reason. This binary needs os.Stdin and os.Stdout;
 	// a package that may import `os` is a package that could import `os/exec`,
 	// so keeping the pipes here is what holds the logic package's exception to
 	// a single import.
-	"cmd/cvap-engine-discovery": {"os", "github.com/effaaykhan/cvap/internal/enginewire"},
+	// `reflect` is TEST-only, and it asserts that no field is dropped when an
+	// observation is translated onto the wire — the return path, where a dropped
+	// field discards evidence already paid for in packets.
+	"cmd/cvap-engine-discovery": {"os", "reflect", "github.com/effaaykhan/cvap/internal/enginewire"},
 
 	// ========================================================================
 	// The second engine that may send packets, and the first that may speak TLS
@@ -168,6 +175,15 @@ var exceptions = map[string][]string{
 		// arithmetic over a slice; it opens nothing and parses nothing on its
 		// own.
 		"encoding/binary",
+
+		// reflect is TEST-only, and listed rather than waved through because this
+		// guard checks test imports on purpose. It asserts that every field of
+		// every observation payload reaches the JSON — the return-path
+		// counterpart to the translation that silently dropped Probe.Kind, and
+		// worse in kind, because a field lost on the way back is evidence
+		// already paid for in packets. It reads types and constructs no
+		// behaviour: no reflect.Value.Call, no unsafe.
+		"reflect",
 	},
 
 	// The engine PROCESS shell, and only the shell.

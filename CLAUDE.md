@@ -18,6 +18,8 @@ internal/
   engines/      discovery, fingerprint, rules — separate processes (ADR-027)
                 enginerate/ is the shared packet budget: ONE model, because
                 make safety asserts wire-to-charged against one (ADR-048)
+  correlate/    observations -> assets. The only thing that writes an asset
+                (ADR-006); the merge DECISION is pure and lives in domain/
   domain/       observation, asset, finding models — no I/O in here
   store/        postgres access, RLS-aware
   logging/      slog setup + credential redaction

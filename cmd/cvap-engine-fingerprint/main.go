@@ -96,15 +96,8 @@ func run() error {
 
 	emit := func(o fingerprint.Observation) error {
 		return out.WriteFrom(enginewire.FromEngine{
-			Kind: enginewire.KindObservation,
-			Observation: &enginewire.Observation{
-				ObservationID: o.ObservationID,
-				TaskID:        o.TaskID,
-				Type:          o.Type,
-				Payload:       o.Payload,
-				Confidence:    o.Confidence,
-				ObservedAt:    o.ObservedAt,
-			},
+			Kind:        enginewire.KindObservation,
+			Observation: toObservation(o),
 		})
 	}
 
@@ -200,4 +193,21 @@ func toProbes(in []enginewire.Probe) []fingerprint.Probe {
 		})
 	}
 	return out
+}
+
+// toObservation translates the engine's observation onto the wire.
+//
+// Named and separate so translate_test.go can assert, by reflection, that no
+// field is dropped. That is the RETURN path, and it is the more expensive
+// direction to get wrong: a field lost on the way out costs coverage, while a
+// field lost on the way back discards evidence already paid for in packets.
+func toObservation(o fingerprint.Observation) *enginewire.Observation {
+	return &enginewire.Observation{
+		ObservationID: o.ObservationID,
+		TaskID:        o.TaskID,
+		Type:          o.Type,
+		Payload:       o.Payload,
+		Confidence:    o.Confidence,
+		ObservedAt:    o.ObservedAt,
+	}
 }

@@ -103,8 +103,13 @@ type servicePayload struct {
 // against the wrong feed — which produces confident findings that are wrong in
 // both directions, and poisons the knowledge plane rather than merely this scan.
 type osHint struct {
-	Hint   string
-	Source string
+	// The tags are ignored — MarshalJSON below is what actually runs — and they
+	// are here so the struct declares its own wire shape. Without them the field
+	// names and the emitted keys agree only by the reader checking both, which a
+	// marshalling test caught: it read the struct, expected "Hint", and found
+	// "hint".
+	Hint   string `json:"hint"`
+	Source string `json:"source"`
 }
 
 func (o osHint) MarshalJSON() ([]byte, error) {

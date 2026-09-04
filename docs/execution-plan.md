@@ -540,6 +540,18 @@ The third — the rate budget counting connect attempts while ADR-024's ceilings
 
 - **Four probes have never fired against a live server**: SMB, RDP, MSSQL and DNS. The lab has no target for any of them. Their payloads are the standard opening packet of each protocol, sent before authentication, and the static policy bounds them regardless of what their patterns do — but a rule nothing has exercised may silently match nothing, which is the failure this codebase keeps finding. **The unblocker is lab targets**, and it belongs with week 8's golden corpus.
 
+**Deferred from the asset-resolution session (ADR-049), each with what unblocks it:**
+
+- **A host with one moderate key does not merge across an address change.** ADR-007 needs one strong key or corroboration among weaker ones, and a lone SSH host key is uncorroborated. The common estate — Linux, SSH, no TLS — is exactly this case, and so is the lab's own SSH host.
+
+  **The unblocker is a second independent key on those hosts.** `hostname_domain_os` is the candidate ADR-007 already names, and it is unreachable today for a stated reason: a certificate SAN gives a hostname the TARGET chose, and the OS hint is explicitly non-authoritative (ADR-048 §9), so composing them would build a moderate key out of two things this codebase says not to trust. Real OS fingerprinting is Phase 3. Asserted by `TestOneModerateKeyAloneDoesNotMergeAcrossAnAddressChange` so that loosening the rule is a decision rather than a drift.
+
+- **`software_components` stays empty.** Nothing produces `package` observations: that needs credentialed assessment, which is out of MVP scope (§2). The table, the advisory-matching index and ADR-014's distro path all exist and are exercised by nothing. Named here rather than left as a table a reader assumes is populated.
+
+- **The unresolved queue has no operator surface.** `asset_resolution_queue` is written by correlation and read by `PendingCount`. Adjudicating an item — choosing a candidate, declaring a new asset, discarding the evidence — is week 7's UI. Until then a conflict parks the observations unresolved, which is the correct direction and is not the same as being handled.
+
+- **Correlation is per-observation-batch and does not re-run over history.** `domain.Resolve` is pure specifically so a corrected rule can be replayed against stored observations, and nothing calls it that way yet. **The unblocker is a decision about what replay does to existing assets** — re-deriving an inventory that findings already point at is not a background job, and it needs its own session.
+
 **Deferred from the discovery session (ADR-047), and the line between them is one thing:**
 
 - **SYN scanning, ARP discovery and ICMP echo.** §2 says "ARP, ICMP and TCP host discovery. TCP connect and SYN scanning"; what ships is TCP connect. Every deferred method needs a socket the Go standard library will not create — raw for SYN and ARP, an unprivileged `SOCK_DGRAM` ICMP socket for the third — and each would widen the engine import allowlist past the single `net` ADR-047 argues for. SYN and ARP additionally need `CAP_NET_RAW`, which changes how a scan point is **deployed**, not merely what it can do.

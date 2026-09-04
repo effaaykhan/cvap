@@ -141,9 +141,19 @@ type Candidate struct {
 	AssetID uuid.UUID
 	Keys    []IdentityKey
 
-	// AddressLastSeen is when this asset was last observed at the address under
-	// consideration, and it is what gives `ip_window` its window. Zero means
-	// this asset does not currently hold that address.
+	// HeldAddress is the address this candidate CURRENTLY holds, and
+	// AddressLastSeen is when it was last seen there. Both are empty when the
+	// candidate was found by an identity key rather than by address.
+	//
+	// The address is carried rather than assumed because the attach rule turns
+	// on it being the SAME address. An earlier version took only the timestamp
+	// and the caller's word that it referred to the address under consideration.
+	//
+	// Weak keys are deliberately NOT stored in asset_identity_keys, so this is
+	// how a weak agreement is expressed. Storing them would mean a second
+	// uniqueness constraint over the address and a second thing to close when a
+	// host moves, for evidence ADR-007 says never merges anyway.
+	HeldAddress     string
 	AddressLastSeen time.Time
 }
 
@@ -255,6 +265,17 @@ func Resolve(observed []IdentityKey, candidates []Candidate, now time.Time, wind
 		attachable []Candidate
 	)
 
+	// The address this evidence is about, which is what an attach compares
+	// against. Empty when the observation carried none, and then nothing
+	// attaches.
+	var observedAddress string
+	for _, k := range observed {
+		if k.Type == KeyIPWindow {
+			observedAddress = k.Value
+			break
+		}
+	}
+
 	for _, c := range candidates {
 		s := scored{c: c}
 		s.agreeing, s.conflicts = compare(observed, c.Keys)
@@ -276,17 +297,16 @@ func Resolve(observed []IdentityKey, candidates []Candidate, now time.Time, wind
 			qualified = append(qualified, s)
 			continue
 		}
-		// Weak-only agreement, and the address is still inside its window.
+		// Weak-only: the candidate holds THIS address and was seen at it inside
+		// the window.
 		//
-		// The AGREEMENT is what qualifies, not the timestamp. An earlier version
-		// asked only whether the candidate had been seen at some address
-		// recently and whether the observation carried an address at all — which
-		// attaches an observation of 10.10.0.77 to an asset that holds
-		// 10.10.0.11, on the strength of a field the caller filled in. A test
-		// fixture made exactly that mistake, which is the point: a struct field
-		// documented as "the address under consideration" is a convention, and
-		// requiring the key to agree makes it a check.
-		if hasAgreementOfType(s.agreeing, KeyIPWindow) && holdsAddressInWindow(c, now, window) {
+		// The address is COMPARED, not assumed. An earlier version asked only
+		// whether the candidate had been seen somewhere recently and whether the
+		// observation carried an address at all — which attaches an observation
+		// of 10.10.0.77 to an asset holding 10.10.0.11, on the strength of a
+		// field the caller filled in. A test fixture made exactly that mistake.
+		if observedAddress != "" && c.HeldAddress == observedAddress &&
+			holdsAddressInWindow(c, now, window) {
 			attachable = append(attachable, c)
 		}
 	}
@@ -432,20 +452,6 @@ func maxStrength(keys []IdentityKey) int {
 		}
 	}
 	return m
-}
-
-// hasAgreementOfType reports whether the AGREEING set contains a key of a type.
-func hasAgreementOfType(agreeing []IdentityKey, t IdentityKeyType) bool {
-	return hasKeyOfType(agreeing, t)
-}
-
-func hasKeyOfType(keys []IdentityKey, t IdentityKeyType) bool {
-	for _, k := range keys {
-		if k.Type == t {
-			return true
-		}
-	}
-	return false
 }
 
 // holdsAddressInWindow is what makes `ip_window` a window rather than a label.

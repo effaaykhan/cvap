@@ -49,14 +49,14 @@ import (
 // mutate:old     if o.Type.Strength() == 0 {
 // mutate:new     if false {
 //
-// mutate:case    an attach trusts the caller's timestamp instead of the agreement
-// mutate:old     if hasAgreementOfType(s.agreeing, KeyIPWindow) && holdsAddressInWindow(c, now, window) {
-// mutate:new     if hasKeyOfType(observed, KeyIPWindow) && holdsAddressInWindow(c, now, window) {
+// mutate:case    an attach does not compare the address it is attaching to
+// mutate:old     if observedAddress != "" && c.HeldAddress == observedAddress &&
+// mutate:new     if observedAddress != "" &&
 //
 // That was the original form. It attaches an observation of one address to an
-// asset holding another, on the strength of a struct field the caller filled in
-// — a test fixture made exactly that mistake, which is why the agreement is
-// checked rather than the convention trusted.
+// asset holding another, on the strength of a timestamp the caller filled in — a
+// test fixture made exactly that mistake, which is why the address is compared
+// rather than the convention trusted.
 
 func key(t IdentityKeyType, value, source string) IdentityKey {
 	return IdentityKey{Type: t, Value: value, Source: source}
@@ -150,7 +150,7 @@ func TestWeakEvidenceAttachesAndNeverMerges(t *testing.T) {
 	observed := []IdentityKey{key(KeyIPWindow, "10.10.0.11", "net")}
 	inWindow := Candidate{
 		AssetID: assetA, Keys: observed,
-		AddressLastSeen: at.Add(-time.Hour),
+		HeldAddress: "10.10.0.11", AddressLastSeen: at.Add(-time.Hour),
 	}
 
 	got := Resolve(observed, []Candidate{inWindow}, at, window)
@@ -231,7 +231,7 @@ func TestAnUnknownKeyTypeIsNotEvidence(t *testing.T) {
 	held := observed
 
 	got := Resolve(observed, []Candidate{{AssetID: assetA, Keys: held,
-		AddressLastSeen: at.Add(-time.Minute)}}, at, window)
+		HeldAddress: "10.10.0.11", AddressLastSeen: at.Add(-time.Minute)}}, at, window)
 	if got.Decision != DecisionAttach {
 		t.Fatalf("decision = %v (%s), want attach on the weak key alone — the unknown type "+
 			"must contribute nothing", got.Decision, got.Reason)
@@ -298,9 +298,11 @@ func TestTheDHCPCaseResolvesToOneAsset(t *testing.T) {
 	// And with only the address — no TLS, no SSH — the same host at a new
 	// address is a new asset. That is the designed degradation, and it is what
 	// makes the two moderate keys worth having.
+	// The candidate still holds the OLD address, so nothing attaches: the
+	// comparison is against the address the asset actually has.
 	bare := []IdentityKey{key(KeyIPWindow, "10.10.0.77", "net")}
 	got = Resolve(bare, []Candidate{{AssetID: assetA, Keys: held,
-		AddressLastSeen: at.Add(-time.Minute)}}, at, window)
+		HeldAddress: "10.10.0.11", AddressLastSeen: at.Add(-time.Minute)}}, at, window)
 	if got.Decision != DecisionNewAsset {
 		t.Errorf("decision = %v (%s), want a new asset: nothing links the old address to "+
 			"the new one", got.Decision, got.Reason)

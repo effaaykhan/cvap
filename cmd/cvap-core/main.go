@@ -45,6 +45,7 @@ import (
 	"github.com/effaaykhan/cvap/internal/control/api"
 	"github.com/effaaykhan/cvap/internal/control/ca"
 	"github.com/effaaykhan/cvap/internal/control/enrollment"
+	"github.com/effaaykhan/cvap/internal/correlate"
 	"github.com/effaaykhan/cvap/internal/dispatch"
 	"github.com/effaaykhan/cvap/internal/logging"
 	"github.com/effaaykhan/cvap/internal/store"
@@ -223,6 +224,17 @@ func run(log *slog.Logger) error {
 	// Registering Dispatch without starting this puts that back.
 	sweeper := dispatch.NewSweeper(db, log)
 	go sweeper.Run(ctx)
+
+	// Correlation is the same shape of omission waiting to happen.
+	//
+	// ADR-006 makes Core the only thing that turns observations into assets, and
+	// without this the observation table fills, `asset_id` stays NULL on every
+	// row, and the inventory is permanently empty while every gate passes. It is
+	// periodic for the reason the sweeper is: the trigger is the ABSENCE of an
+	// event — an observation is promoted to `accepted` by a terminal ack that
+	// arrives minutes after ingest, and nothing then announces it is ready.
+	correlator := correlate.New(db, log)
+	go correlator.Run(ctx)
 
 	// The operator API. Everything ADR-024 control 4 and ADR-021 require existed
 	// in the store and was unreachable from production until this listener.
