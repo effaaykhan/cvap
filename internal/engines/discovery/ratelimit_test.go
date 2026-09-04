@@ -9,11 +9,22 @@ import (
 // Mutations, declared beside the tests that must kill them.
 //
 // mutate:subject internal/engines/discovery/ratelimit.go
-// mutate:test    ./internal/engines/discovery/ -run TestTheBucket|TestBackOff|TestTakeHonours
+// mutate:test    ./internal/engines/discovery/ -run TestTheBucket|TestBackOff|TestTakeHonours|TestAnIdlePeriod
+//
+// The -run regex is part of the declaration and gets stale the same way an
+// anchor does: two mutations survived because TestAnIdlePeriod — written in the
+// same commit to kill one of them — was not in this list. `make mutate` caught
+// it, which is the argument for running the gate before pushing rather than
+// after.
 //
 // mutate:case    the bucket starts full, bursting at the rate ceiling
 // mutate:old     tokens:   1,
-// mutate:new     tokens:   burstFor(ratePPS),
+// mutate:new     tokens:   ratePPS,
+//
+// `tokens: burstFor(ratePPS)` was the first form of this mutation and it
+// SURVIVED — at the 10 pps the test uses, burstFor is 1, so the mutant was
+// byte-for-byte the original behaviour. A mutation that changes nothing is a
+// mutation that proves nothing. `ratePPS` is the original defect.
 //
 // mutate:case    an idle period re-banks a full second of burst
 // mutate:old     burst := ratePPS / 10

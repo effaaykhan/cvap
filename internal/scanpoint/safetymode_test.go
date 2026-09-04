@@ -19,11 +19,19 @@ import (
 // to honour.
 //
 // mutate:subject internal/scanpoint/job.go
-// mutate:test    ./internal/scanpoint/ -run TestSafeMode|TestIntrusiveMode|TestAJobWhoseMode|TestTheCorpus|TestEveryProbe
+// mutate:test    ./internal/scanpoint/ -run TestSafeMode|TestIntrusiveMode|TestAJobWhoseMode|TestTheCorpus|TestEveryProbe|TestAFragileTarget|TestNoProbeReaches|TestThePerScanPoint|TestTheAllocator
 //
 // mutate:case    an unrecognised safety mode supplies probes
-// mutate:old     if c.GetSafetyMode() == SafetyIntrusive {
-// mutate:new     if c.GetSafetyMode() != "safe" {
+// mutate:old     if c.GetSafetyMode() == SafetyIntrusive && !anyFragile {
+// mutate:new     if c.GetSafetyMode() != "safe" && !anyFragile {
+//
+// mutate:case    a fragile target is handed probes anyway
+// mutate:old     if c.GetSafetyMode() == SafetyIntrusive && !anyFragile {
+// mutate:new     if c.GetSafetyMode() == SafetyIntrusive && (!anyFragile || true) {
+//
+// The obvious form — dropping `&& !anyFragile` — leaves anyFragile declared and
+// unused, so the mutant does not compile and tests nothing. The driver reports
+// that rather than counting it as killed, which is the check that caught it.
 //
 // mutate:subject internal/scanpoint/enginehost.go
 //
