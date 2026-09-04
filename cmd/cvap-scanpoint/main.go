@@ -97,17 +97,17 @@ func run(log *slog.Logger) error {
 	})
 	go submitter.Run(ctx)
 
-	caps, err := scanpoint.EngineCapabilities(ctx, cfg.EngineBinary)
+	engines, err := scanpoint.NewEngineSet(ctx, cfg.EngineBinaries)
 	if err != nil {
 		return err
 	}
-	for _, c := range caps {
+	for _, c := range engines.Capabilities() {
 		log.Info("engine capability declared",
 			slog.String("engine", c.GetEngine()),
 			slog.String("engine_version", c.GetEngineVersion()))
 	}
 
-	rt := scanpoint.NewRuntime(cfg, log, id, caps, submitter)
+	rt := scanpoint.NewRuntime(cfg, log, id, engines, submitter)
 	go rotateLoop(ctx, log, cfg, id)
 
 	client := scanpointv1.NewDispatchClient(dispatchConn)

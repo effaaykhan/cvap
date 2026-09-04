@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -40,8 +41,19 @@ type Config struct {
 	// the full list of what touches disk and why.
 	DataDir string
 
-	// EngineBinary is the engine process the runtime hosts (ADR-027).
-	EngineBinary string
+	// EngineBinaries are the engine processes this runtime may host (ADR-027).
+	//
+	// A LIST of paths, not a map from engine kind to path, and the difference is
+	// which side is the authority. Each binary already reports what it is
+	// through `-capabilities`, and Core is told the same answer at enrolment —
+	// so an operator-supplied mapping would be a second statement of the same
+	// fact, free to disagree with the first. A runtime that believed the
+	// operator's label over the binary's own would dispatch discovery work to
+	// whatever was configured under that name.
+	//
+	// The runtime asks each binary and refuses to start if two claim the same
+	// engine kind, because "which one did that scan run on" must have an answer.
+	EngineBinaries []string
 
 	Hostname        string
 	AgentVersion    string
@@ -62,7 +74,7 @@ func ConfigFromEnv(agentVersion, protocolVersion string) (Config, error) {
 		CABundlePath:    os.Getenv("CVAP_SP_CA_BUNDLE"),
 		TokenPath:       os.Getenv("CVAP_SP_ENROLLMENT_TOKEN_FILE"),
 		DataDir:         os.Getenv("CVAP_SP_DATA_DIR"),
-		EngineBinary:    os.Getenv("CVAP_SP_ENGINE_BINARY"),
+		EngineBinaries:  splitBinaries(os.Getenv("CVAP_SP_ENGINE_BINARIES")),
 		Hostname:        os.Getenv("CVAP_SP_HOSTNAME"),
 		AgentVersion:    agentVersion,
 		ProtocolVersion: protocolVersion,
@@ -85,7 +97,7 @@ func (c Config) validate() error {
 		{"CVAP_SP_ENROLL_ENDPOINT", c.EnrollEndpoint},
 		{"CVAP_SP_CA_BUNDLE", c.CABundlePath},
 		{"CVAP_SP_DATA_DIR", c.DataDir},
-		{"CVAP_SP_ENGINE_BINARY", c.EngineBinary},
+		{"CVAP_SP_ENGINE_BINARIES", strings.Join(c.EngineBinaries, ",")},
 	} {
 		if f.value == "" {
 			missing = append(missing, f.name)
@@ -170,3 +182,17 @@ const (
 	CertLifetime   = 90 * 24 * time.Hour
 	RotateCheckInt = 1 * time.Hour
 )
+
+// splitBinaries parses the comma-separated engine list.
+//
+// Empty entries are dropped rather than becoming an empty path that fails later
+// as "no such file"; a trailing comma is a typo, not a request to host nothing.
+func splitBinaries(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}

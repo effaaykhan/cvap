@@ -279,7 +279,7 @@ func (h *harness) startScanPoint() {
 		"CVAP_SP_CA_BUNDLE="+h.caCert,
 		"CVAP_SP_ENROLLMENT_TOKEN_FILE="+h.token(),
 		"CVAP_SP_DATA_DIR="+h.spData,
-		"CVAP_SP_ENGINE_BINARY="+filepath.Join(h.dir, h.engine),
+		"CVAP_SP_ENGINE_BINARIES="+filepath.Join(h.dir, h.engine),
 		"CVAP_SP_HOSTNAME=e2e-scanpoint",
 		"LOG_LEVEL=debug",
 	)

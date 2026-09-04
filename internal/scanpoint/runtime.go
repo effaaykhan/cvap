@@ -52,11 +52,19 @@ type Runtime struct {
 
 	submit *Submitter
 
-	// engineCaps is what the engine binary reported at startup, declared on
+	// engineCaps is what the hosted engines reported at startup, declared on
 	// Hello. Self-asserted and a CEILING, never a grant: Core intersects it
 	// with what this scan point is independently authorised to run, so
 	// declaring a capability cannot obtain work (common.proto).
 	engineCaps []*scanpointv1.Capability
+
+	// engines resolves a job's declared engine kind to the binary that runs it.
+	//
+	// The runtime used to host one binary and ignore JobAssignment.engine, which
+	// was harmless while the only engine could not open a socket. With a second
+	// engine that can, a job dispatched to whatever was configured is a scan
+	// running on an engine Core did not choose.
+	engines *EngineSet
 
 	now func() time.Time
 
@@ -68,13 +76,14 @@ type Runtime struct {
 	out chan *scanpointv1.ScanPointMessage
 }
 
-func NewRuntime(cfg Config, log *slog.Logger, id *Identity, caps []*scanpointv1.Capability, submit *Submitter) *Runtime {
+func NewRuntime(cfg Config, log *slog.Logger, id *Identity, engines *EngineSet, submit *Submitter) *Runtime {
 	return &Runtime{
 		cfg:        cfg,
 		log:        log,
 		identity:   id,
 		submit:     submit,
-		engineCaps: caps,
+		engineCaps: engines.Capabilities(),
+		engines:    engines,
 		now:        time.Now,
 		jobs:       make(map[string]*job),
 		out:        make(chan *scanpointv1.ScanPointMessage, 64),
@@ -402,6 +411,21 @@ func (r *Runtime) onAssignment(ctx context.Context, a *scanpointv1.JobAssignment
 	// Everything the terminal path touches is built HERE, before the job is
 	// visible and before any goroutine runs. A cancel or a kill arriving on the
 	// next message now finds a real host to stop and a real context to cancel.
+	// Which engine runs this, decided by what Core dispatched and what this
+	// runtime actually hosts. A miss refuses the job rather than falling back:
+	// the capability handshake and the dispatch decision have disagreed, and
+	// running the work on a different engine would turn that into a scan nobody
+	// chose.
+	binary, err := r.engines.BinaryFor(a.GetEngine())
+	if err != nil {
+		r.log.Error("refusing an assignment: no engine for it",
+			slog.String("job_id", id), slog.String("engine", a.GetEngine()),
+			slog.Any("hosted", r.engines.Kinds()), slog.Any("error", err))
+		r.sendTerminal(id, a.GetLeaseEpoch(), scanpointv1.TerminationReason_ENGINE_FAILURE,
+			"", true, true, err.Error())
+		return
+	}
+
 	jobCtx, cancel := context.WithCancel(ctx)
 	c := a.GetConstraints()
 	j := &job{
@@ -411,7 +435,7 @@ func (r *Runtime) onAssignment(ctx context.Context, a *scanpointv1.JobAssignment
 		constraints:  c,
 		tasks:        a.GetTasks(),
 		cancel:       cancel,
-		host: newEngineHost(r.log, r.cfg.EngineBinary, id,
+		host: newEngineHost(r.log, binary, id,
 			c.GetAllowedTargets(), c.GetExclusions()),
 		done: make(chan struct{}),
 	}

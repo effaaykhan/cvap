@@ -33,10 +33,11 @@ func Enroll(ctx context.Context, log *slog.Logger, cfg Config, client scanpointv
 	// anyway.
 	defer token.Zeroise()
 
-	caps, err := EngineCapabilities(ctx, cfg.EngineBinary)
+	engines, err := NewEngineSet(ctx, cfg.EngineBinaries)
 	if err != nil {
 		return nil, err
 	}
+	caps := engines.Capabilities()
 
 	key, csr, err := NewKey()
 	if err != nil {
@@ -85,10 +86,11 @@ func Enroll(ctx context.Context, log *slog.Logger, cfg Config, client scanpointv
 // effect is a later expiry date leaves a key that has been on a scan point in a
 // hostile network for its whole life.
 func Rotate(ctx context.Context, log *slog.Logger, cfg Config, id *Identity, client scanpointv1.EnrollmentClient) (*Identity, error) {
-	caps, err := EngineCapabilities(ctx, cfg.EngineBinary)
+	engines, err := NewEngineSet(ctx, cfg.EngineBinaries)
 	if err != nil {
 		return nil, err
 	}
+	caps := engines.Capabilities()
 	key, csr, err := NewKey()
 	if err != nil {
 		return nil, err
