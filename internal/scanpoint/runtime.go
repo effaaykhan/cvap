@@ -66,6 +66,20 @@ type Runtime struct {
 	// running on an engine Core did not choose.
 	engines *EngineSet
 
+	// corpus is the fingerprint content in force, resolved ONCE at startup.
+	//
+	// Once rather than per job, because a pack that changed mid-scan would make
+	// two halves of one scan mean different things — and "which corpus produced
+	// this observation" is a question the finding pipeline has to be able to
+	// answer from one recorded pack id.
+	corpus *Corpus
+
+	// packStatus is what to tell Core about that corpus, sent after every
+	// Hello. ADR-019: a scan point that refuses a pack reports it upstream,
+	// because a silent fail-closed inside a network we cannot observe is the
+	// failure the ADR was written against.
+	packStatus *scanpointv1.RulePackStatus
+
 	now func() time.Time
 
 	mu   sync.Mutex
@@ -77,7 +91,10 @@ type Runtime struct {
 }
 
 func NewRuntime(cfg Config, log *slog.Logger, id *Identity, engines *EngineSet, submit *Submitter) *Runtime {
+	corpus, packStatus := LoadCorpus(cfg, log)
 	return &Runtime{
+		corpus:     corpus,
+		packStatus: packStatus,
 		cfg:        cfg,
 		log:        log,
 		identity:   id,
@@ -143,6 +160,19 @@ func (r *Runtime) session(ctx context.Context, connect func(context.Context) (sc
 			AgentVersion:    r.cfg.AgentVersion,
 			Capabilities:    r.engineCaps,
 		}},
+	}); err != nil {
+		return err
+	}
+
+	// Immediately after Hello, and on EVERY connect rather than only the first.
+	//
+	// Hello has no field for a loaded pack — proto/ is frozen and additive-only
+	// (ADR-022), and RulePackStatus already exists for exactly this. Repeating
+	// it per connect is what makes it reliable: a Core that restarted has no
+	// memory of the last one, and offline import means it cannot infer what is
+	// live from what it has sent.
+	if err := stream.Send(&scanpointv1.ScanPointMessage{
+		Msg: &scanpointv1.ScanPointMessage_RulePackStatus{RulePackStatus: r.packStatus},
 	}); err != nil {
 		return err
 	}
@@ -435,6 +465,7 @@ func (r *Runtime) onAssignment(ctx context.Context, a *scanpointv1.JobAssignment
 		constraints:  c,
 		tasks:        a.GetTasks(),
 		cancel:       cancel,
+		corpus:       r.corpus,
 		host: newEngineHost(r.log, binary, id,
 			c.GetAllowedTargets(), c.GetExclusions()),
 		done: make(chan struct{}),

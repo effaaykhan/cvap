@@ -109,6 +109,35 @@ field — ADR-038, superseding ADR-035's `func() string`, because a Go string ca
 at all. `creds_test.go` repeats the verb enumeration in every position including an unexported
 field, which is the one place no method of ours can run.
 
+## The fingerprint corpus: signed content, static policy
+
+The runtime holds the probe corpus and the banner rules, and hands an engine what a job is
+entitled to. A signed pack (ADR-019, ADR-048) may EXTEND that corpus and may not widen the
+policy, because **a signature proves origin, not that a payload is inert** — nothing about
+signing a pack stops it carrying a probe to port 9100, where a bare line is a print job.
+
+`corpus.go` holds the closed list: **no probe to a non-inert port, no payload over
+`MaxProbePayload`, no probes in safe mode, none for a fragile target.** The last two live in
+`job.budget` because they are decisions about a job rather than a pack. **Nothing reaches these
+from configuration** — a policy a deployment can widen is not a policy, and the request always
+arrives as a reasonable special case. Adding to the list is an amendment to ADR-048.
+
+Violations are **dropped and reported**, never silently trimmed: the same rule `Jobs.Tasks` takes
+against truncation, because a quietly reduced corpus is under-identification that looks like a
+clean run. `TestTheBuiltinCorpusObeysItsOwnPolicy` runs the built-ins through the same filter,
+and it has already caught one of these rules being wrong.
+
+**Banner rules travel in every mode; probes do not.** Reading is not sending — the bytes have
+already arrived by the time a rule looks at them — so withholding banner rules under a safe job
+would cost identification and buy nothing. That asymmetry in `job.budget` IS the safe/intrusive
+distinction, and `make safety` measures it at the wire: one of its three phases runs a safe job
+and requires zero payload bytes.
+
+A pack that will not verify is **refused and reported, not fatal**. Refusing to start converts a
+content problem into an outage, and a scan point that is offline identifies nothing at all.
+`RulePackStatus` goes to Core after every Hello — on every connect, because a Core that restarted
+has no memory of the last one and offline import means it cannot infer what is live.
+
 **The buffer is bounded and refuses work at the bound.** ADR-026's encrypted local durability is
 **not implemented** — deferred in `docs/execution-plan.md` §6.5 with what unblocks it, because
 the only key custody available on a scan point today is a key file beside its ciphertext. A

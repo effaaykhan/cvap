@@ -494,7 +494,37 @@ The third — the rate budget counting connect attempts while ADR-024's ceilings
 
 - **Safe mode holds every open port's connection for a full second.** `readBanner` waits up to a second for a banner that HTTP never volunteers, with no reduction for `fragile`.
 
-  Deferred to fingerprinting. It is a performance cost rather than a correctness one — nothing is sent and nothing is misreported, the scan is merely slower than it needs to be — and the fix is service-aware read timeouts, which is precisely the knowledge the fingerprinting session builds. Doing it now would mean inventing a port-to-behaviour table that session then replaces.
+  **Closed by ADR-048.** `bannerWait` is service-aware: a port whose protocol has the client speak first — HTTP, TLS, SMB, RDP, the databases — gets 250ms instead of a second, and `clientSpeaksFirst` is that port-to-behaviour table, built where the knowledge belongs. The trade is stated rather than hidden: a service volunteering a banner late, on a port where nothing normally volunteers, is missed; the probe chain covers that under an intrusive job and safe mode genuinely loses it. It remains in the discovery engine, whose `readBanner` still waits the full second — discovery's job is to find open ports, and it has no service knowledge to shorten the wait with.
+
+**Deferred from the fingerprinting session (ADR-048), each with what unblocks it:**
+
+- **`RulePacks.FetchRulePack` and the `RulePackUpdate` notification.** The pack format, signature verification and offline import of a local signed file all ship; the fetch half does not.
+
+  **The unblocker is signing-key custody and rotation.** Every fetch path needs a scan point to decide which key to verify against — `RulePackChunk.signing_key_id` exists for exactly that — and there is nowhere to put a key set or a rotation policy today. Fetch without it means one hard-coded key forever, or a scan point that cannot survive a rotation. This is the same key-custody problem the encrypted result buffer and the OIDC client secret are both deferred on, and it should be solved once for all three. Offline import needs none of it, and ADR-019 calls that path required rather than optional.
+
+- **Persisting `RulePackStatus`.** Core logs it, at warn for anything that is not `LOADED`. That meets ADR-019's "the refusal is not silent" and no more: it cannot be queried, alerted on, or shown beside the scan whose coverage it explains. Needs a table and a migration, which the fetch half needs too, so the two land together.
+
+- **SNMP.** Named in the week 5 brief and absent from the corpus. SNMP is UDP-only in practice, discovery finds TCP ports only, and service identification runs against ports discovery found — so there is no UDP port to identify until there is UDP discovery. **The unblocker is UDP support in the discovery engine**, which is the same allowlist-widening argument as SYN and ARP below, minus `CAP_NET_RAW`. DNS ships over TCP/53.
+
+- **The obsolete-TLS-version finding.** The `tls` payload records the version that was NEGOTIATED, which is the best both ends support and not the worst the server accepts: a server offering TLS 1.0 and 1.3 reports 1.3. Detecting the floor needs one handshake per version, which is a packet cost per port. Week 6 should decide whether that is worth the budget before it writes a rule that reads this field as though it were the floor.
+
+- **Core does not tell the fingerprint engine which ports are open.** `ToEngine.Ports` exists and the runtime fills it; nothing plans a fingerprint job from discovery's observations, so the engine falls back to its own port list and re-establishes what discovery already knew. **The unblocker is week 5's second half** — observation to asset to plan. The cost until then is a duplicated connect per port, which is visible in the packet budget rather than hidden.
+
+- **Per-target rate is not aggregated across concurrent jobs.** `internal/scanpoint/allocator.go`
+  divides ADR-024's 1,000 pps per-SCAN-POINT ceiling between jobs. Nothing divides the 50/10 pps
+  per-TARGET ceiling, so two jobs covering one host each get the full allowance. Measured: two
+  concurrent engine processes, one fragile target, each budgeted 10 pps — `mean 8.75 pps, max in
+  any 1.0s window = 18`. Linear in job count.
+
+  This was theoretical while discovery was the only engine and is concrete now, because ADR-048's
+  fallback means a fingerprint job re-connects to ports a discovery job already found — the two
+  cover the same host by design. **The unblocker is a decision about where it belongs**: Core can
+  decline to dispatch two concurrent jobs covering one target, or the runtime can hold a
+  per-target bucket shared across engine processes. The second is cross-process shared rate state,
+  which ADR-027 rejects between processes for good reasons, so the first is probably right — and
+  it is a planning change, not a runtime one. Deferred rather than guessed at.
+
+- **Four probes have never fired against a live server**: SMB, RDP, MSSQL and DNS. The lab has no target for any of them. Their payloads are the standard opening packet of each protocol, sent before authentication, and the static policy bounds them regardless of what their patterns do — but a rule nothing has exercised may silently match nothing, which is the failure this codebase keeps finding. **The unblocker is lab targets**, and it belongs with week 8's golden corpus.
 
 **Deferred from the discovery session (ADR-047), and the line between them is one thing:**
 

@@ -71,6 +71,12 @@ services:
   # here is HTTP, which says nothing until asked — so without this, safe mode
   # would produce no banner at all and the safe/intrusive distinction would be
   # untestable against the lab.
+  #
+  # LISTEN_PORT is not decoration. This image defaults to 2222, and 2222 is in
+  # no port list anything scans — not DefaultPorts, not the safety gate's. So
+  # the one host here that volunteers a banner sat behind a closed 22 for three
+  # sessions, and "the safe/intrusive distinction is testable against the lab"
+  # was a comment rather than a fact. Found by connecting, not by reading.
   target-a4:
     image: linuxserver/openssh-server:latest
     restart: unless-stopped
@@ -79,9 +85,39 @@ services:
       - PGID=1000
       - PASSWORD_ACCESS=false
       - USER_NAME=lab
+      - LISTEN_PORT=22
     networks:
       segment-a:
         ipv4_address: 10.10.0.14
+
+  # TLS, with a certificate worth inspecting.
+  #
+  # Self-signed, expiring inside the scan window, and carrying subject
+  # alternative names — the three things week 6's non-CVE rules will ask a
+  # certificate about. Nothing else in the lab speaks TLS at all, so without
+  # this the whole certificate path would be exercised only by unit tests
+  # against fixtures we wrote ourselves, which cannot catch a handshake we get
+  # wrong on the wire.
+  target-a5:
+    build: ./targets/tls
+    restart: unless-stopped
+    networks:
+      segment-a:
+        ipv4_address: 10.10.0.15
+
+  # nginx with `server_tokens off`, which is the common configuration and the
+  # one that defeats banner matching outright.
+  #
+  # It is here because "identify software that refuses to name itself" is not
+  # testable against a target that names itself. The response SHAPE still
+  # identifies it — header order, the exact 400 body, what it does with a bad
+  # request — and a matcher for that has to be tried against the real server.
+  target-a6:
+    build: ./targets/quiet
+    restart: unless-stopped
+    networks:
+      segment-a:
+        ipv4_address: 10.10.0.16
 
   # The fragile one. See targets/slow/nginx.conf: it refuses above roughly ten
   # requests a minute rather than queueing, which is how ADR-024's 10 pps cap
@@ -94,6 +130,24 @@ services:
     networks:
       segment-a:
         ipv4_address: 10.10.0.20
+
+  # The non-inert ports, with something listening on them.
+  #
+  # 9100 is raw print, where any bytes are a print job; 631 is IPP. Both are on
+  # the static probe denylist in internal/scanpoint/corpus.go, which a signed
+  # pack cannot widen.
+  #
+  # This host is what turns that policy from a unit test into a wire assertion.
+  # `make safety` sends the fingerprint engine at 9100 in intrusive mode with the
+  # real corpus and requires that not one payload byte arrives — and without a
+  # listener that assertion passes trivially, because a refused connection cannot
+  # carry a payload whether the denylist works or not.
+  target-a-printer:
+    build: ./targets/printer
+    restart: unless-stopped
+    networks:
+      segment-a:
+        ipv4_address: 10.10.0.40
 
   # The filtered host. See targets/filtered/Dockerfile: reachable at layer 2 and
   # silently dropping SYNs, which is the only way the SYN-retransmit path gets

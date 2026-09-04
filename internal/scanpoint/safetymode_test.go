@@ -42,8 +42,15 @@ import (
 // mutate:subject internal/scanpoint/probes.go
 //
 // mutate:case    a probe reads without a bound
-// mutate:old     ReadBytes: 8 << 10,
+// mutate:old     ReadBytes: 1 << 10,
 // mutate:new     ReadBytes: 0,
+//
+// Anchored on the RDP probe's bound, which is the only 1 KiB one. `ReadBytes:
+// 8 << 10` was the original anchor and stopped being unique the moment the
+// corpus gained a second HTTP probe; appending a second ReadBytes to another
+// probe's payload line was the next attempt and duplicates a struct field, so
+// the mutant did not compile. `make mutate` reported both rather than picking
+// one, which is the whole reason it reports them.
 //
 // Safe mode is enforced by what the engine is HANDED, not by what it is told.
 //
@@ -274,5 +281,50 @@ func TestTheAllocatorNeverHandsOutZero(t *testing.T) {
 	}
 	if a.held() != 20 {
 		t.Errorf("held() = %d, want 20", a.held())
+	}
+}
+
+// TestBannerMatchesTravelInSafeModeAndProbesDoNot.
+//
+// ============================================================================
+// The asymmetry between these two lines IS the safe/intrusive distinction.
+// ============================================================================
+//
+// Reading is not sending. A safe job identifies every service that announces
+// itself — SSH, SMTP, FTP, POP3, IMAP, Telnet, MySQL — because the bytes have
+// already arrived by the time a rule looks at them. Withholding the rules would
+// cost that identification and buy no safety whatsoever.
+//
+// The probes are the withheld half, and they are withheld by being EMPTY rather
+// than by a flag the engine is trusted to honour.
+func TestBannerMatchesTravelInSafeModeAndProbesDoNot(t *testing.T) {
+	safe := &job{
+		constraints: &scanpointv1.ScanConstraints{SafetyMode: "safe"},
+		tasks:       []*scanpointv1.Task{{TaskId: "t1", Target: "10.10.0.11"}},
+	}
+	b := safe.budget()
+	if len(b.Probes) != 0 {
+		t.Errorf("%d probes travelled under a safe job", len(b.Probes))
+	}
+	if len(b.BannerMatches) == 0 {
+		t.Fatal("no banner rules under a safe job: safe mode would identify nothing at all, " +
+			"which is not what ADR-021 asks for")
+	}
+	if b.MaxProbesPerPort == 0 {
+		t.Error("no probe-chain cap; zero would be read by the engine as its own default")
+	}
+
+	// And a fragile target keeps the rules while losing the probes, because
+	// ADR-024 control 3 suppresses aggressive checks and reading is not one.
+	fragile := &job{
+		constraints: &scanpointv1.ScanConstraints{SafetyMode: SafetyIntrusive},
+		tasks:       []*scanpointv1.Task{{TaskId: "t1", Target: "10.10.0.20", Fragile: true}},
+	}
+	fb := fragile.budget()
+	if len(fb.Probes) != 0 {
+		t.Errorf("%d probes travelled for a fragile target", len(fb.Probes))
+	}
+	if len(fb.BannerMatches) == 0 {
+		t.Error("a fragile target lost the banner rules, which cost identification and buy nothing")
 	}
 }

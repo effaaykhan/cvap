@@ -328,6 +328,8 @@ func (h *engineHost) start(ctx context.Context, targets []enginewire.Target, bud
 		MaxConcurrentPerTarget: budget.MaxConcurrentPerTarget,
 		SafetyMode:             budget.SafetyMode,
 		Probes:                 budget.Probes,
+		BannerMatches:          budget.BannerMatches,
+		MaxProbesPerPort:       budget.MaxProbesPerPort,
 	})
 }
 
@@ -353,6 +355,18 @@ type engineBudget struct {
 	// budget it was never given. start() refuses a job whose two fields
 	// disagree rather than trimming one to match the other.
 	Probes []enginewire.Probe
+
+	// BannerMatches identify a service from what it VOLUNTEERED, and travel in
+	// every mode. Reading is not sending: the bytes have already arrived by the
+	// time a rule looks at them, so withholding these would cost identification
+	// and buy nothing. The asymmetry with Probes above IS the safe/intrusive
+	// distinction.
+	BannerMatches []enginewire.Match
+
+	// MaxProbesPerPort caps the fallback chain, held here rather than left to
+	// the engine for the reason the rate slice is: a bound the engine chooses is
+	// a bound the engine can get wrong.
+	MaxProbesPerPort uint32
 }
 
 // SafetyIntrusive is the one mode in which probes travel.

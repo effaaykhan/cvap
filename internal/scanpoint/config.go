@@ -55,6 +55,16 @@ type Config struct {
 	// engine kind, because "which one did that scan run on" must have an answer.
 	EngineBinaries []string
 
+	// FingerprintPackPath is the signed corpus (ADR-019, ADR-048). Optional:
+	// absent means service identification degrades to banner matching from the
+	// built-in minimum, which is reported upstream rather than assumed.
+	FingerprintPackPath string
+
+	// FingerprintKeyPath is the ed25519 public key the pack must verify
+	// against. Required WHEN a pack path is set — a pack with no key to check it
+	// is an unsigned pack, and ADR-019 says a scan point refuses one.
+	FingerprintKeyPath string
+
 	Hostname        string
 	AgentVersion    string
 	ProtocolVersion string
@@ -70,14 +80,16 @@ type Config struct {
 // ConfigFromEnv reads configuration and validates it.
 func ConfigFromEnv(agentVersion, protocolVersion string) (Config, error) {
 	c := Config{
-		EnrollEndpoint:  os.Getenv("CVAP_SP_ENROLL_ENDPOINT"),
-		CABundlePath:    os.Getenv("CVAP_SP_CA_BUNDLE"),
-		TokenPath:       os.Getenv("CVAP_SP_ENROLLMENT_TOKEN_FILE"),
-		DataDir:         os.Getenv("CVAP_SP_DATA_DIR"),
-		EngineBinaries:  splitBinaries(os.Getenv("CVAP_SP_ENGINE_BINARIES")),
-		Hostname:        os.Getenv("CVAP_SP_HOSTNAME"),
-		AgentVersion:    agentVersion,
-		ProtocolVersion: protocolVersion,
+		EnrollEndpoint:      os.Getenv("CVAP_SP_ENROLL_ENDPOINT"),
+		CABundlePath:        os.Getenv("CVAP_SP_CA_BUNDLE"),
+		TokenPath:           os.Getenv("CVAP_SP_ENROLLMENT_TOKEN_FILE"),
+		DataDir:             os.Getenv("CVAP_SP_DATA_DIR"),
+		EngineBinaries:      splitBinaries(os.Getenv("CVAP_SP_ENGINE_BINARIES")),
+		FingerprintPackPath: os.Getenv("CVAP_SP_FINGERPRINT_PACK"),
+		FingerprintKeyPath:  os.Getenv("CVAP_SP_FINGERPRINT_KEY"),
+		Hostname:            os.Getenv("CVAP_SP_HOSTNAME"),
+		AgentVersion:        agentVersion,
+		ProtocolVersion:     protocolVersion,
 	}
 	if c.Hostname == "" {
 		h, err := os.Hostname()
@@ -103,6 +115,12 @@ func (c Config) validate() error {
 			missing = append(missing, f.name)
 		}
 	}
+	// A pack with no key is an UNSIGNED pack. ADR-019 says a scan point refuses
+	// one, so this refuses at startup rather than loading it and hoping.
+	if c.FingerprintPackPath != "" && c.FingerprintKeyPath == "" {
+		missing = append(missing, "CVAP_SP_FINGERPRINT_KEY (required when CVAP_SP_FINGERPRINT_PACK is set)")
+	}
+
 	if len(missing) > 0 {
 		// Named, at startup, rather than an empty string failing later in
 		// whatever first reads it — the failure mode check_env_example.py was
@@ -140,6 +158,34 @@ const (
 	PlatformFragileRatePPS         = 10
 	PlatformMaxConcurrentPerTarget = 20
 	PlatformConnectTimeoutMS       = 3000
+
+	// PlatformMaxProbesPerPort bounds the fallback chain at ONE port.
+	//
+	// Not in ADR-024, because ADR-024 bounds a rate and this bounds a total. The
+	// two are different failures: a rate ceiling says how fast a port may be
+	// approached and says nothing about how many times. A thirty-probe chain
+	// obeying 10 pps at a fragile host is minutes on one port, and the host
+	// experiences a sustained conversation rather than a scan.
+	//
+	// Eight is the number of distinct protocol families a single port plausibly
+	// belongs to. Past that the chain is guessing, and a softmatch — "this is
+	// HTTP, product unknown" — is a better answer than eight more packets.
+	PlatformMaxProbesPerPort = 8
+
+	// PlatformFragileMaxConcurrent is how many connections a FRAGILE target may
+	// be asked to hold at once.
+	//
+	// One, and it is a separate lever from the rate. `internal/dispatch` already
+	// records why: "a host answering 20 simultaneous connects at 5 pps is under
+	// more pressure than one answering a single connection at 50 pps, and
+	// connection count is what tips a printer over."
+	//
+	// Measured, not assumed. A capture at a 10 pps fragile budget showed a
+	// worst-second of 18 packets against a mean of 9.88 — the mean was honest and
+	// the peak was two concurrent exchanges landing together, because the packets
+	// of one TCP-plus-TLS conversation are atomic and cannot be spread. Serialising
+	// a fragile target is what brings the peak down to one exchange.
+	PlatformFragileMaxConcurrent = 1
 )
 
 // Timings. The lease and heartbeat numbers are execution-plan §5's, and Core

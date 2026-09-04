@@ -211,16 +211,21 @@ func TestPlatformCeilingsAreAppliedAtTheRuntime(t *testing.T) {
 		{
 			// ADR-024 control 3: fragile caps rate REGARDLESS of policy, so the
 			// runtime holds the number and applies it even when Core sends 0.
-			name:     "fragile caps the rate even when Core sends no fragile value",
+			name: "fragile caps the rate even when Core sends no fragile value",
+			// Fragile SERIALISES as well as slows. A packet capture at a 10 pps
+			// fragile budget showed a mean of 9.88 and a worst second of 18,
+			// because the packets of one TCP-plus-TLS exchange are atomic and the
+			// peak is two exchanges landing together. Connection count is the
+			// other lever ADR-024 control 3 is about.
 			sent:     &scanpointv1.ScanConstraints{MaxRatePerTarget: 50},
 			fragile:  true,
-			wantRate: PlatformFragileRatePPS, wantConcurrent: PlatformMaxConcurrentPerTarget,
+			wantRate: PlatformFragileRatePPS, wantConcurrent: PlatformFragileMaxConcurrent,
 		},
 		{
 			name:     "and a lower fragile value from Core is honoured",
 			sent:     &scanpointv1.ScanConstraints{MaxRatePerTarget: 50, FragileRatePps: 3},
 			fragile:  true,
-			wantRate: 3, wantConcurrent: PlatformMaxConcurrentPerTarget,
+			wantRate: 3, wantConcurrent: PlatformFragileMaxConcurrent,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

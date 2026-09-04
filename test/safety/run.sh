@@ -6,6 +6,10 @@
 # container means the thing being tested cannot influence the verdict.
 set -e
 
+# $1 is the engine binary name; $2 names this phase's output files.
+ENGINE="$1"
+PHASE="$2"
+
 OUT=/w/out
 mkdir -p "$OUT"
 # TCP only, and the filter is a claim about the engine under test rather than a
@@ -26,17 +30,20 @@ mkdir -p "$OUT"
 # attempt, to a resolver nobody authorised, naming every target. The filter made
 # the exact traffic the docstring promised invisible.
 #
-# THIS FILTER MUST WIDEN AGAIN when the engine gains a method — a raw-socket
+# THIS FILTER MUST WIDEN AGAIN when an engine gains a method — a raw-socket
 # engine sending SYN or ICMP would be invisible to this capture, which is the
 # same "gate that silently proves less than it claims". It is named in the
 # gate's own output for that reason.
-tcpdump -i any -n -w "$OUT"/capture.pcap 'tcp or udp port 53' >/dev/null 2>&1 &
+#
+# TLS needs no widening: a handshake is TCP, and the fingerprint engine's
+# certificate inspection is therefore already inside the filter.
+tcpdump -i any -n -w "$OUT/capture-$PHASE.pcap" 'tcp or udp port 53' >/dev/null 2>&1 &
 TCPDUMP=$!
 # tcpdump needs a moment to attach before the first packet, or the evidence is
 # missing exactly for the fastest part of the scan.
 sleep 2
 
-/w/cvap-engine-discovery < /w/job.json > "$OUT"/observations.jsonl 2>"$OUT"/engine.err || true
+"/w/$ENGINE" < "/w/job-$PHASE.json" > "$OUT/observations-$PHASE.jsonl" 2>"$OUT/engine-$PHASE.err" || true
 
 sleep 1
 kill "$TCPDUMP" 2>/dev/null || true

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net"
 	"strconv"
+
+	"github.com/effaaykhan/cvap/internal/engines/enginerate"
 )
 
 // Host discovery: is anything there, and how do we know.
@@ -40,7 +42,7 @@ import (
 //
 // The rate limiter governs it: a connect made to decide liveness is a packet and
 // spends a token exactly as a port scan connect does.
-func probeAlive(ctx context.Context, cfg Config, address string, limiter *bucket, count func(uint32)) (bool, string) {
+func probeAlive(ctx context.Context, cfg Config, address string, limiter *enginerate.Bucket, count func(uint32)) (bool, string) {
 	for _, port := range HostDiscoveryPorts() {
 		if err := ctx.Err(); err != nil {
 			return false, "cancelled"
@@ -50,8 +52,8 @@ func probeAlive(ctx context.Context, cfg Config, address string, limiter *bucket
 		// retransmissions. Host discovery dials the same way the port scan does
 		// and must be charged the same way, or the cheapest path to exceeding
 		// the ceiling is to have many silent hosts.
-		attemptCost := synCost(cfg.ConnectTimeout)
-		if err := limiter.takeN(ctx, attemptCost); err != nil {
+		attemptCost := enginerate.SynCost(cfg.ConnectTimeout)
+		if err := limiter.TakeN(ctx, attemptCost); err != nil {
 			return false, "cancelled"
 		}
 
@@ -60,7 +62,7 @@ func probeAlive(ctx context.Context, cfg Config, address string, limiter *bucket
 		if err == nil {
 			// Established: one SYN, the ACK and the FIN. The retransmissions
 			// charged up front did not happen.
-			count(1 + establishedCost)
+			count(1 + enginerate.EstablishedCost)
 			_ = conn.Close()
 			return true, "tcp-connect:" + strconv.Itoa(int(port))
 		}

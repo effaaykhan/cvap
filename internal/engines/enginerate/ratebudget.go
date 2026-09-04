@@ -1,4 +1,20 @@
-package discovery
+// Package enginerate is the packet budget every engine that sends packets
+// spends from.
+//
+// ============================================================================
+// ONE implementation, because the safety gate asserts against ONE model.
+// ============================================================================
+//
+// It started inside the discovery engine, which was right while discovery was
+// the only thing with a socket. A second engine that sends packets makes it
+// shared or duplicated, and duplicated is not an option here: `make safety`
+// measures a wire-to-charged ratio against this model, and two copies means the
+// gate binds whichever one the test happens to exercise while the other drifts.
+//
+// The three numbers that took a packet capture to get right — a sub-second
+// burst, the SYN retransmit train, and three packets beyond the SYN for a
+// connection that opens — are exactly the kind that get copied wrong.
+package enginerate
 
 import (
 	"context"
@@ -26,7 +42,7 @@ import (
 // a fixed inter-packet delay makes it a rate only when nothing else is
 // happening. Under concurrency, a delay per goroutine multiplies by the number
 // of goroutines; a shared bucket does not.
-type bucket struct {
+type Bucket struct {
 	mu       sync.Mutex
 	capacity float64
 	tokens   float64
@@ -36,12 +52,12 @@ type bucket struct {
 	now      func() time.Time
 }
 
-func newBucket(ratePPS float64, now func() time.Time) *bucket {
+func New(ratePPS float64, now func() time.Time) *Bucket {
 	if now == nil {
 		now = time.Now
 	}
-	return &bucket{
-		capacity: burstFor(ratePPS),
+	return &Bucket{
+		capacity: BurstFor(ratePPS),
 		tokens:   1,
 		rate:     ratePPS, ceiling: ratePPS,
 		last: now(), now: now,
@@ -68,7 +84,7 @@ func newBucket(ratePPS float64, now func() time.Time) *bucket {
 // A sub-second burst is what makes the ceiling true at the timescale a device
 // experiences. Ten per second means at most one per hundred milliseconds' worth
 // of accumulation, which for a 10 pps fragile cap is a burst of one.
-func burstFor(ratePPS float64) float64 {
+func BurstFor(ratePPS float64) float64 {
 	burst := ratePPS / 10
 	if burst < 1 {
 		burst = 1
@@ -95,13 +111,57 @@ func burstFor(ratePPS float64) float64 {
 //
 // Charged one at a time rather than as a lump, so a multi-packet attempt is
 // paced across the interval rather than draining a burst allowance at once.
-func (b *bucket) takeN(ctx context.Context, n uint32) error {
+func (b *Bucket) TakeN(ctx context.Context, n uint32) error {
 	for range n {
-		if err := b.take(ctx); err != nil {
+		if err := b.Take(ctx); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// Settle reconciles what an attempt was PRE-CHARGED with what it actually cost.
+//
+// ============================================================================
+// Without this the bucket paces on SYNs alone, and everything after the
+// handshake is free.
+// ============================================================================
+//
+// A safety audit measured it: the caller took SynCost tokens before dialling and
+// then reported a larger number — the ACK and FIN pair for a connection that
+// opened, a TLS handshake, a probe payload — to the runtime's reclaim path,
+// which does not pace anything. At ADR-024's 50 pps per target the fingerprint
+// engine put 112 packets into a one-second window, 2.24x the ceiling, while the
+// gate's wire-to-charged ratio read 1.01 because that ratio compares the wire
+// against the REPORTED count and never against the tokens taken.
+//
+// Settling after the fact is the only order available — whether a port answers
+// is not knowable before the attempt — so this does not prevent the first
+// overshoot. What it does is make the overshoot cost the next attempts, which is
+// what a token bucket is for and what keeps the sustained rate at the ceiling
+// instead of a multiple of it.
+//
+// It also REFUNDS. A refused connection costs one packet against a SynCost of
+// three, and a bucket that kept the difference would run a scan of mostly-closed
+// ports at a third of the rate its operator asked for. The refund is capped at
+// capacity, so it cannot bank a burst.
+func (b *Bucket) Settle(ctx context.Context, prepaid, actual uint32) error {
+	if actual > prepaid {
+		return b.TakeN(ctx, actual-prepaid)
+	}
+	if actual < prepaid {
+		b.refund(prepaid - actual)
+	}
+	return nil
+}
+
+func (b *Bucket) refund(n uint32) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.tokens += float64(n)
+	if b.tokens > b.capacity {
+		b.tokens = b.capacity
+	}
 }
 
 // synCost is how many SYNs the kernel sends before a connect times out.
@@ -116,7 +176,7 @@ func (b *bucket) takeN(ctx context.Context, n uint32) error {
 // deliberately does not have (ADR-047). It errs high — the boundary case counts
 // the retransmit that races the timeout — because a ceiling that guesses low is
 // not a ceiling.
-func synCost(timeout time.Duration) uint32 {
+func SynCost(timeout time.Duration) uint32 {
 	if timeout <= 0 {
 		return 1
 	}
@@ -132,7 +192,7 @@ func synCost(timeout time.Duration) uint32 {
 	return syns
 }
 
-// establishedCost is what a connection that actually opens costs BEYOND its
+// EstablishedCost is what a connection that actually opens costs BEYOND its
 // SYN: the ACK completing the handshake, the FIN closing it, and the ACK of the
 // peer's FIN.
 //
@@ -144,14 +204,14 @@ func synCost(timeout time.Duration) uint32 {
 // Charged after the fact, because whether a port answers is not knowable before
 // the attempt. The peer's own packets are not charged: the ceiling is about what
 // this scan point sends.
-const establishedCost = 3
+const EstablishedCost = 3
 
 // take blocks until one token is available or ctx ends.
 //
 // Returns ctx.Err() on cancellation so a kill switch is not delayed by the rate
 // limiter — ADR-024 bounds propagation at 10 seconds and a token wait must not
 // eat into that.
-func (b *bucket) take(ctx context.Context) error {
+func (b *Bucket) Take(ctx context.Context) error {
 	for {
 		b.mu.Lock()
 		now := b.now()
@@ -195,12 +255,12 @@ func (b *bucket) take(ctx context.Context) error {
 // The floor exists so a run of timeouts against a firewalled host cannot drive
 // the rate to zero and hang the task; the connect timeout bounds each attempt
 // anyway, so the slow case is slow rather than stuck.
-func (b *bucket) backOff() {
+func (b *Bucket) BackOff() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.rate /= 2
-	if b.rate < minRatePPS {
-		b.rate = minRatePPS
+	if b.rate < MinRatePPS {
+		b.rate = MinRatePPS
 	}
 	// CAPACITY comes down with the rate, or backing off is decorative.
 	//
@@ -209,18 +269,18 @@ func (b *bucket) backOff() {
 	// the original allocation — and spent it the moment the host paused long
 	// enough to look idle. Backing off is a statement about how hard this host
 	// may be pushed, and a burst ceiling is part of that statement.
-	b.capacity = burstFor(b.rate)
+	b.capacity = BurstFor(b.rate)
 	if b.tokens > b.capacity {
 		b.tokens = b.capacity
 	}
 }
 
 // currentRate is for reporting and for tests.
-func (b *bucket) currentRate() float64 {
+func (b *Bucket) CurrentRate() float64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.rate
 }
 
-// minRatePPS is the floor back-off will not go below.
-const minRatePPS = 0.5
+// MinRatePPS is the floor back-off will not go below.
+const MinRatePPS = 0.5

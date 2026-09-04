@@ -39,6 +39,7 @@ WHAT THIS DOES NOT COVER, and week 8 still owes
     observable through the socket API and a raw sender is not.
 """
 
+import base64
 import ipaddress
 import json
 import os
@@ -82,7 +83,30 @@ MaxWireToChargedRatio = 1.15
 # below is actually about. Without it the ratio check passes even with the
 # accounting sabotaged, because every other lab target answers or refuses
 # instantly.
-TARGETS = ["10.10.0.11", "10.10.0.12", "10.10.0.20", "10.10.0.30"]
+# 10.10.0.15 is the TLS target, and it is here because the fingerprint engine's
+# handshake is the only packet cost this gate has never measured. A model for it
+# (TLSHandshakeCost) exists in the engine; without a target that completes a
+# handshake, that number is asserted by nothing.
+# 10.10.0.14 is the OpenSSH host, and it was missing. Its absence meant the one
+# target in the lab that volunteers a real banner was never reached by this gate,
+# so the entire banner-identification path — the whole of what safe mode does —
+# was exercised by unit tests alone. Found by reading the gate's own output and
+# noticing which addresses were not in it.
+TARGETS = ["10.10.0.11", "10.10.0.12", "10.10.0.14", "10.10.0.15", "10.10.0.16",
+           "10.10.0.20", "10.10.0.30", "10.10.0.40"]
+
+# Ports where unsolicited bytes are NOT inert, and 10.10.0.40 listens on them.
+#
+# This is the static probe denylist from internal/scanpoint/corpus.go, restated
+# here as a WIRE assertion rather than a unit test: the fingerprint engine is
+# pointed at 9100 in intrusive mode with the real corpus, and not one payload
+# byte may arrive. On a real 9100 any bytes are a print job, and invariant 9 is
+# that detection establishes evidence without achieving impact.
+#
+# The listener matters. Against a closed port the assertion passes trivially,
+# because a refused connection cannot carry a payload whether the denylist works
+# or not — which is the shape of a gate that silently proves nothing.
+NON_INERT_PORTS = {"9100", "631"}
 
 
 # Ports chosen so the FILTERED target dominates the packet count.
@@ -93,6 +117,22 @@ TARGETS = ["10.10.0.11", "10.10.0.12", "10.10.0.20", "10.10.0.30"]
 # short list of mostly-open ports produced a signal too small to separate correct
 # accounting from none.
 PORTS = "21,22,23,25,80,110,143,443,3306,5432,8080,8443"
+
+# The fingerprint engine gets a shorter list, and that is the point of the second
+# phase rather than a shortcut.
+#
+# This phase runs INTRUSIVE with the real built-in corpus, so every port here
+# costs a connect plus a chain of probes — and 443 costs a full TLS handshake at
+# a target that completes one. A long port list would multiply that into a
+# minutes-long gate without measuring anything the short list does not.
+#
+# 22 volunteers a banner (no probe follows a hard match), 80 takes the HTTP chain,
+# 443 takes the handshake, and 9100 is here as the ASSERTION: it is on the
+# non-inert denylist, so a correct run sends a connect and no probe payload to it.
+# 631 is here as well as 9100 because both are on the denylist and only one was
+# being exercised: half a wire assertion is a gate that reports more than it
+# checked. 10.10.0.40 listens on both.
+FINGERPRINT_PORTS = [22, 80, 443, 631, 5432, 9100]
 
 
 def dst_is_local(dst):
@@ -176,23 +216,37 @@ def main():
     out.mkdir()
     out.chmod(0o777)
 
-    # A STATIC binary, mounted rather than baked into an image.
+    # STATIC binaries, mounted rather than baked into an image.
     #
     # No Dockerfile and no image build: the gate then needs only a base image
     # and nothing from a registry at run time, which is what lets it work on a
     # machine whose registry access is broken. It also means the thing under
     # test is exactly the binary `go build` produced, not a copy inside a layer.
-    subprocess.run(
-        ["go", "build", "-o", str(work / "cvap-engine-discovery"), "./cmd/cvap-engine-discovery"],
-        cwd=ROOT, check=True,
-        env={**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"},
-    )
+    for engine in ("cvap-engine-discovery", "cvap-engine-fingerprint"):
+        subprocess.run(
+            ["go", "build", "-o", str(work / engine), f"./cmd/{engine}"],
+            cwd=ROOT, check=True,
+            env={**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"},
+        )
     shutil.copy(ROOT / "test" / "safety" / "run.sh", work / "run.sh")
     (work / "run.sh").chmod(0o755)
 
     capture_image = prepare_capture_image()
     if capture_image is None:
         return 2
+
+    # The REAL corpus, asked for rather than restated.
+    #
+    # A probe list written into this gate would drift from internal/scanpoint the
+    # moment either changed, and the gate would go on reporting a clean run about
+    # a corpus nobody uses. See test/safety/corpusdump.
+    dump = subprocess.run(["go", "run", "./test/safety/corpusdump"],
+                          cwd=ROOT, capture_output=True, text=True)
+    if dump.returncode != 0:
+        print("safety: could not read the built-in fingerprint corpus", file=sys.stderr)
+        print(dump.stderr[-2000:], file=sys.stderr)
+        return 1
+    corpus = json.loads(dump.stdout)
 
     job = {
         "kind": "job",
@@ -210,37 +264,84 @@ def main():
         "max_concurrent_per_target": 4,
         "safety_mode": "safe",
     }
-    (work / "job.json").write_text(json.dumps(job) + "\n")
+    (work / "job-discovery.json").write_text(json.dumps(job) + "\n")
 
-    run = subprocess.run(
-        ["docker", "run", "--rm", "--network", NETWORK,
-         "--cap-add=NET_RAW", "--cap-add=NET_ADMIN",
-         "-e", f"CVAP_ENGINE_DISCOVERY_PORTS={PORTS}",
-         "-v", f"{work}:/w", capture_image, "/w/run.sh"],
-        capture_output=True, text=True,
-    )
-    if run.returncode != 0:
-        print("safety: the capture container failed; the gate proved nothing", file=sys.stderr)
-        print(run.stdout[-2000:], file=sys.stderr)
-        print(run.stderr[-2000:], file=sys.stderr)
-        return 1
+    # ====================================================================
+    # Phase two: the fingerprint engine, INTRUSIVE, with the real corpus.
+    # ====================================================================
+    #
+    # The first phase measures a safe job, which sends no payloads at all. That
+    # leaves the entire probe path — every payload this platform can put on a
+    # wire — outside the only capture-based gate there is. An intrusive phase is
+    # what puts it inside.
+    fp_job = dict(job)
+    fp_job["job_id"] = "safety-gate-fingerprint"
+    fp_job["safety_mode"] = "intrusive"
+    fp_job["ports"] = FINGERPRINT_PORTS
+    fp_job["probes"] = corpus["probes"]
+    fp_job["banner_matches"] = corpus["banner_matches"]
+    fp_job["max_probes_per_port"] = corpus["max_probes_per_port"]
+    (work / "job-fingerprint.json").write_text(json.dumps(fp_job) + "\n")
 
-    cap = out / "capture.pcap"
-    if not cap.exists() or cap.stat().st_size == 0:
-        print("safety: no capture was produced; the gate proved nothing", file=sys.stderr)
-        return 1
+    # ====================================================================
+    # Phase three: the same engine, the same targets, under a SAFE job.
+    # ====================================================================
+    #
+    # ADR-021's central claim measured at the wire rather than asserted in a unit
+    # test: a safe job sends NO PAYLOAD AT ALL. The runtime hands a safe job an
+    # empty probe list, so there is nothing to send — but "nothing to send" is a
+    # property of the whole runtime-to-engine path, and the only way to know it
+    # holds is to look at what left the machine.
+    #
+    # The job below keeps the banner rules and drops the probes, which is exactly
+    # what job.budget produces for a safe job.
+    safe_job = dict(fp_job)
+    safe_job["job_id"] = "safety-gate-fingerprint-safe"
+    safe_job["safety_mode"] = "safe"
+    safe_job["probes"] = []
+    (work / "job-fingerprint-safe.json").write_text(json.dumps(safe_job) + "\n")
+
+    for engine, phase in (("cvap-engine-discovery", "discovery"),
+                          ("cvap-engine-fingerprint", "fingerprint"),
+                          ("cvap-engine-fingerprint", "fingerprint-safe")):
+        run = subprocess.run(
+            ["docker", "run", "--rm", "--network", NETWORK,
+             "--cap-add=NET_RAW", "--cap-add=NET_ADMIN",
+             "-e", f"CVAP_ENGINE_DISCOVERY_PORTS={PORTS}",
+             "-v", f"{work}:/w", capture_image, "/w/run.sh", engine, phase],
+            capture_output=True, text=True,
+        )
+        if run.returncode != 0:
+            print(f"safety: the {phase} capture container failed; the gate proved nothing",
+                  file=sys.stderr)
+            print(run.stdout[-2000:], file=sys.stderr)
+            print(run.stderr[-2000:], file=sys.stderr)
+            return 1
+        cap = out / f"capture-{phase}.pcap"
+        if not cap.exists() or cap.stat().st_size == 0:
+            print(f"safety: no {phase} capture was produced; the gate proved nothing",
+                  file=sys.stderr)
+            return 1
 
     # Read the capture with tcpdump rather than a parser of our own: the format
     # is the evidence and a hand-rolled reader is a place to be wrong about it.
-    proc = subprocess.run(
-        ["docker", "run", "--rm", "-v", f"{work}:/w", capture_image,
-         "sh", "-c", "tcpdump -n -r /w/out/capture.pcap 2>/dev/null"],
-        capture_output=True, text=True, check=False,
-    )
+    def read_capture(phase):
+        return subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{work}:/w", capture_image,
+             "sh", "-c", f"tcpdump -n -r /w/out/capture-{phase}.pcap 2>/dev/null"],
+            capture_output=True, text=True, check=False,
+        ).stdout
 
     authorised = set(TARGETS)
     destinations = {}
-    for line in proc.stdout.splitlines():
+    non_inert_payloads = []
+    safe_payloads = []
+    lines = []
+    for phase in ("discovery", "fingerprint", "fingerprint-safe"):
+        for line in read_capture(phase).splitlines():
+            lines.append((phase == "fingerprint-safe", line))
+
+    for in_safe_phase, line in lines:
         # tcpdump's layout varies with the link type: a `-i any` capture is
         # LINUX_SLL2 and inserts an interface name and a direction before the
         # protocol. Locating the IP/IP6 token rather than indexing a fixed
@@ -281,8 +382,59 @@ def main():
         dst = parts[i + 3].rstrip(":")
         # Strip the port. IPv4 and IPv6 both put it after the final dot in
         # tcpdump's rendering.
-        addr = dst.rsplit(".", 1)[0]
+        addr, _, port = dst.rpartition(".")
         destinations[addr] = destinations.get(addr, 0) + 1
+        payload_len = 0
+        if "length" in parts:
+            i_len = parts.index("length")
+            if i_len + 1 < len(parts):
+                try:
+                    payload_len = int(parts[i_len + 1].rstrip(":"))
+                except ValueError:
+                    payload_len = 0
+        if in_safe_phase and payload_len > 0:
+            safe_payloads.append((dst, payload_len))
+
+        # Payload bytes to a non-inert port, which must be zero.
+        #
+        # tcpdump renders the TCP segment length at the end of the line; a
+        # handshake or a FIN is `length 0` and a probe is not. Keyed on the
+        # DESTINATION port so an answer coming back from one is not counted.
+        if port in NON_INERT_PORTS and payload_len > 0:
+            non_inert_payloads.append((dst, payload_len))
+
+    fingerprint_services = []
+    fp_obs = out / "observations-fingerprint.jsonl"
+    if fp_obs.exists():
+        for line in fp_obs.read_text().splitlines():
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if m.get("kind") != "observation":
+                continue
+            try:
+                fingerprint_services.append(
+                    json.loads(base64.b64decode(m["observation"]["payload"])))
+            except (ValueError, KeyError, TypeError):
+                continue
+
+    # ====================================================================
+    # The gate must have EXERCISED the TLS path, or it measured nothing.
+    # ====================================================================
+    #
+    # An audit found this printing "the probe payloads and the TLS handshake are
+    # inside the capture" while the shipped corpus contained no TLS probe at all:
+    # zero handshakes, TLSHandshakeCost asserted by nothing, and a wire-to-charged
+    # ratio that was honest about a workload nobody cared about. A gate that
+    # cannot tell it did nothing is the failure this whole file exists against.
+    if not any(p.get("tls") for p in fingerprint_services):
+        print("safety: the intrusive phase completed NO TLS handshake.", file=sys.stderr)
+        print("        The corpus has no TLS probe reaching a port in FINGERPRINT_PORTS,",
+              file=sys.stderr)
+        print("        so the handshake cost is measured by nothing and this gate is", file=sys.stderr)
+        print("        weaker than its output claims.", file=sys.stderr)
+        return 1
 
     if not destinations:
         print("safety: the capture contains no OUTBOUND packets; the gate proved nothing.",
@@ -307,8 +459,7 @@ def main():
     # charges a model of them (synCost); a ratio far from 1 means the model is
     # wrong in whichever direction it leans.
     reported = 0
-    obs = out / "observations.jsonl"
-    if obs.exists():
+    for obs in sorted(out.glob("observations-*.jsonl")):
         for line in obs.read_text().splitlines():
             try:
                 m = json.loads(line)
@@ -336,6 +487,39 @@ def main():
     # number nobody checks drifts back.
     #
     # Over-charging is fine and is the direction the model deliberately leans.
+    # ====================================================================
+    # Not one payload byte to a port where bytes are not inert.
+    # ====================================================================
+    #
+    # The static policy in internal/scanpoint/corpus.go is the whole safety
+    # argument for letting a signed pack supply probes: a signature proves
+    # origin, not that a payload is inert. This is that policy measured at the
+    # wire instead of asserted in a unit test.
+    if non_inert_payloads:
+        total = sum(n for _, n in non_inert_payloads)
+        failures.append(
+            f"  {len(non_inert_payloads)} packet(s) carrying {total} payload byte(s) reached a "
+            f"NON-INERT port: {non_inert_payloads[:5]}. On 9100 those bytes are a print job. "
+            "Invariant 9: detection establishes evidence without achieving impact."
+        )
+
+    # ====================================================================
+    # A SAFE job sent no payload at all.
+    # ====================================================================
+    #
+    # ADR-021 makes safe the default for every policy, so it is the mode most
+    # deployments run and the one that must be unable to provoke anything. The
+    # enforcement is that the runtime hands a safe job an empty probe list — this
+    # is that enforcement measured at the wire, which is the only place the claim
+    # is actually about.
+    if safe_payloads:
+        total = sum(n for _, n in safe_payloads)
+        failures.append(
+            f"  a SAFE job put {total} payload byte(s) on the wire in "
+            f"{len(safe_payloads)} packet(s): {safe_payloads[:5]}. ADR-021's safe mode "
+            "sends nothing; a connect and a read are the whole of it."
+        )
+
     if ratio is not None and ratio > MaxWireToChargedRatio:
         failures.append(
             f"  the engine sent {actual} packets and charged {reported} "
@@ -350,6 +534,10 @@ def main():
         return 1
 
     print("\nsafety: every packet went to an authorised target inside lab/scope.txt")
+    print("Two phases ran: discovery under a SAFE job, and fingerprint under an INTRUSIVE one")
+    print("with the built-in corpus — so the probe payloads and the TLS handshake are inside")
+    print("the capture rather than outside it. No payload byte reached 9100 or 631, and a")
+    print("third phase ran fingerprint under a SAFE job and put no payload on the wire at all.")
     print("The capture filter is 'tcp or udp port 53' — this engine's traffic plus the")
     print("resolver lookups an earlier filter of 'tcp' alone made invisible. It MUST widen")
     print("again when the engine gains a method; a raw sender would not appear here.")

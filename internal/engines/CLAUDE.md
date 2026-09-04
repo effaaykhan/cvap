@@ -31,4 +31,21 @@ Rules:
   finish a partial observation, not a veto.
 - Detection establishes evidence without achieving impact. See `/cvap-invariants`.
 
+## The two engines that send packets
+
+`discovery` holds `net` (ADR-047). `fingerprint` holds `net` plus four crypto imports (ADR-048),
+and it is the only place in this repository where `InsecureSkipVerify` is correct — a verifying
+dial fails on exactly the certificates worth reporting, so it would return an error where the
+evidence should be. It appears **once**, in `inspectOnlyTLSConfig`, whose name is the argument,
+and a mutation flips it and requires the tests to fail. Do not write a bare `tls.Config` at a call
+site in that package.
+
+Certificates from a scanned host are **attacker-controlled by definition**. Chain depth, SAN
+count, extension count and name length are all bounded, each with a mutation, and truncation is
+always reported alongside the untruncated count.
+
+`enginerate` is the shared packet budget. It is shared rather than copied because `make safety`
+asserts a wire-to-charged ratio against **one** model; two copies means the gate binds whichever
+the tests happen to exercise while the other drifts.
+
 Run `scan-safety-auditor` on any change here.

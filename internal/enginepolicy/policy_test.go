@@ -107,6 +107,54 @@ var exceptions = map[string][]string{
 	// a single import.
 	"cmd/cvap-engine-discovery": {"os", "github.com/effaaykhan/cvap/internal/enginewire"},
 
+	// ========================================================================
+	// The second engine that may send packets, and the first that may speak TLS
+	// (ADR-048).
+	// ========================================================================
+	//
+	// `net` for the same reason discovery has it: identifying a service means
+	// connecting to it. The four crypto imports are the new argument, and it is
+	// narrow:
+	//
+	//   crypto/tls    — a TLS handshake is a conversation, and no fixed byte
+	//                   string performs one. Without it, the certificate is
+	//                   unreachable and week 6's certificate rules have no
+	//                   evidence to run on.
+	//   crypto/x509   — the certificate TYPE. crypto/tls has already parsed the
+	//                   chain by the time this engine sees it; this import is
+	//                   what lets it name what it is looking at.
+	//   crypto/rsa,
+	//   crypto/ecdsa  — key SIZE, which is a finding ("RSA below 2048 bits") and
+	//                   cannot be read without the concrete key types. Both are
+	//                   pure arithmetic: no I/O, no sockets, no process control.
+	//
+	// What this exception deliberately does NOT include: net/http, which would
+	// bring a redirect-following client that constructs its own targets;
+	// crypto/tls's server side is unused; and no os, os/exec or syscall.
+	//
+	// The dangerous half is InsecureSkipVerify, which this engine genuinely
+	// needs — a verifying dial fails on exactly the certificates worth reporting.
+	// It appears in ONE constructor named for that argument, and a mutation
+	// asserts a plain verified dial fails the tests, so the deliberateness is
+	// load-bearing rather than incidental. See internal/engines/fingerprint/tls.go.
+	// The last three are TEST-only, and they are listed here rather than waved
+	// through because this guard checks test imports on purpose: "only in tests"
+	// is how the first exception gets made without anyone deciding to make one.
+	//
+	// crypto/rand, crypto/elliptic and crypto/x509/pkix build a certificate for
+	// the TLS tests to inspect. The alternative was a committed PEM fixture,
+	// which means a private key in the repository — the secret scanners are
+	// right to object to that — and a certificate that expires. All three are
+	// pure arithmetic and strictly narrower in capability than the crypto/tls
+	// already granted above: no sockets, no I/O, no process control.
+	"internal/engines/fingerprint": {
+		"net", "crypto/tls", "crypto/x509", "crypto/rsa", "crypto/ecdsa",
+		"crypto/rand", "crypto/elliptic", "crypto/x509/pkix",
+	},
+
+	// The engine PROCESS shell, and only the shell.
+	"cmd/cvap-engine-fingerprint": {"os", "github.com/effaaykhan/cvap/internal/enginewire"},
+
 	// The engine PROCESS shell, and only the shell.
 	//
 	// ADR-027 decides that engines are separate processes hosted by the scan

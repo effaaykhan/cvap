@@ -348,15 +348,49 @@ func (s *Service) receive(ctx context.Context, stream scanpointv1.Dispatch_Conne
 			s.onCancelAck(ctx, sess, m.CancelAck)
 
 		case *scanpointv1.ScanPointMessage_RulePackStatus:
-			// RulePacks is session 8. Recorded as seen and otherwise ignored:
-			// an unknown-but-valid message must not close the stream, or every
-			// protocol addition becomes a fleet outage (ADR-022).
+			s.onRulePackStatus(ctx, sess, m.RulePackStatus)
 
 		default:
 			s.log.WarnContext(ctx, "unhandled scan point message",
 				slog.String("scan_point_id", sess.spID.String()))
 		}
 	}
+}
+
+// onRulePackStatus records which fingerprint corpus a scan point is running.
+//
+// ============================================================================
+// LOGGED, not stored. Naming that, because it is the weak half of ADR-019.
+// ============================================================================
+//
+// The requirement it satisfies is that a refused pack is not silent: a scan
+// point whose corpus failed to verify is identifying fewer services than an
+// operator believes, and nothing else in the system would say so. A log line
+// meets that and no more — it cannot be queried, alerted on, or shown next to
+// the scan whose coverage it explains.
+//
+// Storing it needs a table and a migration, and the fetch half of ADR-019 needs
+// them too, so the two land together: see docs/execution-plan.md §6.5. Until
+// then this is deliberately the least that is still honest, rather than the
+// nothing it was before.
+//
+// The contents are ATTESTATION, like credentials_zeroised and observed_rate_pps:
+// a compromised scan point can claim any pack it likes. It is here to catch our
+// bugs — a fleet-wide signature rejection after a key rotation is exactly the
+// shape this makes visible — and never read as proof of what is running.
+func (s *Service) onRulePackStatus(ctx context.Context, sess *session, st *scanpointv1.RulePackStatus) {
+	level := slog.LevelInfo
+	if st.GetState() != scanpointv1.RulePackState_LOADED {
+		// Everything that is not LOADED means reduced detection coverage, which
+		// an operator finds out about here or not at all.
+		level = slog.LevelWarn
+	}
+	s.log.Log(ctx, level, "scan point rule pack status",
+		slog.String("scan_point_id", sess.spID.String()),
+		slog.String("pack_id", st.GetPackId()),
+		slog.String("version", st.GetVersion()),
+		slog.String("state", st.GetState().String()),
+		slog.String("detail", st.GetDetail()))
 }
 
 func (s *Service) onHeartbeat(ctx context.Context, sess *session, hb *scanpointv1.Heartbeat) {

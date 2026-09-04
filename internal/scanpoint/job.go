@@ -38,6 +38,14 @@ type job struct {
 	host   *engineHost
 	cancel context.CancelFunc
 
+	// corpus is the fingerprint content in force for this job, resolved once at
+	// startup rather than per job — a pack that changed mid-scan would make two
+	// halves of one scan mean different things.
+	//
+	// Nil falls back to the built-in set, which is what a test constructing a
+	// bare job gets and what a runtime with no pack configured runs.
+	corpus *Corpus
+
 	mu sync.Mutex
 
 	// creds is every credential this job has been issued, not just the last.
@@ -232,17 +240,45 @@ func (j *job) budget() engineBudget {
 	// NOT intrusive, so a Core that sent nothing, or a value this build does not
 	// know, yields no probes — the same direction clampCeiling takes for an
 	// absent rate.
+	corpus := j.corpus
+	if corpus == nil {
+		// A test constructing a bare job, or a runtime that has not resolved one
+		// yet. Rejections are dropped here rather than logged: LoadCorpus is the
+		// path that reports them, and this fallback exists so a job never runs
+		// with no corpus at all.
+		corpus, _ = BuiltinCorpus()
+	}
+
 	var probes []enginewire.Probe
 	if c.GetSafetyMode() == SafetyIntrusive && !anyFragile {
-		probes = ProbeCorpus()
+		probes = corpus.Probes
+	}
+
+	// A fragile target is SERIALISED as well as slowed. ADR-024 control 3 caps
+	// rate regardless of policy; connection count is the other lever and it is
+	// the one that tips a printer over. See PlatformFragileMaxConcurrent for the
+	// capture that made this a number rather than an opinion.
+	concurrency := clampCeiling(c.GetMaxConcurrentPerTarget(), PlatformMaxConcurrentPerTarget)
+	if anyFragile && concurrency > PlatformFragileMaxConcurrent {
+		concurrency = PlatformFragileMaxConcurrent
 	}
 
 	return engineBudget{
 		RatePPS:                rate,
 		ConnectTimeoutMS:       clampCeiling(c.GetConnectTimeoutMs(), PlatformConnectTimeoutMS),
-		MaxConcurrentPerTarget: clampCeiling(c.GetMaxConcurrentPerTarget(), PlatformMaxConcurrentPerTarget),
+		MaxConcurrentPerTarget: concurrency,
 		SafetyMode:             c.GetSafetyMode(),
 		Probes:                 probes,
+
+		// Banner matches travel in EVERY mode, including safe.
+		//
+		// This is the half of service identification that reads rather than
+		// sends, so withholding it would cost identification and buy no safety
+		// at all: the bytes have already arrived by the time a rule looks at
+		// them. Probes above are the withheld half, and the asymmetry between
+		// these two lines is the whole safe/intrusive distinction.
+		BannerMatches:    corpus.BannerMatches,
+		MaxProbesPerPort: PlatformMaxProbesPerPort,
 	}
 }
 

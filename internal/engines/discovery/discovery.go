@@ -50,6 +50,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/effaaykhan/cvap/internal/engines/enginerate"
 	"github.com/google/uuid"
 )
 
@@ -285,7 +286,7 @@ type bannerPayload struct {
 const maxBannerBytes = 8 << 10
 
 func scanTarget(ctx context.Context, cfg Config, t Target, ports []uint16, emit Emit, sent Sent) error {
-	limiter := newBucket(cfg.RatePPS, nil)
+	limiter := enginerate.New(cfg.RatePPS, nil)
 	var packets uint32
 	var mu sync.Mutex
 	count := func(n uint32) {
@@ -329,8 +330,8 @@ func scanTarget(ctx context.Context, cfg Config, t Target, ports []uint16, emit 
 		//
 		// synCost, not one: a connect attempt against a filtered host is a SYN
 		// plus its retransmissions, and ADR-024's ceiling is in packets.
-		attemptCost := synCost(cfg.ConnectTimeout)
-		if err := limiter.takeN(ctx, attemptCost); err != nil {
+		attemptCost := enginerate.SynCost(cfg.ConnectTimeout)
+		if err := limiter.TakeN(ctx, attemptCost); err != nil {
 			break
 		}
 		scanned = append(scanned, port)
@@ -349,7 +350,7 @@ func scanTarget(ctx context.Context, cfg Config, t Target, ports []uint16, emit 
 				// before the attempt.
 				//
 				// A probe adds one more, and only an open port can receive one.
-				cost = 1 + establishedCost
+				cost = 1 + enginerate.EstablishedCost
 				if len(cfg.Probes) > 0 {
 					cost++
 				}
@@ -358,11 +359,20 @@ func scanTarget(ctx context.Context, cfg Config, t Target, ports []uint16, emit 
 				// up front did not occur.
 				cost = 1
 			}
+			// Reconcile against what was taken before the dial: the pre-charge
+			// is a model of the SYN train and the real cost is only knowable
+			// afterwards. Without this the bucket paces on SYNs alone and the
+			// ACK/FIN pair of every open port is free — measured at 1.33x the
+			// ceiling here and 2.24x in the fingerprint engine, which opens two
+			// connections per port.
+			if err := limiter.Settle(ctx, attemptCost, cost); err != nil {
+				return
+			}
 			count(cost)
 			if timedOut {
 				// Timeouts, not refusals, are what a struggling host looks
 				// like: a closed port answers immediately with a RST.
-				limiter.backOff()
+				limiter.BackOff()
 			}
 			emitMu.Lock()
 			if len(obs) > 0 {

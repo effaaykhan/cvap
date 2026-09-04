@@ -1,4 +1,4 @@
-package discovery
+package enginerate
 
 import (
 	"context"
@@ -8,8 +8,8 @@ import (
 
 // Mutations, declared beside the tests that must kill them.
 //
-// mutate:subject internal/engines/discovery/ratelimit.go
-// mutate:test    ./internal/engines/discovery/ -run TestTheBucket|TestBackOff|TestTakeHonours|TestAnIdlePeriod|TestTheBudgetIsCharged|TestAMultiPacket
+// mutate:subject internal/engines/enginerate/ratebudget.go
+// mutate:test    ./internal/engines/enginerate/ -run TestTheBucket|TestBackOff|TestTakeHonours|TestAnIdlePeriod|TestTheBudgetIsCharged|TestAMultiPacket
 //
 // The -run regex is part of the declaration and gets stale the same way an
 // anchor does: two mutations survived because TestAnIdlePeriod — written in the
@@ -21,8 +21,8 @@ import (
 // mutate:old     tokens:   1,
 // mutate:new     tokens:   ratePPS,
 //
-// `tokens: burstFor(ratePPS)` was the first form of this mutation and it
-// SURVIVED — at the 10 pps the test uses, burstFor is 1, so the mutant was
+// `tokens: BurstFor(ratePPS)` was the first form of this mutation and it
+// SURVIVED — at the 10 pps the test uses, BurstFor is 1, so the mutant was
 // byte-for-byte the original behaviour. A mutation that changes nothing is a
 // mutation that proves nothing. `ratePPS` is the original defect.
 //
@@ -31,8 +31,8 @@ import (
 // mutate:new     burst := ratePPS
 //
 // mutate:case    backing off leaves the burst ceiling where it was
-// mutate:old     b.capacity = burstFor(b.rate)
-// mutate:new     _ = burstFor(b.rate)
+// mutate:old     b.capacity = BurstFor(b.rate)
+// mutate:new     _ = BurstFor(b.rate)
 //
 // mutate:case    back-off raises the rate instead of lowering it
 // mutate:old     b.rate /= 2
@@ -72,11 +72,11 @@ import (
 // target yields six banners at the cap and none at 500 pps, repeatably.
 func TestTheBucketStartsWithOneTokenNotAFullOne(t *testing.T) {
 	var now time.Time
-	b := newBucket(10, func() time.Time { return now })
+	b := New(10, func() time.Time { return now })
 
 	// The first take is immediate: a scan should not wait to send its first
 	// packet.
-	if err := b.take(context.Background()); err != nil {
+	if err := b.Take(context.Background()); err != nil {
 		t.Fatalf("first take: %v", err)
 	}
 
@@ -84,7 +84,7 @@ func TestTheBucketStartsWithOneTokenNotAFullOne(t *testing.T) {
 	// over.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- b.take(ctx) }()
+	go func() { done <- b.Take(ctx) }()
 
 	select {
 	case err := <-done:
@@ -118,25 +118,25 @@ func TestTheBucketStartsWithOneTokenNotAFullOne(t *testing.T) {
 // that could climb would be the engine deciding its own budget, which is what
 // ADR-027's allocation model exists to prevent.
 func TestBackOffOnlyEverLowers(t *testing.T) {
-	b := newBucket(100, nil)
-	start := b.currentRate()
+	b := New(100, nil)
+	start := b.CurrentRate()
 
 	for range 5 {
-		b.backOff()
+		b.BackOff()
 	}
-	if got := b.currentRate(); got >= start {
+	if got := b.CurrentRate(); got >= start {
 		t.Errorf("rate is %v after five back-offs, started at %v", got, start)
 	}
 
 	// And it has a floor, so a run of timeouts against a firewalled host cannot
 	// drive the rate to zero and hang the task.
 	for range 100 {
-		b.backOff()
+		b.BackOff()
 	}
-	if got := b.currentRate(); got < minRatePPS {
-		t.Errorf("rate fell to %v, below the floor %v", got, minRatePPS)
+	if got := b.CurrentRate(); got < MinRatePPS {
+		t.Errorf("rate fell to %v, below the floor %v", got, MinRatePPS)
 	}
-	if b.currentRate() > b.ceiling {
+	if b.CurrentRate() > b.ceiling {
 		t.Error("back-off raised the rate above its allocation")
 	}
 }
@@ -144,14 +144,14 @@ func TestBackOffOnlyEverLowers(t *testing.T) {
 // TestTakeHonoursCancellation. ADR-024 bounds kill propagation at 10 seconds and
 // a token wait must not eat into it.
 func TestTakeHonoursCancellation(t *testing.T) {
-	b := newBucket(0.5, nil) // one token every two seconds
-	if err := b.take(context.Background()); err != nil {
+	b := New(0.5, nil) // one token every two seconds
+	if err := b.Take(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- b.take(ctx) }()
+	go func() { done <- b.Take(ctx) }()
 	time.Sleep(20 * time.Millisecond)
 	cancel()
 
@@ -183,11 +183,11 @@ func TestTakeHonoursCancellation(t *testing.T) {
 // host banks a burst before the port scan even starts.
 func TestAnIdlePeriodDoesNotRebankAFullBurst(t *testing.T) {
 	now := time.Now()
-	b := newBucket(10, func() time.Time { return now })
+	b := New(10, func() time.Time { return now })
 
 	// Spend the first token, then stall for far longer than the bucket could
 	// ever need to refill.
-	if err := b.take(context.Background()); err != nil {
+	if err := b.Take(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(10 * time.Second)
@@ -198,7 +198,7 @@ func TestAnIdlePeriodDoesNotRebankAFullBurst(t *testing.T) {
 	for range 20 {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
-		go func() { done <- b.take(ctx) }()
+		go func() { done <- b.Take(ctx) }()
 		select {
 		case err := <-done:
 			cancel()
@@ -228,18 +228,18 @@ counted:
 // allocation, and spends it the moment the host pauses long enough to look idle.
 func TestBackOffLowersTheBurstCeilingToo(t *testing.T) {
 	now := time.Now()
-	b := newBucket(100, func() time.Time { return now })
+	b := New(100, func() time.Time { return now })
 
 	before := b.capacity
 	for range 5 {
-		b.backOff()
+		b.BackOff()
 	}
 	if b.capacity >= before {
 		t.Errorf("capacity is %v after five back-offs, started at %v — backing off is a "+
 			"statement about how hard this host may be pushed, and a burst ceiling is "+
 			"part of that statement", b.capacity, before)
 	}
-	if b.capacity > burstFor(b.rate) {
+	if b.capacity > BurstFor(b.rate) {
 		t.Errorf("capacity %v exceeds the burst for the current rate %v", b.capacity, b.rate)
 	}
 }
@@ -269,8 +269,8 @@ func TestTheBudgetIsChargedInPacketsNotAttempts(t *testing.T) {
 		{3 * time.Second, 3, "the platform default; the audit measured 2.94 SYNs here"},
 		{7 * time.Second, 4, "0, 1, 3, 7"},
 	} {
-		if got := synCost(tc.timeout); got != tc.want {
-			t.Errorf("synCost(%v) = %d, want %d — %s", tc.timeout, got, tc.want, tc.why)
+		if got := SynCost(tc.timeout); got != tc.want {
+			t.Errorf("SynCost(%v) = %d, want %d — %s", tc.timeout, got, tc.want, tc.why)
 		}
 	}
 }
@@ -282,14 +282,14 @@ func TestTheBudgetIsChargedInPacketsNotAttempts(t *testing.T) {
 // attempt is paced across the interval, which is what the device experiences.
 func TestAMultiPacketAttemptIsPacedNotBursted(t *testing.T) {
 	now := time.Now()
-	b := newBucket(10, func() time.Time { return now })
+	b := New(10, func() time.Time { return now })
 
 	// One token is available at construction; a three-packet attempt needs two
 	// more, and at 10 pps each takes 100ms of clock that is not advancing.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- b.takeN(ctx, 3) }()
+	go func() { done <- b.TakeN(ctx, 3) }()
 
 	select {
 	case err := <-done:

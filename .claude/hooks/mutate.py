@@ -79,7 +79,10 @@ GO_SUITES = [
     "internal/dispatch/scope_conformance_test.go",
     "internal/scanpoint/scope_conformance_test.go",
     "internal/scanpoint/safetymode_test.go",
-    "internal/engines/discovery/ratelimit_test.go",
+    "internal/engines/enginerate/ratebudget_test.go",
+    "internal/engines/fingerprint/tls_test.go",
+    "internal/engines/fingerprint/payload_test.go",
+    "internal/scanpoint/corpus_test.go",
 ]
 
 # The declaration shape, in comments beside the tests:

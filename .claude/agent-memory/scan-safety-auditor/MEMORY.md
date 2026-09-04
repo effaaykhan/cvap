@@ -5,3 +5,4 @@
 - [Scope target notation bypasses](scope_target_notation_bypasses.md) — ADR-040 work: hex/hyphen-range forms and the SplitHostPort scheme-as-host defect still bypass
 - [Lab scope guard bypasses](lab_scope_guard_bypasses.md) — quoting, hostnames and integer IPs get past `.claude/hooks/lab-scope-guard.py`
 - [Discovery engine wire findings](discovery_engine_wire_findings.md) — measured with tcpdump on commit 9d982b5: token re-banking, fabricated liveness, hostname resolution, probes on fragile
+- [Fingerprint engine wire findings](fingerprint_engine_wire_findings.md) — ADR-048/session 13: bucket undercharges 2x on TLS, payload bound beaten by {{target}}, gate measures zero handshakes

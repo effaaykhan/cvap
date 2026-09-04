@@ -10,12 +10,14 @@ Go 1.25 (control plane, scan points, agents) · Python 3.12 (knowledge pipelines
 ## Layout
 
 ```
-cmd/            binaries: cvap-core, cvap-scanpoint, cvap-cli
+cmd/            binaries: cvap-core, cvap-scanpoint, cvap-cli, cvap-engine-*
 internal/
   control/      control plane services (auth, tenancy, asset, scan, policy)
   dispatch/     job broker + dispatch + ingest
   scanpoint/    scan point runtime, lease client, engine host
   engines/      discovery, fingerprint, rules — separate processes (ADR-027)
+                enginerate/ is the shared packet budget: ONE model, because
+                make safety asserts wire-to-charged against one (ADR-048)
   domain/       observation, asset, finding models — no I/O in here
   store/        postgres access, RLS-aware
   logging/      slog setup + credential redaction
