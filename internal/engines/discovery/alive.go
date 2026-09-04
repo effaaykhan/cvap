@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strconv"
 )
@@ -44,14 +45,22 @@ func probeAlive(ctx context.Context, cfg Config, address string, limiter *bucket
 		if err := ctx.Err(); err != nil {
 			return false, "cancelled"
 		}
-		if err := limiter.take(ctx); err != nil {
+		// The SYN train up front, like the port scan: ADR-024's ceiling is in
+		// packets and a connect against a filtered host is a SYN plus its
+		// retransmissions. Host discovery dials the same way the port scan does
+		// and must be charged the same way, or the cheapest path to exceeding
+		// the ceiling is to have many silent hosts.
+		attemptCost := synCost(cfg.ConnectTimeout)
+		if err := limiter.takeN(ctx, attemptCost); err != nil {
 			return false, "cancelled"
 		}
 
 		d := net.Dialer{Timeout: cfg.ConnectTimeout}
 		conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(address, strconv.Itoa(int(port))))
 		if err == nil {
-			count(1)
+			// Established: one SYN, the ACK and the FIN. The retransmissions
+			// charged up front did not happen.
+			count(1 + establishedCost)
 			_ = conn.Close()
 			return true, "tcp-connect:" + strconv.Itoa(int(port))
 		}
@@ -71,10 +80,15 @@ func probeAlive(ctx context.Context, cfg Config, address string, limiter *bucket
 		// mostly unroutable would fabricate an asset per address at full
 		// confidence. A false finding is the thing this product cannot afford.
 		if !isRefused(err) {
-			// Nothing left the machine on this attempt, so nothing is charged
-			// against the rate budget either — see below.
+			// A timeout DID send the SYN train; a routing failure sent nothing.
+			// Charged accordingly, so the budget reflects the wire rather than
+			// the loop.
+			if isTimeout(err) {
+				count(attemptCost)
+			}
 			continue
 		}
+		// Refused: one SYN out, a RST back.
 		count(1)
 		return true, "tcp-refused:" + strconv.Itoa(int(port))
 	}
@@ -129,4 +143,15 @@ func isRefused(err error) bool {
 		e = u.Unwrap()
 	}
 	return false
+}
+
+// isTimeout separates "we waited and nothing came" from "the kernel would not
+// route".
+//
+// The distinction is a rate question as well as an evidence one: a timeout means
+// the SYN train went out and must be charged, and a routing failure means
+// nothing left the machine and must not be.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }

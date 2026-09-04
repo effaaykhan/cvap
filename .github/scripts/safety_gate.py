@@ -70,12 +70,29 @@ NETWORK = os.environ.get("CVAP_SAFETY_NETWORK", "cvap-lab_segment-a")
 # cached is the only one available.
 BASE_IMAGE = os.environ.get("CVAP_SAFETY_IMAGE", "alpine:3.20")
 
+# How far the engine's packet model may fall short of the wire before this is a
+# finding. Slack for scheduling and for a connection the peer closes first;
+# nothing like the 2.94 an audit measured when the budget counted attempts.
+MaxWireToChargedRatio = 1.15
+
 # Targets the engine is authorised for. All inside lab/scope.txt and all on the
 # lab network, so a packet leaving to anything else is the finding.
-TARGETS = ["10.10.0.11", "10.10.0.12", "10.10.0.20"]
+# The filtered host is in the list deliberately: it is the only target that
+# exercises the SYN-retransmit path, which is what the packet-budget assertion
+# below is actually about. Without it the ratio check passes even with the
+# accounting sabotaged, because every other lab target answers or refuses
+# instantly.
+TARGETS = ["10.10.0.11", "10.10.0.12", "10.10.0.20", "10.10.0.30"]
 
 
-PORTS = "22,80,443,8080"
+# Ports chosen so the FILTERED target dominates the packet count.
+#
+# Most of these are closed on the nginx targets — an instant RST, one packet —
+# and filtered on 10.10.0.30, where each costs a SYN and its retransmissions.
+# That is what gives the packet-budget assertion below something to measure; a
+# short list of mostly-open ports produced a signal too small to separate correct
+# accounting from none.
+PORTS = "21,22,23,25,80,110,143,443,3306,5432,8080,8443"
 
 
 def dst_is_local(dst):
@@ -182,7 +199,14 @@ def main():
         "job_id": "safety-gate",
         "targets": [{"task_id": f"t{i}", "value": v} for i, v in enumerate(TARGETS)],
         "rate_budget_pps": 50,
-        "connect_timeout_ms": 500,
+        # The PLATFORM DEFAULT, not a short test value.
+        #
+        # At 500ms no SYN retransmit fits inside the timeout, so synCost is 1
+        # whatever the accounting says — the packet-budget assertion below could
+        # not fail even with the model sabotaged. Three seconds is what a real
+        # scan uses and what makes the filtered target produce the retransmit
+        # train the assertion is about.
+        "connect_timeout_ms": 3000,
         "max_concurrent_per_target": 4,
         "safety_mode": "safe",
     }
@@ -278,9 +302,46 @@ def main():
                 "An engine constructs no targets (ADR-027)."
             )
 
-    print(f"safety: {sum(destinations.values())} outbound packet(s) to {len(destinations)} address(es)")
+    # The engine's own count, so the packet budget can be checked against the
+    # wire rather than trusted. ADR-024's ceiling is in packets and the engine
+    # charges a model of them (synCost); a ratio far from 1 means the model is
+    # wrong in whichever direction it leans.
+    reported = 0
+    obs = out / "observations.jsonl"
+    if obs.exists():
+        for line in obs.read_text().splitlines():
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if m.get("kind") == "sent":
+                reported += int(m.get("count", 0))
+
+    actual = sum(destinations.values())
+    print(f"safety: {actual} outbound packet(s) to {len(destinations)} address(es)")
+    ratio = None
+    if reported:
+        ratio = actual / reported
+        print(f"        engine charged {reported} against its budget "
+              f"(wire/charged = {ratio:.2f})")
     for addr, count in sorted(destinations.items()):
         print(f"  {addr:<20} {count}")
+
+    # The budget must not UNDERCHARGE, or ADR-024's ceilings are looser than the
+    # ADR says by whatever the shortfall is.
+    #
+    # This started at 2.94 — the engine charged one token per connect attempt
+    # while the kernel sent a SYN and two retransmits — so the 10 pps fragile cap
+    # was really about 29. Asserted here rather than only reported, because a
+    # number nobody checks drifts back.
+    #
+    # Over-charging is fine and is the direction the model deliberately leans.
+    if ratio is not None and ratio > MaxWireToChargedRatio:
+        failures.append(
+            f"  the engine sent {actual} packets and charged {reported} "
+            f"(ratio {ratio:.2f}, limit {MaxWireToChargedRatio}). ADR-024's ceilings are in "
+            "PACKETS, so undercharging makes every one of them looser by this factor."
+        )
 
     if failures:
         print("\nsafety: FAILED", file=sys.stderr)

@@ -19,6 +19,20 @@ and rate defects as Critical by default.
 
 ## Method
 
+
+**Before anything else, when the change adds a CAPABILITY — opening a socket, resolving a
+name, spawning a process, writing a file, reaching the network — grep the tree for documented
+limitations that capability makes reachable.** A limitation can be accurate, deliberate and
+harmless for as long as nothing can exercise it, and become a live bypass the day something
+can. `internal/scope` recorded that a hostname rule does not cover the address the name
+resolves to; that was true and safe until an engine could dial, at which point it was a route
+to an excluded host past both enforcement sites.
+
+Phrases that carry one: "does not cover", "deliberately not", "nothing here can", "harmless
+because", "the consequence is", "does not resolve", "for as long as". Read each against the
+new capability and ask whether it is still harmless. This question finds that class by
+reading; the alternative is finding it by packet capture, which is how the hostname bypass was
+actually found.
 1. `git diff` to see the change.
 2. Trace every code path that can emit a packet or open a connection to a target.
 3. For each, verify the checks below actually execute on that path — not that they exist

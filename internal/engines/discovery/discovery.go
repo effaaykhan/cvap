@@ -321,12 +321,16 @@ func scanTarget(ctx context.Context, cfg Config, t Target, ports []uint16, emit 
 		if ctx.Err() != nil {
 			break
 		}
-		// The token is taken BEFORE the goroutine starts, so the rate governs
-		// how fast work is created rather than how fast it finishes. Taking it
+		// The tokens are taken BEFORE the goroutine starts, so the rate governs
+		// how fast work is created rather than how fast it finishes. Taking them
 		// inside would let MaxConcurrentPerTarget goroutines all start at once
 		// and then queue on the bucket, which is a burst at the host followed by
 		// a wait — the shape that tips a fragile device over.
-		if err := limiter.take(ctx); err != nil {
+		//
+		// synCost, not one: a connect attempt against a filtered host is a SYN
+		// plus its retransmissions, and ADR-024's ceiling is in packets.
+		attemptCost := synCost(cfg.ConnectTimeout)
+		if err := limiter.takeN(ctx, attemptCost); err != nil {
 			break
 		}
 		scanned = append(scanned, port)
@@ -336,8 +340,25 @@ func scanTarget(ctx context.Context, cfg Config, t Target, ports []uint16, emit 
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			obs, timedOut := scanPort(ctx, cfg, t.TaskID, t.Value, port)
-			count(1)
+			obs, timedOut, established := scanPort(ctx, cfg, t.TaskID, t.Value, port)
+			cost := attemptCost
+			if established {
+				// The handshake completed and the connection was closed, so the
+				// SYN train did not happen and the ACK and FIN did. Charged
+				// after the fact because whether a port answers is not knowable
+				// before the attempt.
+				//
+				// A probe adds one more, and only an open port can receive one.
+				cost = 1 + establishedCost
+				if len(cfg.Probes) > 0 {
+					cost++
+				}
+			} else if !timedOut {
+				// Refused: one SYN out, a RST back. The retransmissions charged
+				// up front did not occur.
+				cost = 1
+			}
+			count(cost)
 			if timedOut {
 				// Timeouts, not refusals, are what a struggling host looks
 				// like: a closed port answers immediately with a RST.
@@ -381,7 +402,7 @@ func scanTarget(ctx context.Context, cfg Config, t Target, ports []uint16, emit 
 // Returns whether the attempt TIMED OUT, which is the signal back-off keys on —
 // a refused connection is a closed port and says nothing about the host's
 // health, while a timeout is what a host struggling to answer looks like.
-func scanPort(ctx context.Context, cfg Config, taskID, address string, port uint16) ([]Observation, bool) {
+func scanPort(ctx context.Context, cfg Config, taskID, address string, port uint16) (obs []Observation, timedOut, established bool) {
 	dialer := net.Dialer{Timeout: cfg.ConnectTimeout}
 	hostPort := net.JoinHostPort(address, strconv.Itoa(int(port)))
 
@@ -394,15 +415,16 @@ func scanPort(ctx context.Context, cfg Config, taskID, address string, port uint
 			// absence of an answer, and recording it as "closed" would be an
 			// inference; recording it as "filtered" would be a stronger one that
 			// connect scanning cannot support.
-			return nil, true
+			return nil, true, false
 		}
 		// A refused connection is a CLOSED port and produces no observation.
 		// The host's PortsScanned list records that it was tried; a row per
 		// closed port is ~180 per host and says nothing happened.
-		return nil, false
+		return nil, false, false
 	}
 	defer func() { _ = conn.Close() }()
 
+	established = true
 	out := []Observation{observation(taskID, "port", portPayload{
 		Address: address, Port: port, Protocol: "tcp", State: "open",
 		SafetyMode: cfg.SafetyMode,
@@ -440,7 +462,7 @@ func scanPort(ctx context.Context, cfg Config, taskID, address string, port uint
 		// produced which bytes is not something the pipeline should have to do.
 		break
 	}
-	return out, false
+	return out, false, established
 }
 
 // readBanner reads what is available, bounded in both bytes and time.

@@ -76,6 +76,76 @@ func burstFor(ratePPS float64) float64 {
 	return burst
 }
 
+// takeN blocks until n tokens have been taken, or ctx ends.
+//
+// ============================================================================
+// The budget is in PACKETS. A connect attempt is not one packet.
+// ============================================================================
+//
+// ADR-024's table is packets per second and this bucket charged one token per
+// connect ATTEMPT, which a packet-capture audit measured as 2.94 SYNs per
+// attempt against a filtered host — so the 10 pps fragile cap was really about
+// 29, and the looseness was worst exactly where the ceiling matters most, since
+// retransmissions are what a slow or filtered embedded device produces.
+//
+// Amending ADR-024 to say "attempts" was the other repair and it is the wrong
+// direction: the number that protects a device is packets it has to process,
+// and a ceiling defined by whatever the implementation happened to count is not
+// a ceiling.
+//
+// Charged one at a time rather than as a lump, so a multi-packet attempt is
+// paced across the interval rather than draining a burst allowance at once.
+func (b *bucket) takeN(ctx context.Context, n uint32) error {
+	for range n {
+		if err := b.take(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// synCost is how many SYNs the kernel sends before a connect times out.
+//
+// Linux retransmits a SYN on an exponential backoff from an initial RTO of one
+// second, so the attempts land at t=0, 1, 3, 7, 15… A three-second connect
+// timeout therefore costs three SYNs, which is what the audit measured (2.94,
+// the shortfall being attempts that resolved before the last retransmit).
+//
+// A MODEL, not a count: the socket API does not report retransmissions, and
+// reaching the number that did happen needs a raw socket this engine
+// deliberately does not have (ADR-047). It errs high — the boundary case counts
+// the retransmit that races the timeout — because a ceiling that guesses low is
+// not a ceiling.
+func synCost(timeout time.Duration) uint32 {
+	if timeout <= 0 {
+		return 1
+	}
+	syns := uint32(1)
+	// Cumulative delay before the i-th retransmit: 2^i - 1 seconds.
+	for i := 1; i <= 6; i++ {
+		delay := time.Duration((1<<uint(i))-1) * time.Second
+		if delay > timeout {
+			break
+		}
+		syns++
+	}
+	return syns
+}
+
+// establishedCost is what a connection that actually opens costs BEYOND its
+// SYN: the ACK completing the handshake, the FIN closing it, and the ACK of the
+// peer's FIN.
+//
+// Three, arrived at by MEASURING rather than by counting the diagram. Two was
+// the first value and the safety gate reported a wire-to-charged ratio of 1.18
+// — an eighteen percent undercount, which is the direction a ceiling must never
+// lean. At three the model and the wire agree.
+//
+// Charged after the fact, because whether a port answers is not knowable before
+// the attempt. The peer's own packets are not charged: the ceiling is about what
+// this scan point sends.
+const establishedCost = 3
+
 // take blocks until one token is available or ctx ends.
 //
 // Returns ctx.Err() on cancellation so a kill switch is not delayed by the rate

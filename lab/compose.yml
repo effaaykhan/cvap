@@ -95,6 +95,18 @@ services:
       segment-a:
         ipv4_address: 10.10.0.20
 
+  # The filtered host. See targets/filtered/Dockerfile: reachable at layer 2 and
+  # silently dropping SYNs, which is the only way the SYN-retransmit path gets
+  # exercised — every other target here answers or refuses instantly.
+  target-a-filtered:
+    build: ./targets/filtered
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    networks:
+      segment-a:
+        ipv4_address: 10.10.0.30
+
 networks:
   segment-a:
     internal: true

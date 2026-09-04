@@ -9,7 +9,7 @@ import (
 // Mutations, declared beside the tests that must kill them.
 //
 // mutate:subject internal/engines/discovery/ratelimit.go
-// mutate:test    ./internal/engines/discovery/ -run TestTheBucket|TestBackOff|TestTakeHonours|TestAnIdlePeriod
+// mutate:test    ./internal/engines/discovery/ -run TestTheBucket|TestBackOff|TestTakeHonours|TestAnIdlePeriod|TestTheBudgetIsCharged|TestAMultiPacket
 //
 // The -run regex is part of the declaration and gets stale the same way an
 // anchor does: two mutations survived because TestAnIdlePeriod — written in the
@@ -37,6 +37,19 @@ import (
 // mutate:case    back-off raises the rate instead of lowering it
 // mutate:old     b.rate /= 2
 // mutate:new     b.rate *= 2
+//
+// mutate:case    a connect attempt is charged one packet regardless of retransmits
+// mutate:old     for i := 1; i <= 6; i++ {
+// mutate:new     for i := 1; i <= 0; i++ {
+//
+// `syns := uint32(1)` -> `return 1` was the obvious form and it leaves the rest
+// of the function referencing an undeclared variable, so the mutant does not
+// compile and tests nothing. Emptying the loop reaches the same behaviour — one
+// packet charged per attempt, whatever the timeout — and compiles.
+//
+// mutate:case    a multi-packet attempt is charged as a lump
+// mutate:old     for range n {
+// mutate:new     for range 1 {
 //
 // mutate:case    a token wait ignores cancellation
 // mutate:old     case <-ctx.Done():
@@ -229,4 +242,62 @@ func TestBackOffLowersTheBurstCeilingToo(t *testing.T) {
 	if b.capacity > burstFor(b.rate) {
 		t.Errorf("capacity %v exceeds the burst for the current rate %v", b.capacity, b.rate)
 	}
+}
+
+// TestTheBudgetIsChargedInPacketsNotAttempts.
+//
+// ============================================================================
+// ADR-024's table is packets per second. A connect attempt is not one packet.
+// ============================================================================
+//
+// The bucket charged one token per attempt, which a packet-capture audit
+// measured as 2.94 SYNs against a filtered host — so the 10 pps fragile cap was
+// really about 29, and the looseness was worst exactly where the ceiling matters
+// most, since retransmissions are what a slow embedded device produces.
+//
+// Amending ADR-024 to say "attempts" was the other repair and it is the wrong
+// direction: the number that protects a device is packets it has to process.
+func TestTheBudgetIsChargedInPacketsNotAttempts(t *testing.T) {
+	for _, tc := range []struct {
+		timeout time.Duration
+		want    uint32
+		why     string
+	}{
+		{0, 1, "no timeout given: charge the one SYN we know about"},
+		{500 * time.Millisecond, 1, "under a second: no retransmit fits"},
+		{time.Second, 2, "the first retransmit lands at 1s"},
+		{3 * time.Second, 3, "the platform default; the audit measured 2.94 SYNs here"},
+		{7 * time.Second, 4, "0, 1, 3, 7"},
+	} {
+		if got := synCost(tc.timeout); got != tc.want {
+			t.Errorf("synCost(%v) = %d, want %d — %s", tc.timeout, got, tc.want, tc.why)
+		}
+	}
+}
+
+// TestAMultiPacketAttemptIsPacedNotBursted.
+//
+// Charging three tokens for a three-packet attempt is only half of it: taken as
+// a lump they would drain a burst allowance at once. Taken one at a time the
+// attempt is paced across the interval, which is what the device experiences.
+func TestAMultiPacketAttemptIsPacedNotBursted(t *testing.T) {
+	now := time.Now()
+	b := newBucket(10, func() time.Time { return now })
+
+	// One token is available at construction; a three-packet attempt needs two
+	// more, and at 10 pps each takes 100ms of clock that is not advancing.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- b.takeN(ctx, 3) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("a three-packet attempt was charged instantly (%v); the ceiling would be "+
+			"exceeded by exactly the multiplier this fix exists to close", err)
+	case <-time.After(50 * time.Millisecond):
+		// Correct: still waiting for the second and third tokens.
+	}
+	cancel()
+	<-done
 }
