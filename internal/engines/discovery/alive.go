@@ -2,7 +2,6 @@ package discovery
 
 import (
 	"context"
-	"errors"
 	"net"
 	"strconv"
 )
@@ -48,20 +47,86 @@ func probeAlive(ctx context.Context, cfg Config, address string, limiter *bucket
 		if err := limiter.take(ctx); err != nil {
 			return false, "cancelled"
 		}
-		count(1)
 
 		d := net.Dialer{Timeout: cfg.ConnectTimeout}
 		conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(address, strconv.Itoa(int(port))))
 		if err == nil {
+			count(1)
 			_ = conn.Close()
 			return true, "tcp-connect:" + strconv.Itoa(int(port))
 		}
-		// A REFUSED connection proves a host is there just as well as an
-		// accepted one — something sent the RST. Only a timeout is silence.
-		var ne net.Error
-		if !errors.As(err, &ne) || !ne.Timeout() {
-			return true, "tcp-refused:" + strconv.Itoa(int(port))
+
+		// ================================================================
+		// Only a REFUSAL proves a host. Everything else is silence or a
+		// local failure, and neither is evidence of anything.
+		// ================================================================
+		//
+		// The first version was `not a timeout, therefore alive`, which folded
+		// ECONNREFUSED together with ENETUNREACH, EHOSTUNREACH, a DNS failure
+		// and a malformed address. A packet-capture audit measured three hosts
+		// reported alive at confidence 1.0 with ZERO outbound packets — the
+		// kernel had refused to route and the engine called it a live host.
+		//
+		// Core derives assets from observations, so a sweep of a range that is
+		// mostly unroutable would fabricate an asset per address at full
+		// confidence. A false finding is the thing this product cannot afford.
+		if !isRefused(err) {
+			// Nothing left the machine on this attempt, so nothing is charged
+			// against the rate budget either — see below.
+			continue
 		}
+		count(1)
+		return true, "tcp-refused:" + strconv.Itoa(int(port))
 	}
 	return false, "no-response"
+}
+
+// isRefused reports whether the error is an active refusal — a RST from
+// something that exists.
+//
+// A refusal proves a host as well as an accepted connection does: something sent
+// the reset. A timeout proves nothing, and a routing or resolution failure
+// proves only that this machine could not ask.
+//
+// # Why this compares a string
+//
+// The clean expression is errors.Is(err, syscall.ECONNREFUSED), and `syscall` is
+// not on this engine's import allowlist — it is the raw-socket path ADR-047's
+// deferral exists to keep out, and widening the exception to name one constant
+// would be the cheapest possible reason to take it.
+//
+// Go's syscall.Errno.Error() renders from a fixed internal table and is not
+// localised, so the text is stable on a given platform. That is a weaker
+// guarantee than a constant and it is why TestRefusalIsDistinguishedFromEveryOther
+// drives a REAL refusal and a REAL unreachable address rather than constructing
+// errors: if this ever stops classifying correctly, a test fails rather than a
+// scan quietly inventing hosts.
+//
+// It errs toward NOT alive. A refusal misread as something else loses a host
+// from the results, which is visible in the coverage record; the opposite
+// fabricates an asset at full confidence, which is a false finding.
+func isRefused(err error) bool {
+	// The unwrap chain is walked by hand, and NOT via os.SyscallError.
+	//
+	// The obvious expression is errors.As(err, &*os.SyscallError) — and `os` is
+	// not on this engine's allowlist either, because os.StartProcess spawns a
+	// subprocess without naming os/exec. The guard caught that; the first
+	// version of this function imported it.
+	//
+	// An EXACT match on each level's message, never a substring of the whole
+	// error: the full text is "dial tcp 1.2.3.4:80: connect: connection
+	// refused", and a substring test against that would also match a hostname
+	// that happened to contain the phrase. Only the innermost errno renders as
+	// exactly "connection refused".
+	for e := err; e != nil; {
+		if e.Error() == "connection refused" {
+			return true
+		}
+		u, ok := e.(interface{ Unwrap() error }) //nolint:errorlint // walking deliberately
+		if !ok {
+			return false
+		}
+		e = u.Unwrap()
+	}
+	return false
 }

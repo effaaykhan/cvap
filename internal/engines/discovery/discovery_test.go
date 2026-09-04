@@ -3,6 +3,7 @@ package discovery
 import (
 	"encoding/json"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -342,4 +343,95 @@ func decodeBase64(t *testing.T, s string) []byte {
 		t.Fatalf("decode banner: %v", err)
 	}
 	return out
+}
+
+// TestRefusalIsDistinguishedFromEveryOtherFailure.
+//
+// ============================================================================
+// A packet-capture audit measured three hosts reported alive at confidence 1.0
+// with ZERO outbound packets.
+// ============================================================================
+//
+// The classifier was "not a timeout, therefore alive", which folded
+// ECONNREFUSED together with ENETUNREACH, EHOSTUNREACH and a DNS failure. Core
+// derives assets from observations, so a sweep of a mostly-unroutable range
+// would fabricate an asset per address at full confidence.
+//
+// Real errors, not constructed ones: isRefused compares syscall text because
+// `syscall` is not on this engine's import allowlist, and a test built from
+// fabricated errors would prove nothing about what the platform actually
+// returns.
+func TestRefusalIsDistinguishedFromEveryOtherFailure(t *testing.T) {
+	// A real refusal: nothing listening on a port that was just released.
+	closed := freePort(t)
+	_, refusedErr := net.DialTimeout("tcp",
+		net.JoinHostPort("127.0.0.1", strconv.Itoa(int(closed))), time.Second)
+	if refusedErr == nil {
+		t.Fatal("expected a refusal from a closed loopback port")
+	}
+	if !isRefused(refusedErr) {
+		t.Errorf("a real refusal was not recognised: %v (%T). Hosts that exist would be "+
+			"reported as absent.", refusedErr, refusedErr)
+	}
+
+	// A real routing failure. Which address produces one is platform-specific,
+	// so it was found by MEASURING rather than assumed: 0.0.0.0 and 127.x give a
+	// genuine refusal via loopback (and reporting those alive is correct),
+	// 240.0.0.1 and TEST-NET time out, and the broadcast address is what the
+	// kernel refuses to route.
+	_, unreachErr := net.DialTimeout("tcp", "255.255.255.255:80", 2*time.Second)
+	if unreachErr == nil {
+		t.Fatal("expected a routing failure for the broadcast address")
+	}
+	if isRefused(unreachErr) {
+		t.Errorf("a routing failure was classified as a refusal: %v. Nothing left the "+
+			"machine, so there is no evidence of a host.", unreachErr)
+	}
+
+	// A timeout is not a refusal either.
+	_, timeoutErr := net.DialTimeout("tcp", "192.0.2.1:80", 200*time.Millisecond)
+	if timeoutErr != nil && isRefused(timeoutErr) {
+		t.Errorf("a timeout was classified as a refusal: %v", timeoutErr)
+	}
+	if isRefused(nil) {
+		t.Error("a nil error was classified as a refusal")
+	}
+}
+
+// TestAnUnroutableTargetIsNotReportedAliveAndCostsNoBudget.
+//
+// The audit's exact case: three targets, zero outbound packets, three hosts
+// reported alive with a `sent` count of nine packets that never existed.
+func TestAnUnroutableTargetIsNotReportedAliveAndCostsNoBudget(t *testing.T) {
+	cfg := baseConfig(freePort(t))
+	cfg.ConnectTimeout = 300 * time.Millisecond
+
+	var host Observation
+	var sentTotal uint32
+	err := Run(t.Context(), cfg, []Target{{TaskID: "t", Value: "255.255.255.255"}},
+		func(o Observation) error {
+			if o.Type == "host" {
+				host = o
+			}
+			return nil
+		},
+		func(n uint32) { sentTotal += n })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var p map[string]any
+	if e := json.Unmarshal(host.Payload, &p); e != nil {
+		t.Fatal(e)
+	}
+	if p["alive"] == true {
+		t.Errorf("an unroutable address was reported alive (method=%v). Core derives assets "+
+			"from these; at scale that is one fabricated asset per unroutable address.",
+			p["method"])
+	}
+	if sentTotal != 0 {
+		t.Errorf("the engine reported %d packet(s) sent for a target the kernel would not "+
+			"route to. Nothing left the machine, and the runtime reclaims rate allocation "+
+			"from this number.", sentTotal)
+	}
 }

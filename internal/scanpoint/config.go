@@ -130,6 +130,12 @@ func (c Config) validate() error {
 // policy may LOWER them and may never raise them, so the runtime takes the
 // minimum of what Core sent and what it knows.
 const (
+	// PlatformMaxRatePPS is ADR-024's per-SCAN-POINT ceiling, and until the
+	// allocator existed it was read by nothing: every job built its own bucket
+	// at the per-target rate with no shared budget, so a scan point's total was
+	// linear in how many jobs it happened to hold.
+	PlatformMaxRatePPS = 1000
+
 	PlatformMaxRatePerTarget       = 50
 	PlatformFragileRatePPS         = 10
 	PlatformMaxConcurrentPerTarget = 20

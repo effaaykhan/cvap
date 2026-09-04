@@ -1,6 +1,7 @@
 package scanpoint
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -148,5 +149,122 @@ func TestEveryProbeIsBoundedAndCarriesNoTarget(t *testing.T) {
 					"target the runtime already authorised.", p.Name, addr)
 			}
 		}
+	}
+}
+
+// TestAFragileTargetGetsNoProbesEvenWhenIntrusive.
+//
+// ADR-024 control 3 is that fragile "suppresses aggressive checks AND caps
+// rate". Only the rate half existed: probes were chosen from safety_mode alone
+// and Target.Fragile was read by nothing in the engine at all. A packet-capture
+// audit measured a HEAD request and a bare newline arriving at a device marked
+// fragile — a printer or a PLC, which is what the flag is for.
+func TestAFragileTargetGetsNoProbesEvenWhenIntrusive(t *testing.T) {
+	fragile := &job{
+		constraints: &scanpointv1.ScanConstraints{SafetyMode: SafetyIntrusive},
+		tasks: []*scanpointv1.Task{
+			{TaskId: "t1", Target: "192.0.2.5"},
+			{TaskId: "t2", Target: "192.0.2.6", Fragile: true},
+		},
+	}
+	if got := fragile.budget().Probes; len(got) != 0 {
+		t.Errorf("a job containing a fragile target was handed %d probe(s). Suppressing "+
+			"aggressive checks is half of what the flag means.", len(got))
+	}
+
+	// The control: without a fragile target, an intrusive job still gets them.
+	ordinary := &job{
+		constraints: &scanpointv1.ScanConstraints{SafetyMode: SafetyIntrusive},
+		tasks:       []*scanpointv1.Task{{TaskId: "t1", Target: "192.0.2.5"}},
+	}
+	if len(ordinary.budget().Probes) == 0 {
+		t.Error("an intrusive job with no fragile target was handed no probes")
+	}
+}
+
+// TestNoProbeReachesAPortWhereBytesAreNotInert.
+//
+// A bare newline was sent to EVERY open port because the probe declared none.
+// 9100 is raw print, where a line is a print job; 502 is Modbus and 102 is S7,
+// where unsolicited bytes reach a PLC's protocol stack. Invariant 9: detection
+// establishes evidence without achieving impact, and printing a page is impact.
+func TestNoProbeReachesAPortWhereBytesAreNotInert(t *testing.T) {
+	// Ports where an unsolicited payload does something rather than nothing.
+	dangerous := map[uint32]string{
+		9100:  "raw print (JetDirect) — a bare line is a print job",
+		515:   "LPD",
+		631:   "IPP",
+		502:   "Modbus",
+		102:   "S7 / ISO-TSAP",
+		20000: "DNP3",
+		47808: "BACnet",
+	}
+
+	for _, p := range ProbeCorpus() {
+		if len(p.Ports) == 0 {
+			t.Errorf("probe %q declares no ports, so it is sent to EVERY open port including "+
+				"industrial and printing ones", p.Name)
+			continue
+		}
+		for _, port := range p.Ports {
+			if why, bad := dangerous[port]; bad {
+				t.Errorf("probe %q targets port %d: %s", p.Name, port, why)
+			}
+		}
+	}
+}
+
+// TestThePerScanPointCeilingIsDividedNotHandedOutWhole.
+//
+// ============================================================================
+// ADR-024's 1,000 pps per scan point was read by no code at all.
+// ============================================================================
+//
+// Two of the ADR's three rate ceilings bound: job.budget clamps per-target and
+// fragile. The per-scan-point figure was a number in a table — each job built
+// its own bucket with nothing subtracting from a shared budget.
+//
+// Survivable while a scan planned ONE job. Chunking made it reachable in a
+// single scan: a /24 plans eight jobs, dispatch hands out five, and a
+// packet-capture audit measured 262 pps aggregate from one scan point at a 50
+// pps allocation — linear in engine count.
+func TestThePerScanPointCeilingIsDividedNotHandedOutWhole(t *testing.T) {
+	a := newAllocator(100)
+
+	if got := a.acquire("job-1"); got != 100 {
+		t.Errorf("a lone job got %d pps, want the whole ceiling of 100", got)
+	}
+	if got := a.acquire("job-2"); got != 50 {
+		t.Errorf("the second concurrent job got %d pps, want 50 — half of the scan point's "+
+			"budget, not another full slice", got)
+	}
+	if got := a.acquire("job-3"); got != 33 {
+		t.Errorf("the third got %d pps, want 33", got)
+	}
+
+	// Releasing gives the budget back, or a scan point degrades permanently
+	// after a busy period.
+	a.release("job-2")
+	a.release("job-3")
+	if got := a.acquire("job-4"); got != 50 {
+		t.Errorf("after two releases a new job got %d pps, want 50 (two holders)", got)
+	}
+}
+
+// TestTheAllocatorNeverHandsOutZero.
+//
+// A scan point holding more jobs than its ceiling in pps would otherwise
+// allocate nothing and stall every one of them — turning a rate control into a
+// deadlock. Core's maxJobsPerPoll is the lever for "too many concurrent jobs";
+// this is only the floor that keeps the failure visible rather than silent.
+func TestTheAllocatorNeverHandsOutZero(t *testing.T) {
+	a := newAllocator(4)
+	for i := range 20 {
+		if got := a.acquire(fmt.Sprintf("job-%d", i)); got < 1 {
+			t.Fatalf("job %d was allocated %d pps", i, got)
+		}
+	}
+	if a.held() != 20 {
+		t.Errorf("held() = %d, want 20", a.held())
 	}
 }

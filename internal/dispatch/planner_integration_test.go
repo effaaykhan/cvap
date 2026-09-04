@@ -112,7 +112,6 @@ func TestPlanningWritesCanonicalTargets(t *testing.T) {
 	scanID := createScan(t, db, tenant, policyID, "discovery", []store.ScanTarget{
 		{Type: "host", Value: "192.0.2.5:443", Authorized: true},
 		{Type: "host", Value: "[192.0.2.5]", Authorized: true},
-		{Type: "url", Value: "https://SCANNER.corp.example/status", Authorized: true},
 		{Type: "cidr", Value: "198.51.100.0/30", Authorized: true},
 	})
 
@@ -126,7 +125,6 @@ func TestPlanningWritesCanonicalTargets(t *testing.T) {
 	want := []string{
 		"192.0.2.5", "192.0.2.5", // two spellings, one canonical form each
 		"198.51.100.0", "198.51.100.1", "198.51.100.2", "198.51.100.3",
-		"scanner.corp.example",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("task targets = %v\nwant %v", got, want)
@@ -291,5 +289,50 @@ func TestAScanIsChunkedIntoSeveralJobs(t *testing.T) {
 		t.Errorf("a /26 planned %d job(s), want %d at %d tasks each. One job for a whole range "+
 			"means one scan point does all of it and a lease loss requeues the lot.",
 			jobs, want, dispatch.TasksPerJob)
+	}
+}
+
+// TestAHostnameTargetFailsADiscoveryScan.
+//
+// ============================================================================
+// This test used to assert the opposite, and the opposite was a scope bypass.
+// ============================================================================
+//
+// A url or hostname target planned fine and became a task the discovery engine
+// would dial — net.Dialer resolves the name and connects to whatever comes back,
+// with no site checking the answer. internal/scope matches hostname rules by
+// string equality and says so in its own comment.
+//
+// A packet-capture audit drove it: allow a name, exclude the address it resolves
+// to, and ten packets arrived at a host both enforcement sites had refused. The
+// scan now fails at PLANNING, where an operator is told, rather than at the wire
+// where nobody is.
+func TestAHostnameTargetFailsADiscoveryScan(t *testing.T) {
+	db, tenant, policyID := planFixture(t)
+	scanID := createScan(t, db, tenant, policyID, "discovery", []store.ScanTarget{
+		{Type: "host", Value: "192.0.2.5", Authorized: true},
+		{Type: "url", Value: "https://scanner.corp.example/status", Authorized: true},
+	})
+
+	planOnce(t, db, tenant)
+
+	if got := scanStatus(t, db, tenant, scanID); got != store.ScanFailed {
+		t.Errorf("status = %q, want failed", got)
+	}
+	if got := taskTargets(t, db, tenant, scanID); len(got) != 0 {
+		t.Errorf("a hostname target produced %d planned tasks; the scan must plan nothing", len(got))
+	}
+
+	var reason string
+	if err := db.Read(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		return c.QueryRow(ctx,
+			`SELECT detail->>'reason' FROM audit_events
+			  WHERE tenant_id = $1 AND action = 'scan.planning_failed' AND resource_id = $2`,
+			tenant.UUID(), scanID).Scan(&reason)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reason, "scanner.corp.example") {
+		t.Errorf("the audit event does not name the offending target: %q", reason)
 	}
 }

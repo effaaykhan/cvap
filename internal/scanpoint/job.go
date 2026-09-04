@@ -183,8 +183,10 @@ func (j *job) budget() engineBudget {
 	// and the platform default applies rather than "no limit".
 	rate := clampCeiling(c.GetMaxRatePerTarget(), PlatformMaxRatePerTarget)
 
+	var anyFragile bool
 	for _, t := range j.tasks {
 		if t.GetFragile() {
+			anyFragile = true
 			// ADR-024 control 3: fragile caps rate REGARDLESS of what the
 			// policy permits. The runtime holds the 10 pps number itself, so
 			// the cap applies even when Core sends 0 or forgets the field —
@@ -197,6 +199,27 @@ func (j *job) budget() engineBudget {
 		}
 	}
 
+	// ========================================================================
+	// A FRAGILE target gets no probes, whatever the mode says.
+	// ========================================================================
+	//
+	// ADR-024 control 3 is that fragile "suppresses aggressive checks AND caps
+	// rate". Only the rate half existed: probes were decided from safety_mode
+	// alone, and Target.Fragile was read by nothing in the engine at all — a
+	// packet-capture audit measured a HEAD request and a bare newline going to a
+	// device marked fragile.
+	//
+	// Suppressed HERE rather than in the engine, for the reason the whole probe
+	// mechanism is here: an engine cannot send what it was never handed, and a
+	// flag it is trusted to honour is not the same guarantee.
+	//
+	// Whole-job rather than per-target, because probes travel once per job. That
+	// is deliberately conservative — one fragile target costs the whole job its
+	// probes, which loses some service identification and cannot harm anything.
+	// Per-target probe sets would need the engine to hold a mapping, which is
+	// more contract for a case chunking makes rare: a job is 32 targets from one
+	// planning pass.
+	//
 	// Probes travel ONLY under an intrusive mode, and the emptiness is the
 	// control rather than the mode string (ADR-021, and engineHost.start).
 	//
@@ -210,7 +233,7 @@ func (j *job) budget() engineBudget {
 	// know, yields no probes — the same direction clampCeiling takes for an
 	// absent rate.
 	var probes []enginewire.Probe
-	if c.GetSafetyMode() == SafetyIntrusive {
+	if c.GetSafetyMode() == SafetyIntrusive && !anyFragile {
 		probes = ProbeCorpus()
 	}
 

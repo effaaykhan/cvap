@@ -76,7 +76,22 @@ DEFAULT_SCOPE = [
 # not match, because the name is followed by . or / rather than by a separator.
 SCAN_TOOLS = re.compile(
     r"(?:^|[\s;&|(/.'\"`=])"
-    r"(cvap-scanpoint|cvap-cli|cvap-core|nmap|masscan|zmap|zgrab\w*|nuclei|"
+    # cvap-engine-discovery is the ONE binary in this repository that can put a
+    # packet on a wire (ADR-047), and it was the one name missing here. A
+    # packet-capture audit measured `/tmp/eng < job.json`, `go run
+    # ./cmd/cvap-engine-discovery` and an explicit out-of-scope literal all
+    # allowed, while `cvap-scanpoint` — which cannot itself send a scan packet —
+    # was blocked. CLAUDE.md non-negotiable 10 did not hold for the code that
+    # commit added.
+    #
+    # The name alone is necessary and not sufficient, and that is worth stating
+    # rather than leaving to be rediscovered: a binary built to /tmp/eng matches
+    # nothing here, and this engine takes its targets as JSON on stdin where no
+    # regex can see them. The `<` and `cat` arms of looks_indirect below are what
+    # actually catch that shape — which is why the engine is added to SCAN_TOOLS
+    # rather than to SOFT_TOOLS.
+    r"(cvap-scanpoint|cvap-engine-discovery|cvap-engine-\w+|cvap-cli|cvap-core|"
+    r"nmap|masscan|zmap|zgrab\w*|nuclei|"
     r"hping3?|nping|arp-scan|fping|netcat|ncat|nc|telnet|ssh|"
     r"sslscan|testssl(?:\.sh)?|sqlmap|nikto|gobuster|ffuf|dirb|hydra|medusa)"
     # The suffix class mirrors the prefix for the same reason: CMD=nmap; leaves
@@ -217,7 +232,10 @@ def main():
     # A scan tool with no literal address may be reading targets from a file or
     # a variable, which this guard cannot evaluate.
     if is_scan and not targets(command):
-        looks_indirect = re.search(r"(-i\w*\s|--target|--input|\$\{?\w+|<|\bcat\b)", command)
+        # `|` added: this engine reads its job from stdin, so `echo '{...}' |
+        # cvap-engine-discovery` carries targets no regex here can see — the same
+        # unverifiable shape as `< file`, arrived at from the other side.
+        looks_indirect = re.search(r"(-i\w*\s|--target|--input|\$\{?\w+|<|\||\bcat\b)", command)
         if looks_indirect:
             print(
                 "BLOCKED by lab-scope-guard: scanning tool invoked with targets from a file "

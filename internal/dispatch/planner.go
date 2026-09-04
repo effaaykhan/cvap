@@ -107,7 +107,7 @@ func PlanScan(ctx context.Context, db *store.DB, tenant store.TenantID, scanID u
 				return fmt.Errorf("%w: target %s (%s)", store.ErrTargetNotAuthorized, t.ID, t.Value)
 			}
 
-			expanded, err := expand(t.Value)
+			expanded, err := expandFor(engine, t.Value)
 			if err != nil {
 				return fmt.Errorf("target %s: %w", t.ID, err)
 			}
@@ -146,6 +146,71 @@ func PlanScan(ctx context.Context, db *store.DB, tenant store.TenantID, scanID u
 	})
 
 	return planned, err
+}
+
+// ErrHostnameTargetUnresolvable means a hostname was planned for an engine that
+// dials.
+var ErrHostnameTargetUnresolvable = errors.New(
+	"dispatch: a hostname cannot be a target for an engine that opens connections")
+
+// expandFor is expand, plus the rule that a DIALLING engine gets addresses.
+//
+// ============================================================================
+// A hostname target is a scope bypass the moment anything resolves it.
+// ============================================================================
+//
+// internal/scope matches hostname rules by string equality and says so in its
+// own comment: "a hostname rule does not cover the address that name resolves
+// to, in either direction". That was a documented consequence for as long as
+// nothing in this repository could dial. The discovery engine made it a send
+// path — net.Dialer resolves the name and connects to whatever comes back, and
+// no site checks the answer.
+//
+// A packet-capture audit drove it: allow `printer.corp.example`, exclude
+// `10.10.0.20`, point the name at the excluded host, and ten packets arrived at
+// an address both enforcement sites had refused.
+//
+// Resolving HERE and re-authorising each answer is the other repair, and it is
+// the one internal/scope explicitly rejects: "a resolution done at planning is a
+// different answer from the one the scan point would get, and an allowlist that
+// depends on which side asked is not an allowlist". So the target is refused
+// instead, and refused at PLANNING where an operator can be told, rather than
+// silently at the wire.
+//
+// It is per-engine because a hostname is a perfectly good target for something
+// that does not open a connection to it. Engines that dial are named here rather
+// than inferred, so adding one is a decision somebody makes.
+func expandFor(engine store.Engine, declared string) ([]string, error) {
+	out, err := expand(declared)
+	if err != nil {
+		return nil, err
+	}
+	if !dialsTargets[engine] {
+		return out, nil
+	}
+	for _, v := range out {
+		if !isAddress(v) {
+			return nil, fmt.Errorf("%w: %q is a name, and %s connects to what it is given",
+				ErrHostnameTargetUnresolvable, v, engine)
+		}
+	}
+	return out, nil
+}
+
+// dialsTargets names the engines that open a connection to their target.
+//
+// An allowlist of what dials, not a denylist of what does not: an engine added
+// later is assumed not to dial until somebody says it does, and the cost of
+// being wrong in that direction is a refused hostname rather than a scope
+// bypass.
+var dialsTargets = map[store.Engine]bool{
+	store.EngineDiscovery:   true,
+	store.EngineFingerprint: true,
+}
+
+func isAddress(v string) bool {
+	_, err := netip.ParseAddr(v)
+	return err == nil
 }
 
 // expand reduces one declared target to the canonical task targets it names.

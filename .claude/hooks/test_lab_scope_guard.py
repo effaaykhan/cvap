@@ -90,6 +90,16 @@ CASES: list[tuple[str, str, str]] = [
     ("command substitution", "echo `nmap 198.18.0.1`", BLOCK),
     ("tool name assigned to a variable", "CMD=nmap; $CMD 198.18.0.1", BLOCK),
     ("quoting does not launder an in-scope target", 'bash -c "nmap 10.10.0.11"', ALLOW),
+    # --- the engine that can actually send (ADR-047) ---
+    #
+    # A packet-capture audit measured every one of these ALLOWED while
+    # cvap-scanpoint, which cannot itself send a scan packet, was blocked.
+    # CLAUDE.md non-negotiable 10 did not hold for the one binary it is about.
+    ("engine, out-of-scope literal", "cvap-engine-discovery --targets 93.184.216.34", BLOCK),
+    ("engine, job from a file", "cvap-engine-discovery < job.json", BLOCK),
+    ("engine, job from a pipe", "echo '{}' | cvap-engine-discovery", BLOCK),
+    ("engine via go run", "go run ./cmd/cvap-engine-discovery < job.json", BLOCK),
+    ("engine, in-scope literal", "cvap-engine-discovery --targets 10.10.0.11", ALLOW),
 ]
 
 

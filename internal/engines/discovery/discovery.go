@@ -134,10 +134,63 @@ func Run(ctx context.Context, cfg Config, targets []Target, emit Emit, sent Sent
 		return errors.New("discovery: no rate budget; the runtime allocates one and zero is not a rate")
 	}
 
+	// A ceiling of this engine's own, beneath whatever it was allocated.
+	//
+	// ADR-024 argues that duplicating a control is deliberate, and until now the
+	// single clamp in the runtime's job.budget and the single authorise in
+	// enginehost were the only things between a Core value and the wire. These
+	// cost one comparison each and mean a runtime bug cannot hand this engine a
+	// number the ADR forbids.
+	//
+	// The platform figures are hard-coded rather than read from configuration
+	// for the same reason the runtime hard-codes the fragile cap: a ceiling that
+	// arrives over the same channel as the value it bounds is not a ceiling.
+	if cfg.RatePPS > platformMaxRatePerTarget {
+		cfg.RatePPS = platformMaxRatePerTarget
+	}
+	if cfg.MaxConcurrentPerTarget > platformMaxConcurrentPerTarget {
+		cfg.MaxConcurrentPerTarget = platformMaxConcurrentPerTarget
+	}
+	if cfg.ConnectTimeout > platformMaxConnectTimeout {
+		cfg.ConnectTimeout = platformMaxConnectTimeout
+	}
+
 	for _, t := range targets {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+
+		// ================================================================
+		// An ADDRESS, or nothing. This engine does not resolve names.
+		// ================================================================
+		//
+		// net.Dialer resolves a hostname and connects to whatever comes back,
+		// and NOBODY checks that answer. internal/scope matches hostname rules
+		// by string equality and says so outright — "a hostname rule does not
+		// cover the address that name resolves to, in either direction" — which
+		// was a documented consequence while nothing in this repository could
+		// dial. This engine made it a send path.
+		//
+		// A packet-capture audit drove it end to end: allow `printer.corp.example`,
+		// exclude `10.10.0.20`, point the name at the excluded host, and ten
+		// packets arrived at an address both enforcement sites had refused. The
+		// resolver traffic is a second problem — two UDP/53 queries per connect,
+		// to a resolver nobody authorised, naming every target.
+		//
+		// Refused here as well as at planning, because ADR-024's two sites exist
+		// precisely so that neither has to be the only one. It costs one parse.
+		if net.ParseIP(t.Value) == nil {
+			if err := emit(observation(t.TaskID, "host", hostPayload{
+				Address: t.Value, Alive: false, Method: "refused",
+				Detail: "not an IP address; this engine resolves no names because nothing " +
+					"would check the answer",
+				SafetyMode: cfg.SafetyMode,
+			}, 0)); err != nil {
+				return err
+			}
+			continue
+		}
+
 		if err := scanTarget(ctx, cfg, t, ports, emit, sent); err != nil {
 			// A per-target failure does not abandon the rest. A host that
 			// refuses every connection is a normal outcome, and treating it as
@@ -487,3 +540,11 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
+
+// The ADR-024 platform ceilings this engine will not exceed whatever it is
+// handed. Duplicates of the runtime's, deliberately: two sites, per ADR-024.
+const (
+	platformMaxRatePerTarget       = 50
+	platformMaxConcurrentPerTarget = 20
+	platformMaxConnectTimeout      = 3 * time.Second
+)

@@ -60,10 +60,29 @@ func ProbeCorpus() []enginewire.Probe {
 			ReadBytes: 8 << 10,
 		},
 		{
-			// A newline, to services that answer a bare line with a usage
-			// message or an error banner. Costs one byte and identifies several
-			// text protocols that stay silent on connect.
-			Name:      "newline",
+			// ============================================================
+			// A newline is NOT inert, and this probe is port-scoped for it.
+			// ============================================================
+			//
+			// It was written with no Ports, which means every open port —
+			// and a packet-capture audit pointed out where that lands: 9100
+			// is raw print, where a bare line is a print job; 502 is Modbus
+			// and 102 is S7, where unsolicited bytes reach a PLC's protocol
+			// stack. Invariant 9 is that detection establishes evidence
+			// without achieving impact, and printing a page is impact.
+			//
+			// Scoped to text protocols that answer a bare line with a
+			// banner or a syntax error and do nothing else with it.
+			Name: "newline",
+			Ports: []uint32{
+				21,   // FTP
+				25,   // SMTP
+				110,  // POP3
+				119,  // NNTP
+				143,  // IMAP
+				587,  // submission
+				1723, // PPTP
+			},
 			Payload:   []byte("\r\n"),
 			ReadBytes: 4 << 10,
 		},

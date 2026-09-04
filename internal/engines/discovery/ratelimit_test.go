@@ -12,8 +12,16 @@ import (
 // mutate:test    ./internal/engines/discovery/ -run TestTheBucket|TestBackOff|TestTakeHonours
 //
 // mutate:case    the bucket starts full, bursting at the rate ceiling
-// mutate:old     capacity: cap, tokens: 1,
-// mutate:new     capacity: cap, tokens: cap,
+// mutate:old     tokens:   1,
+// mutate:new     tokens:   burstFor(ratePPS),
+//
+// mutate:case    an idle period re-banks a full second of burst
+// mutate:old     burst := ratePPS / 10
+// mutate:new     burst := ratePPS
+//
+// mutate:case    backing off leaves the burst ceiling where it was
+// mutate:old     b.capacity = burstFor(b.rate)
+// mutate:new     _ = burstFor(b.rate)
 //
 // mutate:case    back-off raises the rate instead of lowering it
 // mutate:old     b.rate /= 2
@@ -131,5 +139,83 @@ func TestTakeHonoursCancellation(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Error("take did not return within 2s of cancellation; a kill switch would be " +
 			"delayed by the rate limiter")
+	}
+}
+
+// TestAnIdlePeriodDoesNotRebankAFullBurst.
+//
+// ============================================================================
+// The half of the burst fix that the first attempt missed entirely.
+// ============================================================================
+//
+// Starting the bucket at one token stopped the burst at t=0 and did nothing
+// about refill: capacity stayed at the full per-second allocation, so any stall
+// of capacity/rate seconds restored the whole burst. A packet-capture audit
+// measured ten connects inside one millisecond at a device capped at ten per
+// second — 500 pps against a 10 pps ceiling — after a 4.5 second stall.
+//
+// And the stall is the NORMAL path: probeAlive dials the discovery ports
+// serially and blocks a full connect timeout on every silent one, so a quiet
+// host banks a burst before the port scan even starts.
+func TestAnIdlePeriodDoesNotRebankAFullBurst(t *testing.T) {
+	now := time.Now()
+	b := newBucket(10, func() time.Time { return now })
+
+	// Spend the first token, then stall for far longer than the bucket could
+	// ever need to refill.
+	if err := b.take(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(10 * time.Second)
+
+	// How many tokens are available without waiting? Each take that returns
+	// immediately is a packet that leaves in the same instant as the last.
+	immediate := 0
+	for range 20 {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- b.take(ctx) }()
+		select {
+		case err := <-done:
+			cancel()
+			if err != nil {
+				t.Fatalf("take: %v", err)
+			}
+			immediate++
+		case <-time.After(30 * time.Millisecond):
+			cancel()
+			<-done
+			goto counted
+		}
+	}
+counted:
+	// At 10 pps the burst ceiling is a tenth of a second's worth: one.
+	if immediate > 2 {
+		t.Errorf("after a 10s idle period, %d packets could leave in the same instant at a "+
+			"10 pps cap. A device capped at ten per second cannot take ten at once, which "+
+			"is the entire reason the cap exists.", immediate)
+	}
+}
+
+// TestBackOffLowersTheBurstCeilingToo.
+//
+// Halving the rate and leaving capacity alone means a scan adaptively slowed to
+// 3 pps against a struggling host still banks a burst sized for its original
+// allocation, and spends it the moment the host pauses long enough to look idle.
+func TestBackOffLowersTheBurstCeilingToo(t *testing.T) {
+	now := time.Now()
+	b := newBucket(100, func() time.Time { return now })
+
+	before := b.capacity
+	for range 5 {
+		b.backOff()
+	}
+	if b.capacity >= before {
+		t.Errorf("capacity is %v after five back-offs, started at %v — backing off is a "+
+			"statement about how hard this host may be pushed, and a burst ceiling is "+
+			"part of that statement", b.capacity, before)
+	}
+	if b.capacity > burstFor(b.rate) {
+		t.Errorf("capacity %v exceeds the burst for the current rate %v", b.capacity, b.rate)
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/effaaykhan/cvap/internal/store"
+
 	"github.com/effaaykhan/cvap/internal/target"
 )
 
@@ -141,9 +143,52 @@ func TestAnAddressShapedTargetThatWillNotParseIsRefused(t *testing.T) {
 	}
 }
 
-// TestAHostnameIsStillAHostname. The refusal above must not swallow the ordinary
-// case — ADR-040 rejected "refuse everything that is not an address" precisely
-// because it makes a whole match type unusable.
+// TestAHostnameIsRefusedForAnEngineThatDials.
+//
+// ============================================================================
+// A packet-capture audit reached an EXCLUDED host through an allowed hostname.
+// ============================================================================
+//
+// internal/scope matches hostname rules by string equality — its own comment
+// says "a hostname rule does not cover the address that name resolves to, in
+// either direction" — which was a documented consequence while nothing could
+// dial. The discovery engine made it a send path: net.Dialer resolves the name
+// and connects to whatever comes back, and no site checks the answer.
+//
+// Measured: allow `printer.corp.example`, exclude `10.10.0.20`, point the name
+// at the excluded host, and ten packets arrived at an address both enforcement
+// sites had refused.
+func TestAHostnameIsRefusedForAnEngineThatDials(t *testing.T) {
+	for _, name := range []string{"scanner.corp.example", "printer.corp.example", "localhost"} {
+		if _, err := expandFor(store.EngineDiscovery, name); !errors.Is(err, ErrHostnameTargetUnresolvable) {
+			t.Errorf("expandFor(discovery, %q) = %v; a name reaching an engine that dials is "+
+				"a scope decision made by a resolver", name, err)
+		}
+	}
+
+	// An address is fine, which is the point — this refuses names, not targets.
+	if _, err := expandFor(store.EngineDiscovery, "192.0.2.5"); err != nil {
+		t.Errorf("an address was refused for a dialling engine: %v", err)
+	}
+	if _, err := expandFor(store.EngineDiscovery, "192.0.2.0/30"); err != nil {
+		t.Errorf("a prefix was refused for a dialling engine: %v", err)
+	}
+}
+
+// TestAHostnameIsStillAHostnameForEngineesThatDoNotDial.
+//
+// The refusal above is per-engine, not global. ADR-040 rejected "refuse
+// everything that is not an address" precisely because it makes a whole match
+// type unusable, and a hostname is a perfectly good target for something that
+// never opens a connection to it.
+func TestAHostnameIsStillAHostnameForEnginesThatDoNotDial(t *testing.T) {
+	if _, err := expandFor(store.EngineRules, "scanner.corp.example"); err != nil {
+		t.Errorf("a hostname was refused for an engine that does not dial: %v", err)
+	}
+}
+
+// TestAHostnameIsStillAHostname. Canonicalisation still accepts one — the
+// per-engine refusal above is layered on top rather than replacing it.
 func TestAHostnameIsStillAHostname(t *testing.T) {
 	for _, name := range []string{
 		"scanner.corp.example", "dead.beef", "1host.corp.example", "cafe.example",

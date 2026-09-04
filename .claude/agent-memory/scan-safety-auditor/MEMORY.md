@@ -4,3 +4,4 @@
 - [Scope translated-form bypasses](scope_translated_form_bypasses.md) — ADR-039 NAT64/6to4/Teredo work: the /128 rule gap, cross-form gap, untrimmed rules; reproduced 2026-09-03
 - [Scope target notation bypasses](scope_target_notation_bypasses.md) — ADR-040 work: hex/hyphen-range forms and the SplitHostPort scheme-as-host defect still bypass
 - [Lab scope guard bypasses](lab_scope_guard_bypasses.md) — quoting, hostnames and integer IPs get past `.claude/hooks/lab-scope-guard.py`
+- [Discovery engine wire findings](discovery_engine_wire_findings.md) — measured with tcpdump on commit 9d982b5: token re-banking, fabricated liveness, hostname resolution, probes on fragile

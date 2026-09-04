@@ -14,8 +14,18 @@ WHAT THIS COVERS
   - Every packet the engine sent went to an address inside lab/scope.txt.
   - Every packet went to an address the engine was GIVEN. An engine constructs
     no targets (ADR-027), so a destination outside the authorised set is target
-    construction however it arose — a DNS lookup to a resolver, a redirect
-    followed, a hostname resolved to something unexpected.
+    construction however it arose — a redirect followed, a lookup, a name
+    resolved to something unexpected.
+  - Resolver traffic, since the filter is `tcp or udp port 53`. There should be
+    none: the engine refuses a target that is not an IP address, because
+    net.Dialer would otherwise resolve a name and connect to an answer no
+    enforcement site had checked. A DNS packet appearing here means that
+    refusal has stopped working.
+
+    An earlier version of this docstring claimed DNS coverage while the filter
+    was `tcp` alone, so the exact traffic it promised was invisible — a
+    packet-capture audit measured twelve queries in a run this gate called
+    clean.
 
 WHAT THIS DOES NOT COVER, and week 8 still owes
   - The two-site scope enforcement itself. This exercises the ENGINE with
@@ -66,6 +76,18 @@ TARGETS = ["10.10.0.11", "10.10.0.12", "10.10.0.20"]
 
 
 PORTS = "22,80,443,8080"
+
+
+def dst_is_local(dst):
+    """Whether a destination is on this host — a resolver, typically.
+
+    `tcpdump -i any` labels loopback traffic "In" in both directions, so the
+    egress test cannot key on direction alone without dropping DNS to a
+    container's own resolver. This keeps those packets in scope for the
+    assertion; being IN the capture is not the same as being authorised.
+    """
+    addr = dst.rstrip(":").rsplit(".", 1)[0]
+    return addr.startswith("127.") or addr == "::1"
 
 
 def load_scope():
@@ -223,7 +245,14 @@ def main():
         # immediately before the protocol token. Requiring it rather than
         # inferring direction from an address means the gate does not need to
         # know the container's own IP.
-        if i == 0 or parts[i - 1] != "Out":
+        # Loopback traffic is labelled "In" by `tcpdump -i any` even when this
+        # host originated it, so an egress-only test that keys on the direction
+        # alone silently drops a resolver on 127.0.0.11 — which is exactly where
+        # a container's DNS lives. Anything not explicitly inbound from a peer is
+        # counted, and the target set below is what decides whether it was
+        # authorised.
+        direction = parts[i - 1] if i > 0 else ""
+        if direction == "In" and not dst_is_local(parts[i + 3]):
             continue
         dst = parts[i + 3].rstrip(":")
         # Strip the port. IPv4 and IPv6 both put it after the final dot in
@@ -259,9 +288,10 @@ def main():
             print(f, file=sys.stderr)
         return 1
 
-    print("\nsafety: every TCP packet went to an authorised target inside lab/scope.txt")
-    print("The capture filter is 'tcp', which is exactly this engine's traffic and MUST")
-    print("widen when that stops being true — a raw-socket engine would be invisible to it.")
+    print("\nsafety: every packet went to an authorised target inside lab/scope.txt")
+    print("The capture filter is 'tcp or udp port 53' — this engine's traffic plus the")
+    print("resolver lookups an earlier filter of 'tcp' alone made invisible. It MUST widen")
+    print("again when the engine gains a method; a raw sender would not appear here.")
     print("NOT covered here — see the docstring and docs/execution-plan.md 6.3:")
     print("  the two-site scope check end to end, exclusion/allow overlap, CIDR")
     print("  boundaries, hostname and redirect cases, IPv6 forms, raw sockets.")

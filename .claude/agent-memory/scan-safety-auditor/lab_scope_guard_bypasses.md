@@ -38,3 +38,9 @@ database role. Fixing 1 (add quote characters) is cheap and low-false-positive. 
 raises false positives and should be argued for, not assumed.
 
 Related: [[dispatch-scope-and-kill-gaps]]
+
+- **`cvap-engine-discovery` is not in `SCAN_TOOLS`** (added 2026-09-04). It is the only
+  binary in the repo that can send a scan packet, and every invocation passes — including
+  one with an out-of-scope literal on the command line. Adding the name still leaves
+  `/tmp/eng`, the shorthand the build instructions themselves use, unmatched, and the
+  targets arrive on stdin as JSON where the guard cannot see them at all.

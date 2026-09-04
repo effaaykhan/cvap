@@ -40,36 +40,40 @@ func newBucket(ratePPS float64, now func() time.Time) *bucket {
 	if now == nil {
 		now = time.Now
 	}
-	// A one-second burst ceiling: larger lets a quiet period bank capacity and
-	// then spend it at once at a host, which is the shape that tips a fragile
-	// device over.
-	cap := ratePPS
-	if cap < 1 {
-		cap = 1
-	}
-
-	// ========================================================================
-	// It starts with ONE token, not a full bucket.
-	// ========================================================================
-	//
-	// Starting full was the obvious thing and it is wrong at exactly the moment
-	// the cap matters most. A fragile target is allocated 10 pps; a bucket
-	// starting with 10 tokens lets the first ten connects go out back to back
-	// with no pacing at all — a burst of ten at a device whose whole reason for
-	// being capped is that it cannot take ten at once. The ceiling was honoured
-	// on average and violated exactly when it counted.
-	//
-	// Found by measuring: a lab target holding one connection slot answered a
-	// single paced port and dropped six that arrived together, and the six
-	// arrived together because the bucket was pre-filled.
-	//
-	// One token, so the first packet leaves immediately and the second waits its
-	// interval. The burst ceiling still applies once the scan has been running.
 	return &bucket{
-		capacity: cap, tokens: 1,
-		rate: ratePPS, ceiling: ratePPS,
+		capacity: burstFor(ratePPS),
+		tokens:   1,
+		rate:     ratePPS, ceiling: ratePPS,
 		last: now(), now: now,
 	}
+}
+
+// burstFor is how many tokens may accumulate at a given rate.
+//
+// ============================================================================
+// A TENTH of a second, not a whole one — and this is the second half of a fix
+// whose first half only moved the problem three seconds later.
+// ============================================================================
+//
+// Starting the bucket at one token stopped the burst at t=0. It did nothing
+// about refill: capacity stayed at the full per-second allocation, so any idle
+// period of capacity/rate seconds restored the entire burst. A packet-capture
+// audit measured ten connects inside one millisecond at a device capped at ten
+// per second — 500 pps against a 10 pps ceiling — after a 4.5 second stall.
+//
+// And the stall is the NORMAL path, not an edge case: probeAlive dials the
+// discovery ports serially and blocks a full connect timeout on every silent
+// one, so a quiet host banks a full burst before the port scan even starts.
+//
+// A sub-second burst is what makes the ceiling true at the timescale a device
+// experiences. Ten per second means at most one per hundred milliseconds' worth
+// of accumulation, which for a 10 pps fragile cap is a burst of one.
+func burstFor(ratePPS float64) float64 {
+	burst := ratePPS / 10
+	if burst < 1 {
+		burst = 1
+	}
+	return burst
 }
 
 // take blocks until one token is available or ctx ends.
@@ -127,6 +131,17 @@ func (b *bucket) backOff() {
 	b.rate /= 2
 	if b.rate < minRatePPS {
 		b.rate = minRatePPS
+	}
+	// CAPACITY comes down with the rate, or backing off is decorative.
+	//
+	// The first version halved rate and left capacity alone, so a scan adaptively
+	// slowed to 3 pps against a struggling host still banked a burst sized for
+	// the original allocation — and spent it the moment the host paused long
+	// enough to look idle. Backing off is a statement about how hard this host
+	// may be pushed, and a burst ceiling is part of that statement.
+	b.capacity = burstFor(b.rate)
+	if b.tokens > b.capacity {
+		b.tokens = b.capacity
 	}
 }
 

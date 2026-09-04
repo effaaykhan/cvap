@@ -64,8 +64,10 @@ what the failures looked like, not because they are still live.
   them. Needs a decision on whether a translated address IS the v4 host for scope purposes.
 - **`window_ends_unix` (H3).** dispatch.proto makes stopping at that instant a runtime MUST;
   nothing implements it, and `WINDOW_EXPIRED` is still produced by nothing.
-- **`safety_mode` (H4)** reaches the runtime and dead-ends: `enginewire.ToEngine` has no field
-  for it, so ADR-021's axis never reaches the component that would run an intrusive check.
+- ~~**`safety_mode` (H4)**~~ CLOSED 2026-09-04 by commit 9d982b5: `enginewire.ToEngine` carries
+  `safety_mode` and `probes`, and safe mode is enforced by withholding the corpus. Do not
+  re-report. What is NOT closed is fragile suppression of probes — see
+  [[discovery-engine-wire-findings]].
 - **Constraints captured once, never re-pushed.** A deny rule added mid-scan reaches no
   running engine.
 - **`tasks_completed` counts observations, not tasks.**
