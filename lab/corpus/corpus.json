@@ -1,0 +1,475 @@
+{
+  "_comment": [
+    "The golden corpus: hand-labelled expected results for every lab target.",
+    "",
+    "AUTHORED FROM lab/corpus/ground-truth.sh \u2014 the software's own account of itself,",
+    "read by execing into the containers \u2014 and from the compose target definitions. NOT",
+    "from any scanner observation. corpus-check diffs the scanner's output AGAINST this;",
+    "the two sources never cross, so a passing check is not the scanner agreeing with",
+    "itself. Every label carries a `source` naming where the truth came from.",
+    "",
+    "Ports scanned by the check: 21,22,23,80,443,631,8080,8443,9100. Port recall is over",
+    "the open ports in that set. A host reachable only behind a SYN-dropping filter is",
+    "labelled alive=false: a connect scan cannot distinguish it from absent, and pretending",
+    "otherwise would be labelling a capability the scanner does not have."
+  ],
+  "scanned_ports": [
+    21,
+    22,
+    23,
+    80,
+    443,
+    631,
+    8080,
+    8443,
+    9100
+  ],
+  "zones": {
+    "segment-a": {
+      "type": "internal",
+      "source": "compose network segment-a; a trusted vantage"
+    },
+    "segment-b": {
+      "type": "external",
+      "source": "compose network segment-b; labelled an untrusted vantage so a management port seen here is exposed (ADR-008)"
+    }
+  },
+  "hosts": [
+    {
+      "address": "10.10.0.11",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a1 nginx",
+      "ports": [
+        {
+          "port": 80,
+          "service": "http",
+          "product": "nginx",
+          "version": "1.27.5",
+          "source": "nginx -v -> 1.27.5; Server header",
+          "findings": [
+            "http-no-https-redirect",
+            "http-missing-security-headers"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.12",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a2 nginx",
+      "ports": [
+        {
+          "port": 80,
+          "service": "http",
+          "product": "nginx",
+          "version": "1.27.5",
+          "source": "nginx -v; Server header",
+          "findings": [
+            "http-no-https-redirect",
+            "http-missing-security-headers"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.13",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a3 nginx",
+      "ports": [
+        {
+          "port": 80,
+          "service": "http",
+          "product": "nginx",
+          "version": "1.27.5",
+          "source": "nginx -v; Server header",
+          "findings": [
+            "http-no-https-redirect",
+            "http-missing-security-headers"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.14",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a4 openssh",
+      "ports": [
+        {
+          "port": 22,
+          "service": "ssh",
+          "product": "OpenSSH",
+          "version": "10.3",
+          "source": "SSH banner SSH-2.0-OpenSSH_10.3; modern, offers no weak algorithms",
+          "findings": []
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.15",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a5 tls (identity + self-signed)",
+      "ports": [
+        {
+          "port": 80,
+          "service": "http",
+          "product": "nginx",
+          "version": "1.27.5",
+          "source": "Server header",
+          "findings": [
+            "http-no-https-redirect",
+            "http-missing-security-headers"
+          ]
+        },
+        {
+          "port": 443,
+          "service": "http",
+          "product": "nginx",
+          "version": "1.27.5",
+          "source": "ground-truth: self_signed=true, not expired, 2048-bit; 443 sets security headers",
+          "findings": [
+            "tls-self-signed-non-dev"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.16",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a6 quiet nginx (server_tokens off)",
+      "ports": [
+        {
+          "port": 80,
+          "service": "http",
+          "product": "nginx",
+          "version": "",
+          "source": "server_tokens off -> Server: nginx with no version; product known, version withheld",
+          "findings": [
+            "http-no-https-redirect",
+            "http-missing-security-headers"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.17",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a-tls-expired",
+      "ports": [
+        {
+          "port": 443,
+          "service": "http",
+          "product": "nginx",
+          "version": "1.27.5",
+          "source": "ground-truth: expired=true, CA-signed, full chain; headers set",
+          "findings": [
+            "tls-certificate-expired"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.18",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a-tls-nochain",
+      "ports": [
+        {
+          "port": 8443,
+          "service": "http",
+          "product": "nginx",
+          "version": "1.27.5",
+          "source": "ground-truth: self_signed=false, leaf presented alone; headers set",
+          "findings": [
+            "tls-missing-chain"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.19",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a-tls-weakkey",
+      "ports": [
+        {
+          "port": 443,
+          "service": "http",
+          "product": "nginx",
+          "version": "",
+          "source": "ground-truth: key_bits=1024, CA-signed full chain valid; headers set. nginx:1.14 so Server header version differs but the identification is nginx",
+          "findings": [
+            "tls-weak-key"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.21",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a-tls-legacy",
+      "ports": [
+        {
+          "port": 443,
+          "service": "http",
+          "product": "nginx",
+          "version": "",
+          "source": "ground-truth: ssl_protocols TLSv1; nginx:1.14; headers set",
+          "findings": [
+            "tls-legacy-version-negotiated"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.22",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a-tls-weakcipher",
+      "ports": [
+        {
+          "port": 443,
+          "service": "",
+          "product": "",
+          "version": "",
+          "source": "discovery finds 443 open; the fingerprint client offers only secure cipher suites (Go default), so it cannot complete a handshake with a weak-only server, and the port yields no service and no finding",
+          "findings": []
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.23",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a-telnet busybox-extras telnetd",
+      "ports": [
+        {
+          "port": 23,
+          "service": "telnet",
+          "product": "",
+          "version": "",
+          "source": "IAC option negotiation on connect (0xff DO/WILL); softmatch telnet, no product",
+          "findings": [
+            "plaintext-telnet"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.24",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a-ftp vsftpd",
+      "ports": [
+        {
+          "port": 21,
+          "service": "ftp",
+          "product": "",
+          "version": "",
+          "source": "220 vsftpd banner; generic 220-on-ftp-port softmatch (banner says lowercase vsftpd, so product not lifted)",
+          "findings": [
+            "plaintext-ftp"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.25",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a-redirect nginx 301->https",
+      "ports": [
+        {
+          "port": 80,
+          "service": "http",
+          "product": "nginx",
+          "version": "1.27.5",
+          "source": "returns 301 to https; the NEGATIVE case",
+          "findings": []
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.26",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a-ssh-weak openssh with ssh-rsa + dh-group1-sha1",
+      "ports": [
+        {
+          "port": 22,
+          "service": "ssh",
+          "product": "OpenSSH",
+          "version": "9.2p1",
+          "source": "SSH banner OpenSSH_9.2p1; sshd -T shows ssh-rsa host-key and diffie-hellman-group1-sha1 kex offered",
+          "findings": [
+            "ssh-weak-algorithms"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.20",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a-fragile (degrades above ~10 req/min)",
+      "fragile": true,
+      "ports": [],
+      "note": "Not scanned by corpus-check: this is the ADR-024 rate-limiter fixture (make safety), and it answers plain HTTP on every port while deliberately degrading under load. Scanning it in an accuracy denominator measures the limiter, not discovery. Its ports/findings are exercised by make safety, not here.",
+      "scanned": false
+    },
+    {
+      "address": "10.10.0.40",
+      "segment": "segment-a",
+      "alive": true,
+      "source": "compose target-a-printer (listens on 9100, 631)",
+      "ports": [
+        {
+          "port": 9100,
+          "service": "",
+          "product": "",
+          "version": "",
+          "source": "listener on the non-inert print port; no probe payload may reach it (ADR-048), so identification is none",
+          "findings": []
+        },
+        {
+          "port": 631,
+          "service": "",
+          "product": "",
+          "version": "",
+          "source": "IPP/print port; on the non-inert denylist",
+          "findings": []
+        }
+      ]
+    },
+    {
+      "address": "10.10.0.30",
+      "segment": "segment-a",
+      "alive": false,
+      "source": "compose target-a-filtered (DROPs SYNs)",
+      "ports": [],
+      "note": "A connect scan cannot distinguish a SYN-dropping host from an absent one. Labelled not-alive: finding it is neither required (host recall) nor a false positive if the SYN train times out.",
+      "scanned": false
+    },
+    {
+      "address": "10.20.0.11",
+      "segment": "segment-b",
+      "alive": true,
+      "source": "compose target-b1 nginx",
+      "ports": [
+        {
+          "port": 80,
+          "service": "http",
+          "product": "nginx",
+          "version": "1.27.5",
+          "source": "Server header",
+          "findings": [
+            "http-no-https-redirect",
+            "http-missing-security-headers"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "10.20.0.12",
+      "segment": "segment-b",
+      "alive": true,
+      "source": "compose target-b-ssh openssh (modern) in the external zone",
+      "ports": [
+        {
+          "port": 22,
+          "service": "ssh",
+          "product": "OpenSSH",
+          "version": "9.2p1",
+          "source": "modern sshd; the finding comes from the zone (segment-b = external), not the host",
+          "findings": [
+            "management-interface-untrusted-zone"
+          ]
+        }
+      ]
+    }
+  ],
+  "merge_scenarios": [
+    {
+      "name": "dhcp-move-one-asset",
+      "source": "session 14 design: same SSH host key + same TLS cert, address changes",
+      "observations": [
+        {
+          "address": "10.99.0.1",
+          "ssh_fp": "SHA256:corpus-dhcp-hk",
+          "cert_fp": "SHA256:corpus-dhcp-cert"
+        },
+        {
+          "address": "10.99.0.2",
+          "ssh_fp": "SHA256:corpus-dhcp-hk",
+          "cert_fp": "SHA256:corpus-dhcp-cert"
+        }
+      ],
+      "expected_assets": 1
+    },
+    {
+      "name": "multi-homed-one-asset",
+      "source": "one host answering on two addresses at once, same two keys",
+      "observations": [
+        {
+          "address": "10.99.0.3",
+          "ssh_fp": "SHA256:corpus-mh-hk",
+          "cert_fp": "SHA256:corpus-mh-cert"
+        },
+        {
+          "address": "10.99.0.4",
+          "ssh_fp": "SHA256:corpus-mh-hk",
+          "cert_fp": "SHA256:corpus-mh-cert"
+        }
+      ],
+      "expected_assets": 1
+    },
+    {
+      "name": "ssh-only-moved-two-assets",
+      "source": "ADR-007 designed degradation: one moderate key alone does not merge",
+      "observations": [
+        {
+          "address": "10.99.0.5",
+          "ssh_fp": "SHA256:corpus-solo-hk"
+        },
+        {
+          "address": "10.99.0.6",
+          "ssh_fp": "SHA256:corpus-solo-hk"
+        }
+      ],
+      "expected_assets": 2
+    }
+  ],
+  "uncovered": [
+    {
+      "case": "TLS 1.0/1.1 and weak-cipher ENABLED (vs negotiated)",
+      "reason": "the negotiated form ships; 'enabled' needs a version-ladder probe (ADR-050)"
+    },
+    {
+      "case": "SNMP v1/v2c default community",
+      "reason": "SNMP is UDP; discovery is TCP-only (ADR-050). No target, no rule."
+    },
+    {
+      "case": "directory listing enabled",
+      "reason": "needs a bounded GET probe kind; the HTTP probe is HEAD (ADR-050)"
+    },
+    {
+      "case": "self-signed on a dev-labelled asset (the exemption)",
+      "reason": "asset environment is operator-set, not derived from a scan; exercised by the rule unit tests, not by a lab target"
+    },
+    {
+      "case": "OS fingerprinting across OS VMs",
+      "reason": "no hardware virtualisation in this environment (no /dev/kvm); \u00a76.1 OS VMs deferred to Phase 4, which the plan already schedules"
+    },
+    {
+      "case": "tls-weak-cipher-negotiated is currently UNFIREABLE",
+      "reason": "the rule ships (session 15) but the fingerprint TLS client offers only Go's secure cipher suites, so it never negotiates an insecure one and a weak-only server cannot even be handshaked. Measured: against nginx offering only ECDHE-RSA-AES128-SHA256 the client's handshake fails. UNBLOCKER: inspectOnlyTLSConfig must OFFER the weak suites (the same way it offers old TLS versions via MinVersion) so a server that accepts one is detectable. An engine change, deferred from this lab/corpus session."
+    }
+  ]
+}

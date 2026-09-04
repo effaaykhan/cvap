@@ -50,8 +50,15 @@ make safety       # scope-enforcement gate — must pass before any merge
 make corpus-check # golden corpus diff
 ```
 
-`safety` and `corpus-check` are failing stubs until week 8. Deliberate: a gate that
-silently passes is worse than one that fails, because the first gets trusted.
+`safety` is the scope-enforcement gate (egress capture in the lab). `corpus-check`
+(session 16) diffs a real scan of the lab against the hand-labelled golden corpus
+in `lab/corpus/`: a label half that runs everywhere (schema + labels vs the
+containers' own account of themselves in `ground-truth.json`) and a scan half —
+the six §6.2 accuracy gates — that runs when the lab is reachable and is fatal in
+CI via `CVAP_REQUIRE_LAB=1`. The corpus is labelled from the containers, never
+from the scanner, so a pass is not the scanner agreeing with itself. A gate that
+silently passes is worse than one that fails, because the first gets trusted —
+which is why the skip names what it skipped.
 
 ## Non-negotiables
 

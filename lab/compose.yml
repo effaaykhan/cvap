@@ -161,6 +161,73 @@ services:
       segment-a:
         ipv4_address: 10.10.0.30
 
+  # ---- Week 8 corpus targets: each reproduces one labelled finding from its
+  # own container definition, so the golden corpus can be labelled from what the
+  # software says about itself rather than from what our scanner reports. ----
+
+  # Expired + self-signed certificate: tls-certificate-expired, tls-self-signed-non-dev.
+  target-a-tls-expired:
+    build: ./targets/tls-expired
+    restart: unless-stopped
+    networks: { segment-a: { ipv4_address: 10.10.0.17 } }
+
+  # CA-signed leaf presented alone on 8443: tls-missing-chain (not self-signed).
+  target-a-tls-nochain:
+    build: ./targets/tls-nochain
+    restart: unless-stopped
+    networks: { segment-a: { ipv4_address: 10.10.0.18 } }
+
+  # CA-signed, full chain, 1024-bit RSA leaf: tls-weak-key only.
+  target-a-tls-weakkey:
+    build: ./targets/tls-weakkey
+    restart: unless-stopped
+    networks: { segment-a: { ipv4_address: 10.10.0.19 } }
+
+  # nginx 1.14 offering only TLS 1.0: tls-legacy-version-negotiated only.
+  target-a-tls-legacy:
+    build: ./targets/tls-legacy
+    restart: unless-stopped
+    networks: { segment-a: { ipv4_address: 10.10.0.21 } }
+
+  # nginx 1.14 offering only a CBC-SHA cipher: tls-weak-cipher-negotiated only.
+  target-a-tls-weakcipher:
+    build: ./targets/tls-weakcipher
+    restart: unless-stopped
+    networks: { segment-a: { ipv4_address: 10.10.0.22 } }
+
+  # Real telnetd: plaintext-telnet.
+  target-a-telnet:
+    build: ./targets/telnet
+    restart: unless-stopped
+    networks: { segment-a: { ipv4_address: 10.10.0.23 } }
+
+  # Real vsftpd: plaintext-ftp.
+  target-a-ftp:
+    build: ./targets/ftp
+    restart: unless-stopped
+    networks: { segment-a: { ipv4_address: 10.10.0.24 } }
+
+  # Plain HTTP that 301s to HTTPS: the NEGATIVE case, raises nothing.
+  target-a-redirect:
+    build: ./targets/https-redirect
+    restart: unless-stopped
+    networks: { segment-a: { ipv4_address: 10.10.0.25 } }
+
+  # sshd re-enabling ssh-rsa and dh-group1-sha1: ssh-weak-algorithms.
+  target-a-ssh-weak:
+    build: ./targets/ssh-weak
+    restart: unless-stopped
+    networks: { segment-a: { ipv4_address: 10.10.0.26 } }
+
+  # A plain modern sshd in SEGMENT B. Its only finding —
+  # management-interface-untrusted-zone — comes from segment-b being labelled an
+  # external vantage point, not from the host. Exposure is a property of seeing
+  # (ADR-008).
+  target-b-ssh:
+    build: ./targets/ssh-plain
+    restart: unless-stopped
+    networks: { segment-b: { ipv4_address: 10.20.0.12 } }
+
 networks:
   segment-a:
     internal: true

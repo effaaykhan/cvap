@@ -552,6 +552,12 @@ The third — the rate budget counting connect attempts while ADR-024's ceilings
 
 - **The management-interface rule guesses no zone trust.** It treats `external`/`dmz` as untrusted and leaves `branch`/`cloud` out. **The unblocker is a per-zone trust attribute an operator sets** — `scan_zones.trust_level` exists as an integer with no assigned meaning.
 
+**Surfaced by the golden corpus (session 16):**
+
+- **`tls-weak-cipher-negotiated` is currently unfireable.** The rule ships, but the fingerprint TLS client offers only Go's *secure* cipher suites, so it never negotiates an insecure one — and a server offering *only* a weak suite cannot even be handshaked (measured: the client's handshake fails against nginx offering only `ECDHE-RSA-AES128-SHA256`). So the rule cannot receive the input it judges. **The unblocker is an engine change**: `inspectOnlyTLSConfig` must OFFER the weak suites, the same way it already offers old TLS versions via `MinVersion`, so a server that accepts one is detectable. Named in `lab/corpus/corpus.json` under `uncovered` and left for a fingerprint-engine session rather than worked around in the lab. The corpus found this — a rule that looked shipped was not exercisable.
+
+- **The OS VMs of §6.1 are not stood up.** This environment has no hardware virtualisation (`/dev/kvm` absent), so the two OS VMs cannot run here. OS-family is covered only where a banner volunteers it (the OpenSSH suffix); real OS fingerprinting is Phase 4, which the plan already schedules. The lab is otherwise complete: 20 containerised targets across the two segments, each reproducing one labelled corpus case from its own definition.
+
 **Deferred from the asset-resolution session (ADR-049), each with what unblocks it:**
 
 - **A host with one moderate key does not merge across an address change.** ADR-007 needs one strong key or corroboration among weaker ones, and a lone SSH host key is uncorroborated. The common estate — Linux, SSH, no TLS — is exactly this case, and so is the lab's own SSH host.

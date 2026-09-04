@@ -11,7 +11,7 @@
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
         env-check app-role store-test e2e dev-ca gosec mutate \
         contract-guard-test fmt-check tidy-check govulncheck db-gates db-reachable \
-        safety-sabotage
+        safety-sabotage adr-index
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
 # under a running project (ADR-025: consume commodity infrastructure).
@@ -163,7 +163,7 @@ govulncheck: ## Known vulnerabilities in the dependency graph, as CI runs it
 # CI too and is the point of running it.
 ci: fmt-check tidy-check build vet test lint gosec govulncheck proto frontmatter \
     gitignore-test scope-guard-test contract-guard-test secret-logging \
-    secret-logging-test env-check licences db-gates ## Everything CI runs, locally
+    secret-logging-test env-check licences db-gates adr-index corpus-check ## Everything CI runs, locally
 
 ## ---------- wire contract ----------
 
@@ -501,17 +501,14 @@ safety-sabotage: ## Prove the safety gate can fail
 		echo "safety-sabotage: the gate correctly failed against a narrowed scope"; \
 	fi
 
-corpus-check: ## Golden corpus diff (NOT IMPLEMENTED — week 8)
-	@echo "NOT IMPLEMENTED — week 8. Golden corpus diff, docs/execution-plan.md 6.2."
-	@echo ""
-	@echo "Diffs every discovery run against the hand-labelled expected result for the"
-	@echo "lab targets. Failing thresholds: host recall >= 99%, port recall >= 98%,"
-	@echo "service identification >= 90%, finding FP <= 2%, FN <= 5%, merge correctness"
-	@echo "100% on labelled scenarios."
-	@exit 1
+corpus-check: ## Golden corpus: label checks always; scan-and-diff metrics when the lab is up
+	python3 .github/scripts/corpus_check.py
 
 frontmatter: ## Validate .claude agent and skill frontmatter
 	python3 .github/scripts/check_frontmatter.py
+
+adr-index: ## Every ADR has an index row and every row has a file
+	python3 .github/scripts/check_adr_index.py
 
 gitignore-test: ## Assert .gitignore still covers what it must
 	python3 .github/scripts/check_gitignore.py
