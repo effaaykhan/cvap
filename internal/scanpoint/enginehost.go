@@ -243,6 +243,24 @@ func (h *engineHost) start(ctx context.Context, targets []enginewire.Target, bud
 		}
 	}
 
+	// ========================================================================
+	// Safe mode is enforced by what the engine is HANDED, not by what it is
+	// told.
+	// ========================================================================
+	//
+	// ADR-021 makes safe the default for every policy, so it is the mode most
+	// deployments run and the one that must be unable to provoke anything. A
+	// flag the engine is trusted to honour would put that guarantee inside the
+	// component with the socket; withholding the payloads puts it here, in the
+	// component that already owns the rate budget for the same reason.
+	//
+	// Checked before the process exists, so a job that fails it never reaches
+	// something that could act on it.
+	if budget.SafetyMode != SafetyIntrusive && len(budget.Probes) > 0 {
+		return fmt.Errorf("%w: mode %q with %d probe(s)",
+			ErrProbesUnderSafeMode, budget.SafetyMode, len(budget.Probes))
+	}
+
 	// No ctx on the command, deliberately. exec.CommandContext kills with
 	// SIGKILL on cancellation, which skips the SIGTERM grace ADR-027 requires
 	// and gives the engine no chance to finish the observation in hand. Stop()
@@ -308,6 +326,8 @@ func (h *engineHost) start(ctx context.Context, targets []enginewire.Target, bud
 		RateBudgetPPS:          budget.RatePPS,
 		ConnectTimeoutMS:       budget.ConnectTimeoutMS,
 		MaxConcurrentPerTarget: budget.MaxConcurrentPerTarget,
+		SafetyMode:             budget.SafetyMode,
+		Probes:                 budget.Probes,
 	})
 }
 
@@ -321,7 +341,34 @@ type engineBudget struct {
 	RatePPS                uint32
 	ConnectTimeoutMS       uint32
 	MaxConcurrentPerTarget uint32
+
+	// SafetyMode is the effective mode, already reduced by Core (ADR-021).
+	SafetyMode string
+
+	// Probes are what the engine may send to solicit a response, and they are
+	// EMPTY unless SafetyMode is intrusive.
+	//
+	// The enforcement is the emptiness, not the mode string: an engine cannot
+	// send a probe it was never handed, exactly as it cannot exceed a rate
+	// budget it was never given. start() refuses a job whose two fields
+	// disagree rather than trimming one to match the other.
+	Probes []enginewire.Probe
 }
+
+// SafetyIntrusive is the one mode in which probes travel.
+//
+// Compared as a string rather than imported from internal/store, which the scan
+// point may not reach (ADR-005). The value is the wire's, and dispatch.proto is
+// the authority on it.
+const SafetyIntrusive = "intrusive"
+
+// ErrProbesUnderSafeMode means a job carried probes it is not entitled to send.
+//
+// Refused, not trimmed. If the two disagree then something between Core's
+// reduction of the policy ceiling and this runtime produced a job whose stated
+// mode and actual capability differ, and quietly dropping the probes would
+// leave that defect running under a mode label nobody can trust afterwards.
+var ErrProbesUnderSafeMode = errors.New("scanpoint: probes supplied for a job that is not intrusive")
 
 // pump reads until the engine's stdout closes, answering what it asks.
 func (h *engineHost) pump() {

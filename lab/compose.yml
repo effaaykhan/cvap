@@ -45,6 +45,56 @@ services:
       timeout: 3s
       retries: 5
 
+  # Segment A gets several more hosts, because "scan a /24 and see hosts in the
+  # database" is not a deliverable two containers can demonstrate. These are
+  # ordinary static servers on distinct addresses; what matters is that a sweep
+  # finds a set rather than a single host.
+  target-a2:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./targets/segment-a:/usr/share/nginx/html:ro
+    networks:
+      segment-a:
+        ipv4_address: 10.10.0.12
+
+  target-a3:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./targets/segment-a:/usr/share/nginx/html:ro
+    networks:
+      segment-a:
+        ipv4_address: 10.10.0.13
+
+  # An SSH server, so something in the lab VOLUNTEERS a banner. Everything else
+  # here is HTTP, which says nothing until asked — so without this, safe mode
+  # would produce no banner at all and the safe/intrusive distinction would be
+  # untestable against the lab.
+  target-a4:
+    image: linuxserver/openssh-server:latest
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - PASSWORD_ACCESS=false
+      - USER_NAME=lab
+    networks:
+      segment-a:
+        ipv4_address: 10.10.0.14
+
+  # The fragile one. See targets/slow/nginx.conf: it refuses above roughly ten
+  # requests a minute rather than queueing, which is how ADR-024's 10 pps cap
+  # becomes testable instead of being a number in a table.
+  target-a-fragile:
+    build: ./targets/slow
+    restart: unless-stopped
+    environment:
+      - PORTS=80,443,8080,22,23,631
+    networks:
+      segment-a:
+        ipv4_address: 10.10.0.20
+
 networks:
   segment-a:
     internal: true

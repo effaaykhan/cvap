@@ -52,6 +52,19 @@ const MaxAddressesPerTarget = 65536
 // next tenant's leases are looked at.
 const PlanBatchLimit = 4
 
+// TasksPerJob is how many targets one job carries.
+//
+// 32, which for the default port set is roughly a minute of scanning at the
+// per-target ceiling — small enough that losing a lease costs little and that a
+// zone's scan points share the work, large enough that a /24 is eight jobs
+// rather than 254.
+//
+// Deliberately well below store.MaxTasksPerAssignment. That bound answers "does
+// this job fit in one wire message"; this one answers "is this a sensible unit
+// of work to lose". Sizing to the wire bound would make every job the largest
+// deliverable one, which is the opposite of what chunking is for.
+const TasksPerJob = 32
+
 // ErrTargetTooLarge means a declared target expands past MaxAddressesPerTarget.
 var ErrTargetTooLarge = errors.New("dispatch: target expands to more addresses than one scan may plan")
 
@@ -104,11 +117,28 @@ func PlanScan(ctx context.Context, db *store.DB, tenant store.TenantID, scanID u
 			}
 		}
 
-		// One job for now. Splitting across scan points is a scheduling
-		// decision this session does not make; MaxTasksPerAssignment already
-		// refuses a job too large to deliver, which is the bound that matters.
-		if _, err := (store.Scans{}).Plan(ctx, c, scanID, engine, reassignSafe, tasks); err != nil {
-			return err
+		// ================================================================
+		// CHUNKED into several jobs, so a /24 spreads across scan points.
+		// ================================================================
+		//
+		// One job for a whole /24 is 254 tasks that one scan point claims and
+		// works through alone, while every other scan point in the zone sits
+		// idle — and if that one dies, ADR-012 puts the entire range back in the
+		// queue rather than the part that had not been done.
+		//
+		// Jobs are the unit dispatch hands out (ADR-003's SKIP LOCKED claim), so
+		// chunking is what makes a scan parallel at all. It also bounds the
+		// blast radius of a single lease loss: a chunk is minutes of work, not
+		// the whole scan.
+		//
+		// TasksPerJob is well under MaxTasksPerAssignment, which is the wire
+		// bound rather than a scheduling one — a job that fits in one message is
+		// necessary and not sufficient.
+		for start := 0; start < len(tasks); start += TasksPerJob {
+			end := min(start+TasksPerJob, len(tasks))
+			if _, err := (store.Scans{}).Plan(ctx, c, scanID, engine, reassignSafe, tasks[start:end]); err != nil {
+				return err
+			}
 		}
 		planned = len(tasks)
 

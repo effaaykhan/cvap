@@ -78,6 +78,35 @@ var permitted = []string{
 //
 // An entry is package path -> import paths that package alone may add.
 var exceptions = map[string][]string{
+	// ========================================================================
+	// The first engine that may put a packet on a wire (ADR-047).
+	// ========================================================================
+	//
+	// ONE import, to the logic package: `net`. Granted because a discovery
+	// engine that cannot open a socket is not a discovery engine, and refused
+	// for everything else — no os/exec, no syscall, no golang.org/x/net, no
+	// os/signal. syscall in particular is the raw-socket path, and this engine
+	// does connect scanning and unprivileged ICMP precisely so it stays off
+	// this list; SYN and ARP need CAP_NET_RAW, which changes how a scan point
+	// is DEPLOYED and is deferred to its own session and its own ADR.
+	//
+	// What binds it is in ADR-047 and is not restated here beyond the shape:
+	// the runtime allocates the rate slice, adaptive means downward only, the
+	// engine holds no scope data, and the probe corpus lives in the runtime so
+	// that a safe job is handed nothing to send.
+	//
+	// This is the entry the comment below anticipated. Note what it did NOT
+	// become: a widening of `permitted`, which would have granted `net` to every
+	// engine including ones not yet written.
+	"internal/engines/discovery": {"net"},
+
+	// The engine PROCESS shell, and only the shell — same grant as the no-op
+	// engine's, for the same reason. This binary needs os.Stdin and os.Stdout;
+	// a package that may import `os` is a package that could import `os/exec`,
+	// so keeping the pipes here is what holds the logic package's exception to
+	// a single import.
+	"cmd/cvap-engine-discovery": {"os", "github.com/effaaykhan/cvap/internal/enginewire"},
+
 	// The engine PROCESS shell, and only the shell.
 	//
 	// ADR-027 decides that engines are separate processes hosted by the scan

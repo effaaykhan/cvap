@@ -39,3 +39,4 @@ venv/
 *.swp
 .go.mod.tidycheck
 .go.sum.tidycheck
+.safety-scope.sabotage

@@ -55,3 +55,4 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 044 | Target canonicalisation, restated with three claims corrected (supersedes 042) | Accepted |
 | 045 | OIDC identity is the subject, the client is public, and the issuer is a network the deployment trusts | Superseded by ADR-046 |
 | 046 | OIDC, restated with the SSRF guard made true and two claims corrected (supersedes 045) | Accepted |
+| 047 | The discovery engine may open sockets, and connect scanning is what it may do with them | Accepted |

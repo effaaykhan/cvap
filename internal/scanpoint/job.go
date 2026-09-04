@@ -197,10 +197,29 @@ func (j *job) budget() engineBudget {
 		}
 	}
 
+	// Probes travel ONLY under an intrusive mode, and the emptiness is the
+	// control rather than the mode string (ADR-021, and engineHost.start).
+	//
+	// The runtime holds the corpus, not the engine, for the same reason it holds
+	// the rate budget: an engine cannot send what it was never handed, so safe
+	// mode is not a branch inside the component with the socket. A bug there, or
+	// a rule asking for a probe, has nothing to reach for.
+	//
+	// Note which way round the default falls. An unrecognised or absent mode is
+	// NOT intrusive, so a Core that sent nothing, or a value this build does not
+	// know, yields no probes — the same direction clampCeiling takes for an
+	// absent rate.
+	var probes []enginewire.Probe
+	if c.GetSafetyMode() == SafetyIntrusive {
+		probes = ProbeCorpus()
+	}
+
 	return engineBudget{
 		RatePPS:                rate,
 		ConnectTimeoutMS:       clampCeiling(c.GetConnectTimeoutMs(), PlatformConnectTimeoutMS),
 		MaxConcurrentPerTarget: clampCeiling(c.GetMaxConcurrentPerTarget(), PlatformMaxConcurrentPerTarget),
+		SafetyMode:             c.GetSafetyMode(),
+		Probes:                 probes,
 	}
 }
 

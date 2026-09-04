@@ -484,6 +484,18 @@ Deferred rather than done badly. The only key custody available on a scan point 
 
 Also deferred from the same session, all recorded in `.claude/agent-memory/scan-safety-auditor/scanpoint_runtime_bypasses.md`: the runtime does not yet stop at `ScanConstraints.window_ends_unix` (a MUST in `dispatch.proto`, and `WINDOW_EXPIRED` is produced by nothing); `safety_mode` reaches the runtime and dead-ends because the engine job contract has no field for it; and constraints are captured at claim time and never re-pushed, so a deny rule added mid-scan reaches no running engine. Two items from that list are now closed: translated IPv6 notations are handled by ADR-039, and the discarded normalised host by ADR-042.
 
+**Deferred from the discovery session (ADR-047), and the line between them is one thing:**
+
+- **SYN scanning, ARP discovery and ICMP echo.** §2 says "ARP, ICMP and TCP host discovery. TCP connect and SYN scanning"; what ships is TCP connect. Every deferred method needs a socket the Go standard library will not create — raw for SYN and ARP, an unprivileged `SOCK_DGRAM` ICMP socket for the third — and each would widen the engine import allowlist past the single `net` ADR-047 argues for. SYN and ARP additionally need `CAP_NET_RAW`, which changes how a scan point is **deployed**, not merely what it can do.
+
+  **What unblocks it:** a decision on how a scan point acquires `CAP_NET_RAW`, recorded as its own ADR, plus an answer to how `make safety` proves a raw-socket engine stays in scope — the harder half, since the connect path is observable through the socket API and a raw sender is not.
+
+  **What it costs meanwhile, stated rather than discovered:** connect completes the handshake, so it is louder against anything watching and slower against a filtered host; a fully filtered host is indistinguishable from an absent one; and a host that answers no TCP but does answer ping is not found at all.
+
+- **The default port set is ~180, not the top 1000.** It covers every service the MVP's finding rules reason about. The full list is empirical frequency data belonging in a data file beside the fingerprint corpus rather than a literal in source — a data change, not a code change. A padded list that *looked* like the top 1000 would have made the gap invisible.
+
+- **Service fingerprinting is banner capture, not identification.** §2's "~30 common services" is week 5. What ships records what a service volunteered, and under an intrusive job what a probe drew out, with provenance on both. Turning bytes into a service name is the next session's work.
+
 **Deferred from the operator API session, and each is a decision rather than an omission:**
 
 - **Back-channel logout is not implemented, so a session outlives disablement at the identity provider.** OIDC itself landed (ADR-046): authorization code with PKCE, subject-based identity, per-tenant issuer and audience checks. What is missing is `backchannel_logout_uri` — a user disabled at the IdP keeps a live CVAP session until it expires, at most twelve hours, and the only thing that ends it today is an administrator disabling the user here as well. Until that lands, disabling somebody is a two-place operation and the runbook has to say so.

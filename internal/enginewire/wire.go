@@ -95,10 +95,62 @@ type ToEngine struct {
 	ConnectTimeoutMS       uint32 `json:"connect_timeout_ms,omitempty"`
 	MaxConcurrentPerTarget uint32 `json:"max_concurrent_per_target,omitempty"`
 
+	// SafetyMode is the EFFECTIVE mode, already reduced by Core (ADR-021).
+	//
+	// It travels for PROVENANCE, not for enforcement. An observation made by
+	// reading what a service volunteered and one made by soliciting a response
+	// are different confidence levels, and the finding pipeline has to be able
+	// to tell them apart — so the engine stamps this on what it emits.
+	//
+	// What it does NOT do is decide whether a probe may be sent. See Probes.
+	SafetyMode string `json:"safety_mode,omitempty"`
+
+	// Probes are the payloads this engine may send to solicit a response.
+	//
+	// ========================================================================
+	// EMPTY IN SAFE MODE, and that is the enforcement — not a flag the engine
+	// is trusted to honour.
+	// ========================================================================
+	//
+	// Same shape as RateBudgetPPS: the engine cannot exceed a budget it was
+	// never given, and it cannot send a probe it was never handed. An engine
+	// holds no probe corpus of its own, so "safe mode" is not a branch inside
+	// the engine that a bug or a rule could route around — there is simply
+	// nothing to send.
+	//
+	// The runtime asserts the invariant on the way out (see engineHost.start):
+	// a job whose safety_mode is not intrusive carries no probes, and a job
+	// that somehow carries probes under a safe mode is refused rather than
+	// trimmed.
+	Probes []Probe `json:"probes,omitempty"`
+
 	// KindAuthorised: the runtime's answer to a KindAuthorise request.
 	Target    string `json:"target,omitempty"`
 	Permitted bool   `json:"permitted,omitempty"`
 	Reason    string `json:"reason,omitempty"`
+}
+
+// Probe is one payload the engine may send to solicit a response.
+//
+// The engine does not choose these and does not carry a corpus. It sends what
+// it was given, to the ports it was told, and reads a bounded reply.
+type Probe struct {
+	// Name identifies the probe in an observation's provenance, so a service
+	// identified by soliciting it can be traced to what was sent.
+	Name string `json:"name"`
+
+	// Ports this probe applies to. Empty means every open port, which is what a
+	// generic probe wants.
+	Ports []uint32 `json:"ports,omitempty"`
+
+	// Payload is sent verbatim. Bytes rather than a string because a probe for
+	// a binary protocol is not text.
+	Payload []byte `json:"payload"`
+
+	// ReadBytes bounds the reply. Zero takes the engine's default; an engine
+	// parses hostile input by design, and an unbounded read from a scan target
+	// is a denial of service against your own fleet.
+	ReadBytes uint32 `json:"read_bytes,omitempty"`
 }
 
 // Observation is what an engine produces. The runtime turns these into wire

@@ -10,7 +10,8 @@
         secret-logging secret-logging-test \
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
         env-check app-role store-test e2e dev-ca gosec mutate \
-        contract-guard-test fmt-check tidy-check govulncheck db-gates db-reachable
+        contract-guard-test fmt-check tidy-check govulncheck db-gates db-reachable \
+        safety-sabotage
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
 # under a running project (ADR-025: consume commodity infrastructure).
@@ -242,8 +243,13 @@ down: ## Stop the dev stack, keep volumes
 
 ## ---------- scan lab ----------
 
+# --build, because one lab target is built from source rather than pulled.
+#
+# Without it compose reuses a cached image, which is how a rebuilt fragile
+# target silently kept serving the previous version's nginx — the scan looked
+# unchanged and the reason was the image, not the code.
 lab-up: ## Start the isolated scan lab
-	docker compose -f lab/compose.yml up -d --wait
+	docker compose -f lab/compose.yml up -d --wait --build
 
 lab-down: ## Stop the scan lab and drop its volumes
 	docker compose -f lab/compose.yml down -v
@@ -455,21 +461,45 @@ migrate-new: ## Scaffold a migration pair: make migrate-new NAME=snake_case
 env-check: ## Assert env.example matches the environment the code reads
 	python3 .github/scripts/check_env_example.py
 
-safety: ## Scope-enforcement gate (NOT IMPLEMENTED — week 8)
-	@echo "NOT IMPLEMENTED — week 8. Scope-enforcement gate, docs/execution-plan.md 6.3."
+safety: ## Scope-enforcement gate (NARROW — egress capture only; full suite is week 8)
+	@echo "Scope-enforcement gate, narrow form. See .github/scripts/safety_gate.py."
 	@echo ""
-	@echo "Runs scans in a network namespace with egress capture and asserts that no"
-	@echo "packet ever leaves toward an address outside the configured scope."
+	@echo "COVERS: every packet the discovery engine sent went to an address inside"
+	@echo "lab/scope.txt, and to an address it was GIVEN — an engine constructs no"
+	@echo "targets (ADR-027), so anything else is construction however it arose."
 	@echo ""
-	@echo "Asserts enforcement at exactly TWO sites: Core (planning) and the scan point"
-	@echo "runtime (send path). Never in an engine — engines receive resolved,"
-	@echo "pre-authorised targets and may not construct new ones. Anything discovered"
-	@echo "mid-scan returns to the runtime for authorisation. See ADR-024, ADR-027."
+	@echo "DOES NOT COVER, still owed by week 8 (docs/execution-plan.md 6.3):"
+	@echo "  - the two-site scope check driven end to end; this exercises the ENGINE"
+	@echo "    with targets already authorised, and Core's planning check and the"
+	@echo "    runtime's send-path check are unit-tested rather than driven here"
+	@echo "  - exclusion overlapping an allow, CIDR boundary arithmetic"
+	@echo "  - a hostname resolving out of scope, a redirect to an out-of-scope host"
+	@echo "  - IPv6 forms of an excluded v4 address"
+	@echo "  - a raw-socket engine, of which there is none yet (ADR-047)"
 	@echo ""
-	@echo "Cases: exclusion overlapping an allow, CIDR boundary arithmetic, hostname"
-	@echo "resolving out of scope, redirect to an out-of-scope host, IPv6 forms of"
-	@echo "excluded IPv4 addresses, scope changed mid-scan."
-	@exit 1
+	@$(MAKE) --no-print-directory lab-up
+	python3 .github/scripts/safety_gate.py
+
+# A gate that passes and cannot fail proves nothing — and this one passed for
+# two wrong reasons before it failed for a right one.
+#
+# The obvious sabotage, scanning something out of scope, cannot work: the lab
+# networks are `internal: true`, so an out-of-scope address is UNREACHABLE and
+# produces no packet rather than a forbidden one. Narrowing the scope file makes
+# addresses that were genuinely scanned fall outside it, which drives the
+# comparison the gate exists to make.
+safety-sabotage: ## Prove the safety gate can fail
+	@$(MAKE) --no-print-directory lab-up
+	@printf '10.10.0.11/32   # deliberately narrow, for the sabotage\n' > .safety-scope.sabotage
+	@if CVAP_SAFETY_SCOPE=.safety-scope.sabotage python3 .github/scripts/safety_gate.py >/dev/null 2>&1; then \
+		rm -f .safety-scope.sabotage; \
+		echo "SABOTAGE SURVIVED: the gate passed with a scope file that excludes addresses"; \
+		echo "it just watched being scanned. It is not checking what it claims to check."; \
+		exit 1; \
+	else \
+		rm -f .safety-scope.sabotage; \
+		echo "safety-sabotage: the gate correctly failed against a narrowed scope"; \
+	fi
 
 corpus-check: ## Golden corpus diff (NOT IMPLEMENTED — week 8)
 	@echo "NOT IMPLEMENTED — week 8. Golden corpus diff, docs/execution-plan.md 6.2."

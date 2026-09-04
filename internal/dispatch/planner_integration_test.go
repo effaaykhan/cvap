@@ -251,3 +251,45 @@ func TestACancelledScanIsNeverPlanned(t *testing.T) {
 		t.Errorf("a cancelled scan was planned into %d tasks", len(got))
 	}
 }
+
+// TestAScanIsChunkedIntoSeveralJobs.
+//
+// One job for a whole /24 is 254 tasks that one scan point works through alone
+// while the rest of the zone sits idle — and if it dies, ADR-012 requeues the
+// entire range rather than the part not yet done. Jobs are the unit dispatch
+// hands out, so chunking is what makes a scan parallel at all.
+func TestAScanIsChunkedIntoSeveralJobs(t *testing.T) {
+	db, tenant, policyID := planFixture(t)
+	// A /26 is 64 addresses: more than one chunk, small enough to be quick.
+	scanID := createScan(t, db, tenant, policyID, "discovery", []store.ScanTarget{
+		{Type: "cidr", Value: "198.51.100.0/26", Authorized: true},
+	})
+
+	planOnce(t, db, tenant)
+
+	var jobs, tasks int
+	if err := db.Read(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		if err := c.QueryRow(ctx,
+			`SELECT count(*) FROM scan_jobs WHERE tenant_id = $1 AND scan_id = $2`,
+			tenant.UUID(), scanID).Scan(&jobs); err != nil {
+			return err
+		}
+		return c.QueryRow(ctx, `
+			SELECT count(*) FROM scan_tasks t
+			  JOIN scan_jobs j ON j.tenant_id = t.tenant_id AND j.job_id = t.job_id
+			 WHERE t.tenant_id = $1 AND j.scan_id = $2`,
+			tenant.UUID(), scanID).Scan(&tasks)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if tasks != 64 {
+		t.Errorf("a /26 planned %d tasks, want 64", tasks)
+	}
+	want := (64 + dispatch.TasksPerJob - 1) / dispatch.TasksPerJob
+	if jobs != want {
+		t.Errorf("a /26 planned %d job(s), want %d at %d tasks each. One job for a whole range "+
+			"means one scan point does all of it and a lease loss requeues the lot.",
+			jobs, want, dispatch.TasksPerJob)
+	}
+}
