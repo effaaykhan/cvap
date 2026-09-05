@@ -358,7 +358,11 @@ func (r *Runtime) shutdown() {
 	deadline := time.After(MaxStopGrace + 5*time.Second)
 	for _, j := range jobs {
 		select {
-		case <-j.done:
+		case <-j.terminated:
+			// terminated, not done: done closes when the engine is reaped, which
+			// an abort does before terminate() enqueues the gathered results.
+			// Waiting on done here let shutdown return — and main exit — with the
+			// results still ungathered, losing them on every SIGTERM (ADR-026).
 		case <-deadline:
 			r.log.Error("a job did not finish aborting before shutdown gave up",
 				slog.String("job_id", j.id))
@@ -468,7 +472,8 @@ func (r *Runtime) onAssignment(ctx context.Context, a *scanpointv1.JobAssignment
 		corpus:       r.corpus,
 		host: newEngineHost(r.log, binary, id,
 			c.GetAllowedTargets(), c.GetExclusions()),
-		done: make(chan struct{}),
+		done:       make(chan struct{}),
+		terminated: make(chan struct{}),
 	}
 	j.setExpiry(time.Unix(a.GetLeaseExpiresUnix(), 0))
 
@@ -580,6 +585,13 @@ func (r *Runtime) abort(j *job, reason scanpointv1.TerminationReason) {
 
 // terminate submits whatever was gathered and sends JobTerminal.
 func (r *Runtime) terminate(j *job, reason scanpointv1.TerminationReason, incomplete bool, detail string) {
+	// terminated closes once terminate has run to completion — the results are
+	// enqueued and the terminal messages sent. shutdown() waits on this so it
+	// cannot return, and let the process exit, before the buffer holds what this
+	// job gathered. beginAbort's Once means terminate runs at most once, so this
+	// closes exactly once.
+	defer close(j.terminated)
+
 	j.zeroiseCredentials()
 
 	var observations []*scanpointv1.Observation

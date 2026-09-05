@@ -73,6 +73,22 @@ func (o EngineOutcome) String() string {
 // Both use internal/scope, the same matcher Core uses, so the two sites cannot
 // disagree about a rule — only about whether to ask, which is what the
 // conformance suites assert.
+// engineHostRunner is the engine host as the runtime uses it — the five methods
+// runJob, abort and terminate call. *engineHost is the production implementation
+// (a real subprocess); an in-process test substitutes a fake at this edge so the
+// real shutdown path (shutdown → abort → terminate → the runJob j.done/terminated
+// signals) can be exercised deterministically without spawning an engine. The
+// seam is in-process and reachable, so it carries a real overlay sabotage rather
+// than the observation-only treatment ADR-056 reserves for logic sealed inside a
+// separately-built binary.
+type engineHostRunner interface {
+	start(ctx context.Context, targets []enginewire.Target, budget engineBudget) error
+	pump()
+	wait() EngineOutcome
+	stop(grace time.Duration)
+	results() (obs []enginewire.Observation, sent uint32, truncated bool)
+}
+
 type engineHost struct {
 	log *slog.Logger
 

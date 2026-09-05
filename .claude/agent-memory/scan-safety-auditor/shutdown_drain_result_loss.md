@@ -37,3 +37,15 @@ to RETURN (terminate/Enqueue complete), e.g. a WaitGroup over the spawned aborts
 or a per-job "terminated" signal closed after terminate — not `j.done`. And the
 main drain loop must not treat an initially-empty buffer as "drained" before
 aborts are known enqueued. Relates to [[scanpoint_runtime_bypasses]].
+
+**Resolved (commit e8da5fa):** fixed with the per-job "terminated" signal — a
+j.terminated channel closed at the end of terminate() (after Enqueue); shutdown()
+waits on it, not j.done. j.done kept its meaning for the reassignment wait.
+Approach A alone sufficed: rt.Run's post-condition became "results enqueued", so
+main's existing drain loop sees a populated buffer — no main change needed, and
+the e2e passing with main unchanged confirmed it. Guarded by an in-process
+harness over the real shutdown path (TestShutdownWaitsForResultsBeforeExiting,
+overlay sabotage <-j.terminated -> <-j.done, deterministic 5/5) and an e2e
+observation (TestSigtermSubmitsGatheredResults, proven load-bearing by reverting
+the fix in source and watching it time out). job.host became an interface
+(engineHostRunner) to allow a fake host at that edge.

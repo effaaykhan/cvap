@@ -35,7 +35,7 @@ type job struct {
 	// then the spawn went ahead. The engine ran unsupervised, outside the job
 	// table, unreachable by a second cancel or by the kill switch. Two
 	// independent reviews reproduced it.
-	host   *engineHost
+	host   engineHostRunner
 	cancel context.CancelFunc
 
 	// corpus is the fingerprint content in force for this job, resolved once at
@@ -67,7 +67,14 @@ type job struct {
 	// caller wins and its reason is the one recorded; the others return
 	// immediately rather than submitting a second time under a different one.
 	once sync.Once
-	done chan struct{}
+	// done closes when runJob returns — the engine is reaped and its outcome
+	// handled. terminated closes when terminate() has finished, AFTER the results
+	// are enqueued. shutdown() must wait on terminated, not done: done can close
+	// the instant an abort stops the engine, while terminate()'s Enqueue is still
+	// running in the abort goroutine, so waiting on done lets shutdown return —
+	// and the process exit — before the gathered results are buffered (ADR-026).
+	done       chan struct{}
+	terminated chan struct{}
 }
 
 // addCredential takes a new grant without losing the old one.

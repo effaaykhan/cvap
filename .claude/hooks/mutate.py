@@ -107,6 +107,9 @@ GO_SUITES = [
     # F6×F5 (sustained rejection keeps the buffer and loses nothing) — the compose
     # that surfaced the RETRY_LATER-on-chunk-0 data-loss fix in submit.go.
     "internal/scanpoint/fault_backpressure_buffer_test.go",
+    # Shutdown waits for results to be enqueued, not just for the engine to be
+    # reaped — an in-process harness over the real shutdown path.
+    "internal/scanpoint/fault_shutdown_test.go",
 ]
 
 # The declaration shape, in comments beside the tests:
