@@ -166,11 +166,18 @@ func (OIDCAuthRequests) PurgeExpiredAuthRequests(ctx context.Context, c *Conn, l
 	if limit <= 0 || limit > 10000 {
 		limit = 1000
 	}
+	// ORDER BY before the LIMIT: a LIMIT with no order picks an arbitrary subset,
+	// and while every candidate here is already expired — so which ones this call
+	// deletes is harmless and the sweeper's next call takes the rest — an
+	// unordered bounded query is nondeterministic by definition, and this session
+	// is removing the shape rather than reasoning about each instance of it.
+	// Oldest-expired first is the sensible order to clear.
 	const q = `
 		DELETE FROM oidc_auth_requests
 		 WHERE tenant_id = $1 AND request_id IN (
 			SELECT request_id FROM oidc_auth_requests
 			 WHERE tenant_id = $1 AND expires_at <= now()
+			 ORDER BY expires_at
 			 LIMIT $2)`
 
 	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), limit)

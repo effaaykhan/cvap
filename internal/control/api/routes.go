@@ -352,10 +352,23 @@ func (s *Server) routes() {
 		Summary: "Export findings as CSV",
 		Description: "The findings list (same filters) as CSV, for the reporting §2 permits. " +
 			"Bounded: an export matching more than the cap is REFUSED with 422 rather than " +
-			"truncated, so an incomplete file never masquerades as complete — narrow it with a filter.",
-		Access: AccessPermission, Permission: PermFindingRead,
+			"truncated, so an incomplete file never masquerades as complete — narrow it with a " +
+			"filter. Gated by finding.export_all, a heavier authority than finding.read: pulling " +
+			"the whole set into a file is exfiltration shaped like a feature (ADR-052).",
+		Access: AccessPermission, Permission: PermFindingExportAll,
 		ResponseContentType: "text/csv",
 		Handler:             s.exportFindingsCSV,
+	})
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/assets.csv",
+		Summary: "Export assets as CSV",
+		Description: "The asset inventory (same filters) as CSV. Bounded and refusing over the " +
+			"cap, exactly as the findings export (ADR-052). Gated by asset.export_all, held by " +
+			"operator and above rather than every reader.",
+		Access: AccessPermission, Permission: PermAssetExportAll,
+		ResponseContentType: "text/csv",
+		Handler:             s.exportAssetsCSV,
 	})
 
 	// ----------------------------------------------------------- discovery

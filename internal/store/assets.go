@@ -332,3 +332,62 @@ func (Assets) GetDetail(ctx context.Context, c *Conn, id uuid.UUID) (*AssetDetai
 	}
 	return d, nil
 }
+
+// AssetExportRowCap bounds a CSV export of assets, the asset analogue of
+// findings' cap: an export over it is refused, never truncated, so an incomplete
+// file cannot pass for complete.
+const AssetExportRowCap = 50000
+
+// ListForExport returns up to `max` assets matching the filter, newest-seen
+// first, with no cursor — the whole set for a CSV. Callers pass the cap+1 and
+// refuse when the result exceeds the cap. Ordered (last_seen, asset_id) so the
+// bounded set is deterministic, not an arbitrary LIMIT slice.
+func (Assets) ListForExport(ctx context.Context, c *Conn, f AssetFilter, max int) ([]Asset, error) {
+	if max <= 0 || max > AssetExportRowCap+1 {
+		max = AssetExportRowCap + 1
+	}
+	var qArg, envArg, fragileArg any
+	if f.Query != "" {
+		qArg = "%" + f.Query + "%"
+	}
+	if f.Environment != "" {
+		envArg = f.Environment
+	}
+	if f.Fragile != nil {
+		fragileArg = *f.Fragile
+	}
+
+	const q = `
+		SELECT asset_id, coalesce(primary_hostname,''), coalesce(os_family,''),
+		       coalesce(os_version,''), coalesce(device_type,''), coalesce(vendor,''),
+		       criticality, coalesce(environment,''), coalesce(owner,''), fragile,
+		       first_seen, last_seen
+		  FROM assets
+		 WHERE tenant_id = $1
+		   AND ($2::text IS NULL OR primary_hostname ILIKE $2 OR EXISTS (
+		         SELECT 1 FROM asset_addresses aa
+		          WHERE aa.tenant_id = assets.tenant_id AND aa.asset_id = assets.asset_id
+		            AND aa.valid_to IS NULL AND host(aa.ip_address) ILIKE $2))
+		   AND ($3::text IS NULL OR environment = $3)
+		   AND ($4::boolean IS NULL OR fragile = $4)
+		 ORDER BY last_seen DESC, asset_id DESC
+		 LIMIT $5`
+
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), qArg, envArg, fragileArg, max)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+
+	var out []Asset
+	for rows.Next() {
+		var a Asset
+		if err := rows.Scan(&a.ID, &a.Hostname, &a.OSFamily, &a.OSVersion, &a.DeviceType,
+			&a.Vendor, &a.Criticality, &a.Environment, &a.Owner, &a.Fragile,
+			&a.FirstSeen, &a.LastSeen); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, a)
+	}
+	return out, mapError(rows.Err())
+}

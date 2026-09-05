@@ -47,6 +47,17 @@ const (
 	PermAssetRead   Permission = "asset.read"
 	PermFindingRead Permission = "finding.read"
 
+	// Bulk export is a separate, heavier authority than reading, held by operator
+	// and above rather than every reader. Reading a finding is triage; pulling the
+	// whole tenant's findings or assets into a single file is exfiltration shaped
+	// like a feature — the row that leaves in a CSV is the same row, but one is a
+	// page and the other is the estate. A viewer who may read may not necessarily
+	// walk out with everything at once, and the two permissions let a deployment
+	// draw that line. `_all` names what they authorise: the whole set, bounded
+	// only by the export cap.
+	PermFindingExportAll Permission = "finding.export_all"
+	PermAssetExportAll   Permission = "asset.export_all"
+
 	// The fleet stop. Held apart from every other permission because it is the
 	// control ADR-024 requires to be reachable in seconds by whoever is holding
 	// the pager, which is not necessarily whoever administers policy.
@@ -67,6 +78,7 @@ var allPermissions = map[Permission]bool{
 	PermKillIssue: true, PermKillResolve: true,
 	PermAuthConfigRead: true, PermAuthConfigWrite: true,
 	PermAssetRead: true, PermFindingRead: true,
+	PermFindingExportAll: true, PermAssetExportAll: true,
 }
 
 // PermissionNames lists the closed set, sorted. For the OpenAPI document and

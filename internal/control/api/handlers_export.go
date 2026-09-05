@@ -48,6 +48,28 @@ func csvSafe(v string) string {
 	return v
 }
 
+// exportCap resolves the row cap: the configured override, or the given default.
+func (s *Server) exportCap(def int) int {
+	if s.cfg.ExportRowCap > 0 {
+		return s.cfg.ExportRowCap
+	}
+	return def
+}
+
+// overExportCap writes the 422 refusal and returns true when a bounded export
+// exceeded its cap. Shared by both exporters so the refuse-not-truncate decision
+// lives in ONE place — which is also the one the cap mutation anchors on. `noun`
+// and `filters` complete the fixed sentence telling the caller how to narrow it.
+func (s *Server) overExportCap(w http.ResponseWriter, r *http.Request, got, cap int, noun, filters string) bool {
+	if got > cap {
+		writeError(w, r, s.log, http.StatusUnprocessableEntity, CodeUnprocessable,
+			"this export matches more than "+strconv.Itoa(cap)+" "+noun+
+				"; narrow it with "+filters+".", nil)
+		return true
+	}
+	return false
+}
+
 func (s *Server) exportFindingsCSV(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -73,10 +95,7 @@ func (s *Server) exportFindingsCSV(w http.ResponseWriter, r *http.Request) {
 		f.AssetID = id
 	}
 
-	rowCap := store.ExportRowCap
-	if s.cfg.ExportRowCap > 0 {
-		rowCap = s.cfg.ExportRowCap
-	}
+	rowCap := s.exportCap(store.ExportRowCap)
 
 	tenant, _ := tenantFrom(r.Context())
 	var rowsOut []store.FindingSummary
@@ -90,13 +109,9 @@ func (s *Server) exportFindingsCSV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// More than the cap matched: refuse, rather than write a file that is
-	// silently short of the truth. Unprocessable, not an internal error — the
-	// caller can fix it by filtering.
-	if len(rowsOut) > rowCap {
-		writeError(w, r, s.log, http.StatusUnprocessableEntity, CodeUnprocessable,
-			"this export matches more than "+strconv.Itoa(rowCap)+
-				" findings; narrow it with a status, severity, or asset filter.", nil)
+	// More than the cap matched: refuse, rather than write a file silently short
+	// of the truth. The caller can fix it by filtering.
+	if s.overExportCap(w, r, len(rowsOut), rowCap, "findings", "a status, severity, or asset filter") {
 		return
 	}
 
@@ -133,6 +148,73 @@ func (s *Server) exportFindingsCSV(w http.ResponseWriter, r *http.Request) {
 	// other post-header failure in this package.
 	if err := cw.Error(); err != nil {
 		s.log.ErrorContext(r.Context(), "findings CSV export write failed after headers",
+			slog.Any("error", err))
+	}
+}
+
+// exportAssetsCSV is the asset-inventory analogue of exportFindingsCSV: same
+// filters as GET /v1/assets, same bound-and-refuse discipline, same formula-
+// injection neutralisation. Gated by asset.export_all (ADR-052).
+func (s *Server) exportAssetsCSV(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	var f store.AssetFilter
+	f.Query = q.Get("q")
+	f.Environment = q.Get("environment")
+	if v := q.Get("fragile"); v != "" {
+		switch v {
+		case "true":
+			t := true
+			f.Fragile = &t
+		case "false":
+			fl := false
+			f.Fragile = &fl
+		default:
+			writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest, "fragile must be true or false.", nil)
+			return
+		}
+	}
+
+	rowCap := s.exportCap(store.AssetExportRowCap)
+
+	tenant, _ := tenantFrom(r.Context())
+	var rowsOut []store.Asset
+	err := s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
+		var err error
+		rowsOut, err = (store.Assets{}).ListForExport(ctx, c, f, rowCap+1)
+		return err
+	})
+	if err != nil {
+		storeError(w, r, s.log, err)
+		return
+	}
+	if s.overExportCap(w, r, len(rowsOut), rowCap, "assets", "a search or filter") {
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="assets.csv"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{
+		"asset_id", "hostname", "os_family", "device_type", "criticality",
+		"environment", "fragile", "first_seen", "last_seen",
+	})
+	for _, a := range rowsOut {
+		// hostname, os_family, device_type and vendor are derived from what a host
+		// volunteered, so they are csvSafe'd for the same reason the findings
+		// export is.
+		_ = cw.Write([]string{
+			a.ID.String(), csvSafe(a.Hostname), csvSafe(a.OSFamily), csvSafe(a.DeviceType),
+			string(a.Criticality), csvSafe(a.Environment), strconv.FormatBool(a.Fragile),
+			a.FirstSeen.UTC().Format(time.RFC3339), a.LastSeen.UTC().Format(time.RFC3339),
+		})
+	}
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		s.log.ErrorContext(r.Context(), "assets CSV export write failed after headers",
 			slog.Any("error", err))
 	}
 }

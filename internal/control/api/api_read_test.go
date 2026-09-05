@@ -231,6 +231,7 @@ func TestReadEndpointsRequireTheirPermission(t *testing.T) {
 		"/v1/findings/" + sf.findingID.String(),
 		"/v1/exposure",
 		"/v1/findings.csv",
+		"/v1/assets.csv",
 	} {
 		w := f.do(t, http.MethodGet, path, nil, cookies, csrf)
 		if w.Code != http.StatusForbidden {
@@ -268,10 +269,10 @@ func TestReadEndpointsAreTenantIsolated(t *testing.T) {
 // mutate:test    ./internal/control/api/ -run TestFindingsCSVExport
 //
 // mutate:case    an over-cap CSV export is truncated rather than refused
-// mutate:old     if len(rowsOut) > rowCap {
+// mutate:old     if got > cap {
 // mutate:new     if false {
 func TestFindingsCSVExportRefusesOverTheCap(t *testing.T) {
-	f := newFixture(t, `{"finding.read": true}`)
+	f := newFixture(t, `{"finding.export_all": true}`)
 	f.seedFinding(t, false)
 	f.seedFinding(t, false) // two findings, cap of one
 
@@ -290,7 +291,7 @@ func TestFindingsCSVExportRefusesOverTheCap(t *testing.T) {
 // TestFindingsCSVExportWritesACompleteFile — the success path: within the cap,
 // a real text/csv body with the header row and one data row per finding.
 func TestFindingsCSVExportWritesACompleteFile(t *testing.T) {
-	f := newFixture(t, `{"finding.read": true}`)
+	f := newFixture(t, `{"finding.export_all": true}`)
 	f.seedFinding(t, false)
 	f.seedFinding(t, false)
 	cookies, csrf := f.login(t)
@@ -345,7 +346,7 @@ func (f *fixture) doOn(t *testing.T, srv *api.Server, method, path string, cooki
 // scanned host volunteered, so it is attacker-influenceable; a value starting
 // with = must not reach a spreadsheet as a live formula.
 func TestFindingsCSVNeutralisesFormulaInjection(t *testing.T) {
-	f := newFixture(t, `{"finding.read": true}`)
+	f := newFixture(t, `{"finding.export_all": true}`)
 	err := f.db.Write(context.Background(), f.tenant, func(ctx context.Context, c *store.Conn) error {
 		var ruleID uuid.UUID
 		if err := c.QueryRow(ctx, `SELECT rule_id FROM rules WHERE engine='rules' ORDER BY name LIMIT 1`).Scan(&ruleID); err != nil {
@@ -442,5 +443,44 @@ func TestScanPointsFleetListIsWorstFirst(t *testing.T) {
 	// Certificate fingerprints must never be rendered.
 	if strings.Contains(w.Body.String(), silentFP) {
 		t.Error("a certificate fingerprint reached the fleet scan-point response")
+	}
+}
+
+// TestAssetsCSVExport — the asset export path: within the cap, a text/csv body
+// with the header and one row per asset, gated by asset.export_all.
+func TestAssetsCSVExport(t *testing.T) {
+	f := newFixture(t, `{"asset.export_all": true}`)
+	if err := f.db.Write(context.Background(), f.tenant, func(ctx context.Context, c *store.Conn) error {
+		_, err := (store.Assets{}).Create(ctx, c, store.Asset{Hostname: "a1.corp", Environment: "production"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cookies, csrf := f.login(t)
+	w := f.do(t, http.MethodGet, "/v1/assets.csv", nil, cookies, csrf)
+	if w.Code != http.StatusOK {
+		t.Fatalf("assets csv: %d %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/csv") {
+		t.Errorf("Content-Type = %q, want text/csv", ct)
+	}
+	lines := strings.Split(strings.TrimSpace(w.Body.String()), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "asset_id,hostname,os_family") {
+		t.Errorf("assets csv shape wrong: %q", w.Body.String())
+	}
+}
+
+// TestExportRequiresExportPermissionNotRead — the separate-permission decision:
+// a session that may READ findings and assets still may not EXPORT them. Reading
+// a row is triage; walking out with the whole set is a heavier authority.
+func TestExportRequiresExportPermissionNotRead(t *testing.T) {
+	f := newFixture(t, `{"finding.read": true, "asset.read": true}`)
+	cookies, csrf := f.login(t)
+	for _, path := range []string{"/v1/findings.csv", "/v1/assets.csv"} {
+		w := f.do(t, http.MethodGet, path, nil, cookies, csrf)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("GET %s with read-but-not-export gave %d, want 403 — export is a separate "+
+				"permission from read", path, w.Code)
+		}
 	}
 }
