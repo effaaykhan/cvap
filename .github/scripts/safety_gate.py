@@ -1,14 +1,26 @@
 #!/usr/bin/env python3
-"""The scope-enforcement gate, narrow form.
+"""The scope-enforcement gate, the full §6.3 form.
 
 ============================================================================
-Runs the engine with egress capture and asserts nothing left scope.
+Runs the engine AND the runtime send-path with egress capture, and asserts
+nothing left scope.
 ============================================================================
 
-docs/execution-plan.md puts the full gate in week 8. This is the part that
-could not wait: the discovery engine is the first code in this repository that
-can put a packet on a wire, and shipping it with the gate still a failing stub
-is the wrong order.
+Two layers, because scope is enforced in the runtime and the engine is not:
+
+  - ENGINE phases (main, below): the discovery and fingerprint engines run
+    directly, and the capture proves the packet budget, payload inertness on
+    non-inert ports, and that a safe job sends no payload. These measure the
+    engine, which is the first code here that can put a packet on a wire.
+
+  - SCOPE cases (safety_scope.py): the six §6.3 cases run a job through the
+    scan-point RUNTIME's send-path scope check — ADR-024's second enforcement
+    site, which an engine-direct run never instantiates — and assert which
+    addresses did and did not receive packets. Exclusion overlapping an allow,
+    CIDR boundary arithmetic, a hostname refused before resolution, the
+    v4-mapped form of an excluded address, and a scan halted in flight. A
+    redirect to an out-of-scope host and the NAT64/6to4/Teredo/ISATAP forms are
+    named as coverage statements with the reason they are not on this wire.
 
 WHAT THIS COVERS
   - Every packet the engine sent went to an address inside lab/scope.txt.
@@ -27,16 +39,16 @@ WHAT THIS COVERS
     packet-capture audit measured twelve queries in a run this gate called
     clean.
 
-WHAT THIS DOES NOT COVER, and week 8 still owes
-  - The two-site scope enforcement itself. This exercises the ENGINE with
-    targets already authorised; Core's planning check and the runtime's send
-    path check are unit-tested and are not driven end to end here.
-  - Exclusion overlapping an allow, CIDR boundary arithmetic, a hostname
-    resolving out of scope, a redirect to an out-of-scope host, IPv6 forms of an
-    excluded v4 address.
-  - A raw-socket engine. There is none (ADR-047), and when there is, the capture
-    below is the only evidence rather than one of two — the connect path is
-    observable through the socket API and a raw sender is not.
+WHAT THIS STILL DOES NOT COVER
+  - Core's planning-time scope check (site one) end to end. The scope cases here
+    drive the runtime (site two), which is the last line before packets; site one
+    is unit-tested (internal/dispatch) and its refusals produce no wire traffic
+    to capture.
+  - A redirect to an out-of-scope host, and the NAT64/6to4/Teredo/ISATAP
+    translated forms — coverage statements in safety_scope, each with its reason.
+  - A raw-socket engine. There is none (ADR-047), and when there is, this capture
+    is the only evidence rather than one of two — the connect path is observable
+    through the socket API and a raw sender is not.
 """
 
 import base64
@@ -228,12 +240,42 @@ def main():
             cwd=ROOT, check=True,
             env={**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"},
         )
-    shutil.copy(ROOT / "test" / "safety" / "run.sh", work / "run.sh")
-    (work / "run.sh").chmod(0o755)
+    # runtimedrive runs a job through the scan-point RUNTIME's send-path scope
+    # check — ADR-024's second site — which the engine-direct phases below never
+    # instantiate. The §6.3 scope cases (safety_scope.py) drive it.
+    subprocess.run(
+        ["go", "build", "-o", str(work / "runtimedrive"), "./test/safety/runtimedrive"],
+        cwd=ROOT, check=True,
+        env={**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"},
+    )
+    for script in ("run.sh", "run-runtime.sh"):
+        shutil.copy(ROOT / "test" / "safety" / script, work / script)
+        (work / script).chmod(0o755)
 
     capture_image = prepare_capture_image()
     if capture_image is None:
         return 2
+
+    # Scope-only fast path: the engine phases below (corpus dump, three container
+    # runs, the budget and payload assertions) measure the ENGINE and pass every
+    # time a scope case is sabotaged, so running them 5× for the sabotage matrix
+    # is minutes of waste that could also mask the scope result. When a scope case
+    # is being sabotaged — or CVAP_SAFETY_ONLY_SCOPE is set — skip straight to the
+    # scope cases. runtimedrive, the engines and the scripts are already built.
+    only_scope = (os.environ.get("CVAP_SAFETY_ONLY_SCOPE") == "1"
+                  or bool(os.environ.get("CVAP_SAFETY_SCOPE_SABOTAGE")))
+    if only_scope:
+        import safety_scope
+        failures, lines = safety_scope.run_scope_cases(work, capture_image)
+        for ln in lines:
+            print(ln, file=(sys.stderr if failures else sys.stdout))
+        if failures:
+            print("\nsafety: FAILED (scope cases only)", file=sys.stderr)
+            for f in failures:
+                print(f, file=sys.stderr)
+            return 1
+        print("\nsafety: scope cases passed; engine phases skipped (scope-only run)")
+        return 0
 
     # The REAL corpus, asked for rather than restated.
     #
@@ -527,23 +569,44 @@ def main():
             "PACKETS, so undercharging makes every one of them looser by this factor."
         )
 
+    # ====================================================================
+    # The §6.3 scope-enforcement cases, driven through the runtime send-path.
+    # ====================================================================
+    #
+    # The three phases above measure the ENGINE — packet budget, payload
+    # inertness, safe mode. They cannot measure scope, because an engine holds no
+    # scope check (ADR-027); the enforcing site is the runtime, which the phases
+    # above never instantiate. safety_scope drives it (runtimedrive) and puts the
+    # six §6.3 cases on the wire.
+    import safety_scope
+    scope_failures, scope_lines = safety_scope.run_scope_cases(work, capture_image)
+    failures.extend(scope_failures)
+
     if failures:
         print("\nsafety: FAILED", file=sys.stderr)
         for f in failures:
             print(f, file=sys.stderr)
+        if scope_lines:
+            print("\nscope cases (for context):", file=sys.stderr)
+            for ln in scope_lines:
+                print(ln, file=sys.stderr)
         return 1
 
     print("\nsafety: every packet went to an authorised target inside lab/scope.txt")
-    print("Two phases ran: discovery under a SAFE job, and fingerprint under an INTRUSIVE one")
-    print("with the built-in corpus — so the probe payloads and the TLS handshake are inside")
-    print("the capture rather than outside it. No payload byte reached 9100 or 631, and a")
-    print("third phase ran fingerprint under a SAFE job and put no payload on the wire at all.")
-    print("The capture filter is 'tcp or udp port 53' — this engine's traffic plus the")
-    print("resolver lookups an earlier filter of 'tcp' alone made invisible. It MUST widen")
-    print("again when the engine gains a method; a raw sender would not appear here.")
-    print("NOT covered here — see the docstring and docs/execution-plan.md 6.3:")
-    print("  the two-site scope check end to end, exclusion/allow overlap, CIDR")
-    print("  boundaries, hostname and redirect cases, IPv6 forms, raw sockets.")
+    print("Engine phases: discovery under a SAFE job, fingerprint under an INTRUSIVE one with")
+    print("the built-in corpus (so the probe payloads and the TLS handshake are inside the")
+    print("capture), and fingerprint under a SAFE job that put no payload on the wire at all.")
+    print("No payload byte reached 9100 or 631.")
+    print("\nScope enforcement (§6.3), each driven through the runtime send-path and measured")
+    print("at the wire on " + safety_scope.NET + ":")
+    for ln in scope_lines:
+        print(ln)
+    print("\nThe capture filter is 'tcp or udp port 53' — this engine's traffic plus resolver")
+    print("lookups. It MUST widen when an engine gains a method; a raw sender would not appear.")
+    print("The scope-changed-mid-scan TRIGGER (a narrowing → a lost lease) is asserted in")
+    print("internal/dispatch (TestALeaseIsNotRenewedAfterScopeNarrows, ADR-051); the wire half")
+    print("above is that a halted scan stops sending. Still off this wire, and said so above:")
+    print("a raw-socket engine, and the two coverage-statement cases.")
     return 0
 
 

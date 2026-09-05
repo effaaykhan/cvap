@@ -59,3 +59,4 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 048 | The fingerprint corpus is signed content under a static policy it cannot widen | Accepted |
 | 049 | Probes have kinds, and a key exchange is not a payload (supersedes 048 §1 rule 2) | Accepted |
 | 050 | The rule engine is closed evaluators and open rules | Accepted |
+| 051 | A scope narrowing reaches an in-flight job at its next lease renewal | Accepted |

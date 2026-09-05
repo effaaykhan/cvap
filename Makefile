@@ -462,20 +462,28 @@ migrate-new: ## Scaffold a migration pair: make migrate-new NAME=snake_case
 env-check: ## Assert env.example matches the environment the code reads
 	python3 .github/scripts/check_env_example.py
 
-safety: ## Scope-enforcement gate (NARROW — egress capture only; full suite is week 8)
-	@echo "Scope-enforcement gate, narrow form. See .github/scripts/safety_gate.py."
+safety: ## Scope-enforcement gate (full §6.3: engine egress + runtime send-path scope)
+	@echo "Scope-enforcement gate, full §6.3 form. See .github/scripts/safety_gate.py"
+	@echo "and .github/scripts/safety_scope.py. Everything below is measured at the wire."
 	@echo ""
-	@echo "COVERS: every packet the discovery engine sent went to an address inside"
-	@echo "lab/scope.txt, and to an address it was GIVEN — an engine constructs no"
-	@echo "targets (ADR-027), so anything else is construction however it arose."
+	@echo "COVERS — ENGINE (engine run directly, egress captured):"
+	@echo "  - every packet went to an authorised address inside lab/scope.txt"
+	@echo "  - the packet budget; no payload to a non-inert port; a safe job sends none"
 	@echo ""
-	@echo "DOES NOT COVER, still owed by week 8 (docs/execution-plan.md 6.3):"
-	@echo "  - the two-site scope check driven end to end; this exercises the ENGINE"
-	@echo "    with targets already authorised, and Core's planning check and the"
-	@echo "    runtime's send-path check are unit-tested rather than driven here"
-	@echo "  - exclusion overlapping an allow, CIDR boundary arithmetic"
-	@echo "  - a hostname resolving out of scope, a redirect to an out-of-scope host"
-	@echo "  - IPv6 forms of an excluded v4 address"
+	@echo "COVERS — SCOPE (job driven through the runtime send-path, ADR-024 site two):"
+	@echo "  - an exclusion overlapping an allow: the excluded host receives no packet"
+	@echo "  - CIDR boundary arithmetic at the network and broadcast addresses"
+	@echo "  - a hostname refused before anything resolves it (no DNS leaves the host)"
+	@echo "  - a scan halted in flight stops sending (ADR-051; trigger asserted in"
+	@echo "    internal/dispatch, wire consequence here)"
+	@echo ""
+	@echo "COVERAGE STATEMENTS — named, not silently skipped:"
+	@echo "  - IPv6/v4-mapped forms of an excluded v4: the runtime only ever sees the"
+	@echo "    canonical plain v4 (a v6 form is refused non-canonical); the collapse is"
+	@echo "    a canonicalisation property unit-tested in internal/target and scopetest"
+	@echo "  - a redirect to an out-of-scope host: the fingerprint engine follows none"
+	@echo "  - NAT64/6to4/Teredo/ISATAP forms: no translator in the lab, no route"
+	@echo "  - Core planning-site refusals produce no wire traffic (unit-tested)"
 	@echo "  - a raw-socket engine, of which there is none yet (ADR-047)"
 	@echo ""
 	@$(MAKE) --no-print-directory lab-up
@@ -489,18 +497,27 @@ safety: ## Scope-enforcement gate (NARROW — egress capture only; full suite is
 # produces no packet rather than a forbidden one. Narrowing the scope file makes
 # addresses that were genuinely scanned fall outside it, which drives the
 # comparison the gate exists to make.
-safety-sabotage: ## Prove the safety gate can fail
+safety-sabotage: ## Prove each safety case can fail INDEPENDENTLY
 	@$(MAKE) --no-print-directory lab-up
-	@printf '10.10.0.11/32   # deliberately narrow, for the sabotage\n' > .safety-scope.sabotage
-	@if CVAP_SAFETY_SCOPE=.safety-scope.sabotage python3 .github/scripts/safety_gate.py >/dev/null 2>&1; then \
-		rm -f .safety-scope.sabotage; \
-		echo "SABOTAGE SURVIVED: the gate passed with a scope file that excludes addresses"; \
-		echo "it just watched being scanned. It is not checking what it claims to check."; \
+	@fail=0; \
+	echo "safety-sabotage: a case that cannot fail proves nothing, so each is broken alone."; \
+	echo ""; \
+	printf '10.10.0.11/32   # deliberately narrow, for the sabotage\n' > .safety-scope.sabotage; \
+	if CVAP_SAFETY_SCOPE=.safety-scope.sabotage python3 .github/scripts/safety_gate.py >/dev/null 2>&1; then \
+		echo "  SURVIVED  engine-egress: gate passed with a scope file excluding scanned hosts"; fail=1; \
+	else echo "  ok        engine-egress: fails against a narrowed scope file"; fi; \
+	rm -f .safety-scope.sabotage; \
+	for c in exclusion-overlap cidr-boundary hostname-out-of-scope scope-changed-mid-scan; do \
+		if CVAP_SAFETY_SCOPE_SABOTAGE=$$c python3 .github/scripts/safety_gate.py >/dev/null 2>&1; then \
+			echo "  SURVIVED  $$c: passed while sabotaged"; fail=1; \
+		else echo "  ok        $$c: fails when sabotaged"; fi; \
+	done; \
+	echo ""; \
+	if [ $$fail -ne 0 ]; then \
+		echo "A six-case suite where some case cannot fail is not a six-case suite."; \
 		exit 1; \
-	else \
-		rm -f .safety-scope.sabotage; \
-		echo "safety-sabotage: the gate correctly failed against a narrowed scope"; \
-	fi
+	fi; \
+	echo "safety-sabotage: every case fails independently when its own guard is broken"
 
 corpus-check: ## Golden corpus: label checks always; scan-and-diff metrics when the lab is up
 	python3 .github/scripts/corpus_check.py

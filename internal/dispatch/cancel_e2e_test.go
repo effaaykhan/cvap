@@ -260,3 +260,142 @@ func TestALeaseIsNotRenewedPastTheMaintenanceWindow(t *testing.T) {
 		t.Logf("stream ended with %v", err)
 	}
 }
+
+// ADR-051: the target dimension's in-flight site. A job leased while its target
+// was in scope keeps renewing; once the operator narrows the policy under it so
+// the target falls out, the very next renewal is refused (LOST) — a self-abort,
+// the same lever the maintenance window uses. Before this, narrowing reached no
+// in-flight task and the scan ran to completion touching a host the operator had
+// just removed.
+func TestALeaseIsNotRenewedAfterScopeNarrows(t *testing.T) {
+	db := testDB(t)
+	svc := newService(t, db)
+	tenant, leaf, spID := enrolledScanPoint(t, db)
+
+	// A running, leased job whose single task is IN scope at dispatch: the policy
+	// allows the /24 and names no exclusion. Seeded leased for the same reason the
+	// window test is — this is the job that was legitimately claimed.
+	var jobID uuid.UUID
+	var policyID uuid.UUID
+	var epoch int64
+	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		tid := c.Tenant().UUID()
+		var scanID, targetID uuid.UUID
+		if err := c.QueryRow(ctx,
+			`INSERT INTO scan_policies (tenant_id, name) VALUES ($1,$2) RETURNING policy_id`,
+			tid, "narrow-"+uuid.NewString()[:8]).Scan(&policyID); err != nil {
+			return err
+		}
+		if _, err := c.Exec(ctx,
+			`INSERT INTO policy_scope_rules (tenant_id, policy_id, effect, match_type, match_value)
+			 VALUES ($1,$2,'allow','cidr','10.10.0.0/24')`, tid, policyID); err != nil {
+			return err
+		}
+		if err := c.QueryRow(ctx,
+			`INSERT INTO scans (tenant_id, policy_id, scan_type) VALUES ($1,$2,'discovery')
+			 RETURNING scan_id`, tid, policyID).Scan(&scanID); err != nil {
+			return err
+		}
+		if err := c.QueryRow(ctx,
+			`INSERT INTO scan_targets (tenant_id, scan_id, target_type, target_value,
+			                           authorization_verified, verified_at)
+			 VALUES ($1,$2,'cidr','10.10.0.0/24',true,now()) RETURNING target_id`,
+			tid, scanID).Scan(&targetID); err != nil {
+			return err
+		}
+		if err := c.QueryRow(ctx,
+			`INSERT INTO scan_jobs (tenant_id, scan_id, engine, status, scan_point_id)
+			 VALUES ($1,$2,'discovery','running',$3) RETURNING job_id`,
+			tid, scanID, spID).Scan(&jobID); err != nil {
+			return err
+		}
+		if _, err := c.Exec(ctx,
+			`INSERT INTO scan_tasks (tenant_id, job_id, target_id, task_target)
+			 VALUES ($1,$2,$3,'10.10.0.14')`, tid, jobID, targetID); err != nil {
+			return err
+		}
+		l, err := (store.Leases{}).Grant(ctx, c, jobID, spID, store.LeaseTTL)
+		if err != nil {
+			return err
+		}
+		epoch = l.Epoch
+		return nil
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fs := newFakeStream(peerCtx(ctx, leaf))
+	done := make(chan error, 1)
+	go func() { done <- svc.Connect(fs) }()
+
+	fs.push(&scanpointv1.ScanPointMessage{
+		Msg: &scanpointv1.ScanPointMessage_Hello{Hello: &scanpointv1.Hello{
+			ScanPointId:     spID.String(),
+			ProtocolVersion: testVersion,
+			AgentVersion:    "0.1.0",
+			Capabilities: []*scanpointv1.Capability{
+				{Engine: "discovery", EngineVersion: "0.1.0", Enabled: true},
+			},
+		}},
+	})
+	fs.waitFor(t, "ServerHello", func(m *scanpointv1.CoreMessage) bool {
+		return m.GetServerHello() != nil
+	})
+
+	// First renewal: still in scope, so it must be GRANTED. This half proves the
+	// re-check does not refuse a job whose scope has not changed — a check that
+	// always returned "narrowed" would pass the LOST assertion below while
+	// breaking every renewal in the fleet.
+	fs.push(&scanpointv1.ScanPointMessage{
+		Msg: &scanpointv1.ScanPointMessage_LeaseRenewal{
+			LeaseRenewal: &scanpointv1.LeaseRenewal{JobId: jobID.String(), LeaseEpoch: epoch},
+		},
+	})
+	first := fs.waitFor(t, "LeaseGrant", func(m *scanpointv1.CoreMessage) bool {
+		return m.GetLease() != nil && m.GetLease().GetJobId() == jobID.String()
+	}).GetLease()
+	if first.GetState() != scanpointv1.LeaseState_LEASE_STATE_GRANTED {
+		t.Fatalf("in-scope renewal: state %v, want GRANTED — the re-check refused a job whose "+
+			"scope had not changed", first.GetState())
+	}
+
+	// The operator narrows scope under the running job: the host the task names is
+	// now excluded.
+	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		_, err := c.Exec(ctx,
+			`INSERT INTO policy_scope_rules (tenant_id, policy_id, effect, match_type, match_value)
+			 VALUES ($1,$2,'deny','cidr','10.10.0.14/32')`, c.Tenant().UUID(), policyID)
+		return err
+	}); err != nil {
+		t.Fatalf("narrow scope: %v", err)
+	}
+
+	// Second renewal: the target is now out of scope, so the renewal must be
+	// refused — the self-abort ADR-051 defines.
+	fs.push(&scanpointv1.ScanPointMessage{
+		Msg: &scanpointv1.ScanPointMessage_LeaseRenewal{
+			LeaseRenewal: &scanpointv1.LeaseRenewal{JobId: jobID.String(), LeaseEpoch: epoch},
+		},
+	})
+	second := fs.waitFor(t, "LeaseGrant", func(m *scanpointv1.CoreMessage) bool {
+		return m.GetLease() != nil && m.GetLease().GetJobId() == jobID.String() &&
+			m.GetLease().GetState() != scanpointv1.LeaseState_LEASE_STATE_GRANTED
+	}).GetLease()
+
+	if second.GetState() != scanpointv1.LeaseState_LEASE_STATE_LOST {
+		t.Errorf("renewal after scope narrowed: state %v, want LOST. Narrowing a policy under a "+
+			"running job reached no in-flight task, so the scan kept touching a host the operator "+
+			"had just excluded (ADR-051).", second.GetState())
+	}
+	if second.GetDetail() == "" {
+		t.Error("the refusal names no target; the operator is told a scan stopped but not why")
+	}
+
+	fs.closeInbound()
+	cancel()
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
+		t.Logf("stream ended with %v", err)
+	}
+}

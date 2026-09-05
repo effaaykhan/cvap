@@ -184,62 +184,14 @@ func (j *job) wireTargets() []enginewire.Target {
 func (j *job) budget() engineBudget {
 	c := j.constraints
 
-	// min(what Core sent, what ADR-024 permits). Forwarding Core's number
-	// verbatim made this site enforcement in name only: a Core with a planning
-	// bug, or one running ahead of a months-old scan point, could raise a
-	// ceiling the ADR says may only be lowered. Zero means Core sent nothing,
-	// and the platform default applies rather than "no limit".
-	rate := clampCeiling(c.GetMaxRatePerTarget(), PlatformMaxRatePerTarget)
-
 	var anyFragile bool
 	for _, t := range j.tasks {
 		if t.GetFragile() {
 			anyFragile = true
-			// ADR-024 control 3: fragile caps rate REGARDLESS of what the
-			// policy permits. The runtime holds the 10 pps number itself, so
-			// the cap applies even when Core sends 0 or forgets the field —
-			// which is the only way "regardless" can be true at this site.
-			f := clampCeiling(c.GetFragileRatePps(), PlatformFragileRatePPS)
-			if f < rate {
-				rate = f
-			}
 			break
 		}
 	}
 
-	// ========================================================================
-	// A FRAGILE target gets no probes, whatever the mode says.
-	// ========================================================================
-	//
-	// ADR-024 control 3 is that fragile "suppresses aggressive checks AND caps
-	// rate". Only the rate half existed: probes were decided from safety_mode
-	// alone, and Target.Fragile was read by nothing in the engine at all — a
-	// packet-capture audit measured a HEAD request and a bare newline going to a
-	// device marked fragile.
-	//
-	// Suppressed HERE rather than in the engine, for the reason the whole probe
-	// mechanism is here: an engine cannot send what it was never handed, and a
-	// flag it is trusted to honour is not the same guarantee.
-	//
-	// Whole-job rather than per-target, because probes travel once per job. That
-	// is deliberately conservative — one fragile target costs the whole job its
-	// probes, which loses some service identification and cannot harm anything.
-	// Per-target probe sets would need the engine to hold a mapping, which is
-	// more contract for a case chunking makes rare: a job is 32 targets from one
-	// planning pass.
-	//
-	// Probes travel ONLY under an intrusive mode, and the emptiness is the
-	// control rather than the mode string (ADR-021, and engineHost.start).
-	//
-	// The runtime holds the corpus, not the engine, for the same reason it holds
-	// the rate budget: an engine cannot send what it was never handed, so safe
-	// mode is not a branch inside the component with the socket. A bug there, or
-	// a rule asking for a probe, has nothing to reach for.
-	//
-	// Note which way round the default falls. An unrecognised or absent mode is
-	// NOT intrusive, so a Core that sent nothing, or a value this build does not
-	// know, yields no probes — the same direction clampCeiling takes for an
-	// absent rate.
 	corpus := j.corpus
 	if corpus == nil {
 		// A test constructing a bare job, or a runtime that has not resolved one
@@ -249,36 +201,93 @@ func (j *job) budget() engineBudget {
 		corpus, _ = BuiltinCorpus()
 	}
 
-	var probes []enginewire.Probe
-	if c.GetSafetyMode() == SafetyIntrusive && !anyFragile {
-		probes = corpus.Probes
+	b := clampToBudget(clampInputs{
+		Rate:        c.GetMaxRatePerTarget(),
+		FragileRate: c.GetFragileRatePps(),
+		Timeout:     c.GetConnectTimeoutMs(),
+		Concurrency: c.GetMaxConcurrentPerTarget(),
+		SafetyMode:  c.GetSafetyMode(),
+		AnyFragile:  anyFragile,
+		// The runtime holds the corpus, not the engine: an engine cannot send a
+		// probe it was never handed, so safe mode is not a branch inside the
+		// component with the socket. clampToBudget decides whether these travel.
+		Probes: corpus.Probes,
+	})
+
+	// Banner matches travel in EVERY mode, including safe: reading is not sending
+	// — the bytes have already arrived by the time a rule looks at them — so
+	// withholding them would cost identification and buy no safety. Probes are the
+	// withheld half; that asymmetry is the whole safe/intrusive distinction and it
+	// lives in clampToBudget.
+	b.BannerMatches = corpus.BannerMatches
+	return b
+}
+
+// clampInputs is what clampToBudget reduces to an engineBudget.
+type clampInputs struct {
+	Rate, FragileRate, Timeout, Concurrency uint32
+	SafetyMode                              string
+	AnyFragile                              bool
+	Probes                                  []enginewire.Probe
+}
+
+// clampToBudget applies ADR-024's ceilings to what a caller asks for, and is the
+// ONE place that decision lives.
+//
+// It is shared by job.budget (the production send path) and by SafetyDrive (the
+// safety-gate harness) so the harness cannot claim to enforce a ceiling the
+// runtime enforces while actually enforcing a different one — a harness that
+// clamped rate differently from production would measure itself, not the product.
+// It sets no BannerMatches or MaxProbesPerPort of its own beyond the platform
+// cap; the caller supplies banner matches, which travel in every mode.
+func clampToBudget(in clampInputs) engineBudget {
+	// min(what was asked, what ADR-024 permits). Forwarding a number verbatim
+	// makes a ceiling enforcement in name only: a planning bug, or a Core running
+	// ahead of a months-old scan point, could raise a ceiling the ADR says may
+	// only be lowered. Zero means nothing was sent, and the platform default
+	// applies rather than "no limit".
+	rate := clampCeiling(in.Rate, PlatformMaxRatePerTarget)
+	if in.AnyFragile {
+		// ADR-024 control 3: fragile caps rate REGARDLESS of what the policy
+		// permits. The 10 pps number is held here, so the cap applies even when
+		// the caller sends 0 or forgets the field — the only way "regardless" can
+		// be true at this site.
+		if f := clampCeiling(in.FragileRate, PlatformFragileRatePPS); f < rate {
+			rate = f
+		}
 	}
 
-	// A fragile target is SERIALISED as well as slowed. ADR-024 control 3 caps
-	// rate regardless of policy; connection count is the other lever and it is
-	// the one that tips a printer over. See PlatformFragileMaxConcurrent for the
-	// capture that made this a number rather than an opinion.
-	concurrency := clampCeiling(c.GetMaxConcurrentPerTarget(), PlatformMaxConcurrentPerTarget)
-	if anyFragile && concurrency > PlatformFragileMaxConcurrent {
+	// A fragile target is SERIALISED as well as slowed: connection count is the
+	// other lever and the one that tips a printer over.
+	concurrency := clampCeiling(in.Concurrency, PlatformMaxConcurrentPerTarget)
+	if in.AnyFragile && concurrency > PlatformFragileMaxConcurrent {
 		concurrency = PlatformFragileMaxConcurrent
+	}
+
+	// ========================================================================
+	// A FRAGILE target gets no probes, whatever the mode says; a SAFE job gets
+	// none either. The emptiness is the control, not the mode string (ADR-021).
+	// ========================================================================
+	//
+	// ADR-024 control 3 is that fragile "suppresses aggressive checks AND caps
+	// rate". Suppressed here rather than in the engine, for the reason the whole
+	// probe mechanism is here: an engine cannot send what it was never handed.
+	// Whole-job rather than per-target — probes travel once per job — which is
+	// conservative: one fragile target costs the job its probes and can harm
+	// nothing. An unrecognised or absent mode is NOT intrusive, so it yields no
+	// probes, the same direction clampCeiling takes for an absent rate.
+	var probes []enginewire.Probe
+	if in.SafetyMode == SafetyIntrusive && !in.AnyFragile {
+		probes = in.Probes
 	}
 
 	return engineBudget{
 		RatePPS:                rate,
-		ConnectTimeoutMS:       clampCeiling(c.GetConnectTimeoutMs(), PlatformConnectTimeoutMS),
+		ConnectTimeoutMS:       clampCeiling(in.Timeout, PlatformConnectTimeoutMS),
 		MaxConcurrentPerTarget: concurrency,
-		SafetyMode:             c.GetSafetyMode(),
+		SafetyMode:             in.SafetyMode,
 		Probes:                 probes,
-
-		// Banner matches travel in EVERY mode, including safe.
-		//
-		// This is the half of service identification that reads rather than
-		// sends, so withholding it would cost identification and buy no safety
-		// at all: the bytes have already arrived by the time a rule looks at
-		// them. Probes above are the withheld half, and the asymmetry between
-		// these two lines is the whole safe/intrusive distinction.
-		BannerMatches:    corpus.BannerMatches,
-		MaxProbesPerPort: PlatformMaxProbesPerPort,
+		MaxProbesPerPort:       PlatformMaxProbesPerPort,
 	}
 }
 

@@ -446,6 +446,17 @@ func (s *Service) onLeaseRenewal(ctx context.Context, sess *session, r *scanpoin
 		return
 	}
 
+	// ADR-051, the target dimension's second in-flight site, beside the window's.
+	// Scope is frozen on the assignment at dispatch, so an operator who narrows a
+	// policy under a running job reaches neither enforcement site until here. A
+	// refused renewal is a self-abort with zeroisation (invariant 8, ADR-012).
+	narrowed, why := s.scopeNarrowedForJob(ctx, sess, jobID)
+	if narrowed {
+		s.send(ctx, out, leaseGrant(r.GetJobId(), r.GetLeaseEpoch(), 0,
+			scanpointv1.LeaseState_LEASE_STATE_LOST, why))
+		return
+	}
+
 	var granted *store.Lease
 	err = s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
 		// holder_scan_point comes from the resolved session, never the message.
@@ -531,6 +542,87 @@ func (s *Service) windowClosedForJob(ctx context.Context, sess *session, jobID u
 		return false, ""
 	}
 	return true, "the policy's maintenance window has closed"
+}
+
+// scopeNarrowedForJob reports whether this job's policy has, since dispatch,
+// narrowed scope so that one of the job's own task targets is no longer
+// permitted, and the operator-facing reason (naming the target) if so.
+//
+// ADR-051. Scope is frozen on the JobAssignment at dispatch and both ADR-024
+// enforcement sites read that frozen copy; nothing re-reads the policy while a
+// job runs, so an operator narrowing scope under it reaches no in-flight task
+// until here. This is the target dimension's second in-flight site, beside
+// windowClosedForJob's for the time dimension, and it uses the same lever: a
+// refused renewal, which invariant 8 and ADR-012 turn into a self-abort.
+//
+// It re-runs the SAME matcher both enforcement sites call — scopePlan over the
+// live rules, then target.Matches + scope.Permits per target — rather than a
+// paraphrase, because a third evaluation of scope that could disagree is exactly
+// the drift internal/scope exists to prevent.
+//
+// Fail-OPEN on a read error, like windowClosedForJob: a database blip must not
+// self-abort every in-flight job and zeroise the fleet over a transient. The
+// start side fails closed by withholding; this in-flight side fails open by
+// keeping the lease until the next renewal, when it runs again.
+//
+// Whole-job, not per-target (ADR-051): halting the job needs no wire change,
+// where dropping only the excluded targets would need a live constraints push.
+func (s *Service) scopeNarrowedForJob(ctx context.Context, sess *session, jobID uuid.UUID) (bool, string) {
+	var (
+		allowed, exclusions []string
+		targets             []string
+		unexpressible       bool
+	)
+	if err := s.db.Read(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+		policy, err := (store.Policies{}).ForJob(ctx, c, jobID)
+		if err != nil {
+			return err
+		}
+		rules, err := (store.Policies{}).ScopeRules(ctx, c, policy.ID)
+		if err != nil {
+			return err
+		}
+		a, e, perr := scopePlan(rules)
+		if perr != nil {
+			// A policy whose rules cannot be expressed on the wire is a
+			// start-side refusal: offerWork -> refuseJob names the policy at the
+			// next claim. Revoking an in-flight lease for a planning defect would
+			// halt work that was authorised when it started, so leave it.
+			unexpressible = true
+			return nil
+		}
+		allowed, exclusions = a, e
+		tasks, err := (store.Jobs{}).Tasks(ctx, c, jobID)
+		if err != nil {
+			return err
+		}
+		for _, t := range tasks {
+			targets = append(targets, t.TaskTarget)
+		}
+		return nil
+	}); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.log.WarnContext(ctx, "could not read scope to re-check an in-flight job",
+				slog.String("job_id", jobID.String()), slog.Any("error", err))
+		}
+		return false, ""
+	}
+	if unexpressible {
+		return false, ""
+	}
+	for _, raw := range targets {
+		canon, canonical := target.Matches(raw)
+		if !canonical {
+			// A non-canonical target would have failed the job at dispatch, so
+			// its presence now is a defect the start side owns — but the
+			// fail-safe reading is the same as offerWork's, which refuses. Halt.
+			return true, fmt.Sprintf("policy scope re-check: target %q is not in canonical form", raw)
+		}
+		if ok, _ := scope.Permits(canon, allowed, exclusions); !ok {
+			return true, fmt.Sprintf("policy scope narrowed: target %q is no longer in scope", raw)
+		}
+	}
+	return false, ""
 }
 
 func (s *Service) onProgress(ctx context.Context, sess *session, p *scanpointv1.JobProgress) {
