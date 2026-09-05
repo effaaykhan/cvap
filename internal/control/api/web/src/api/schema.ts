@@ -857,10 +857,15 @@ export interface components {
         };
         ScanPointResponse: {
             agent_version: string;
+            capabilities: string[];
+            health: string;
+            health_reason?: string;
+            heartbeat_age_seconds?: number | null;
             hostname: string;
             id: string;
             /** Format: date-time */
             last_heartbeat?: string | null;
+            leases_held: number;
             protocol_version: string;
             status: string;
             zone_id: string;

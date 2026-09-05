@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"time"
@@ -304,6 +305,84 @@ type ScanPointResponse struct {
 	AgentVersion    string     `json:"agent_version"`
 	ProtocolVersion string     `json:"protocol_version"`
 	LastHeartbeat   *time.Time `json:"last_heartbeat,omitempty"`
+
+	// Health is synthesized at read time (see scanPointHealth): the raw Status
+	// above is the stored enum, this is the judgement. health_reason says why for
+	// any state that is not healthy. capabilities is the enabled engine set;
+	// leases_held is how many jobs it is actively running (informational).
+	// NOTE: rule-pack load status is NOT reflected here because it is not
+	// persisted (execution-plan §6.5) — health cannot tell you a scan point
+	// failed to load its rule pack.
+	Health              string   `json:"health"`
+	HealthReason        string   `json:"health_reason,omitempty"`
+	Capabilities        []string `json:"capabilities"`
+	HeartbeatAgeSeconds *int64   `json:"heartbeat_age_seconds,omitempty"`
+	LeasesHeld          int      `json:"leases_held"`
+}
+
+// scanPointHealth synthesizes a scan point's health from its persisted state,
+// the enabled engine set, and the protocol-version window Core enrolls against.
+//
+// The states, and the reasoning:
+//   - disabled / revoked: administrative, an override — not a liveness judgement.
+//   - pending: enrolled, no heartbeat yet.
+//   - offline: heartbeat older than HeartbeatTimeout (recomputed here, because
+//     the stored Status is only refreshed on a sweep and can lag).
+//   - degraded: online but UNUSABLE — an unsupported protocol version (dispatch
+//     will not hand it work, so "healthy" would overstate fleet capacity) or no
+//     enabled engine capability.
+//   - healthy: online, supported protocol, at least one enabled engine.
+func (s *Server) scanPointHealth(p store.ScanPoint, enabled []string, now time.Time) (health, reason string) {
+	switch p.Status {
+	case store.ScanPointDisabled:
+		return "disabled", "administratively disabled"
+	case store.ScanPointRevoked:
+		return "revoked", "certificate revoked"
+	}
+	if p.LastHeartbeat == nil {
+		return "pending", "enrolled, no heartbeat received yet"
+	}
+	age := now.Sub(*p.LastHeartbeat)
+	if age > store.HeartbeatTimeout {
+		return "offline", fmt.Sprintf("last heartbeat %s ago, past the %s timeout",
+			age.Round(time.Second), store.HeartbeatTimeout)
+	}
+	if !s.cfg.ProtocolVersions.Supported(p.ProtocolVersion) {
+		return "degraded", fmt.Sprintf("protocol version %q is outside the supported window; "+
+			"dispatch will not assign it work", p.ProtocolVersion)
+	}
+	if len(enabled) == 0 {
+		return "degraded", "no enabled engine capability; nothing can be dispatched to it"
+	}
+	return "healthy", ""
+}
+
+// scanPointResponses enriches a list of scan points with synthesized health. The
+// enabled-engine and lease-count maps are fetched once for the fleet (not per
+// scan point), so this is two extra queries, not N.
+func (s *Server) scanPointResponses(points []store.ScanPoint, engines map[uuid.UUID][]string,
+	leases map[uuid.UUID]int, now time.Time) []ScanPointResponse {
+	out := make([]ScanPointResponse, 0, len(points))
+	for _, p := range points {
+		enabled := engines[p.ID]
+		if enabled == nil {
+			enabled = []string{}
+		}
+		health, reason := s.scanPointHealth(p, enabled, now)
+		var age *int64
+		if p.LastHeartbeat != nil {
+			a := int64(now.Sub(*p.LastHeartbeat).Seconds())
+			age = &a
+		}
+		out = append(out, ScanPointResponse{
+			ID: p.ID.String(), ZoneID: p.ZoneID.String(), Hostname: p.Hostname,
+			Status: string(p.Status), AgentVersion: p.AgentVersion,
+			ProtocolVersion: p.ProtocolVersion, LastHeartbeat: p.LastHeartbeat,
+			Health: health, HealthReason: reason, Capabilities: enabled,
+			HeartbeatAgeSeconds: age, LeasesHeld: leases[p.ID],
+		})
+	}
+	return out
 }
 
 type ScanPointListResponse struct {
@@ -319,24 +398,25 @@ func (s *Server) listScanPoints(w http.ResponseWriter, r *http.Request) {
 	tenant, _ := tenantFrom(r.Context())
 
 	var points []store.ScanPoint
+	var engines map[uuid.UUID][]string
+	var leases map[uuid.UUID]int
 	err = s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
-		points, err = (store.ScanPoints{}).ListByZone(ctx, c, zoneID)
+		if points, err = (store.ScanPoints{}).ListByZone(ctx, c, zoneID); err != nil {
+			return err
+		}
+		if engines, err = (store.ScanPoints{}).EnabledEngines(ctx, c); err != nil {
+			return err
+		}
+		leases, err = (store.ScanPoints{}).HeldLeaseCounts(ctx, c)
 		return err
 	})
 	if err != nil {
 		storeError(w, r, s.log, err)
 		return
 	}
-	out := ScanPointListResponse{ScanPoints: make([]ScanPointResponse, 0, len(points))}
-	for _, p := range points {
-		out.ScanPoints = append(out.ScanPoints, ScanPointResponse{
-			ID: p.ID.String(), ZoneID: p.ZoneID.String(), Hostname: p.Hostname,
-			Status: string(p.Status), AgentVersion: p.AgentVersion,
-			ProtocolVersion: p.ProtocolVersion, LastHeartbeat: p.LastHeartbeat,
-		})
-	}
-	writeJSON(w, r, s.log, http.StatusOK, out)
+	writeJSON(w, r, s.log, http.StatusOK, ScanPointListResponse{
+		ScanPoints: s.scanPointResponses(points, engines, leases, time.Now())})
 }
 
 // listAllScanPoints is the fleet health list: every scan point in the tenant,
@@ -346,24 +426,25 @@ func (s *Server) listScanPoints(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listAllScanPoints(w http.ResponseWriter, r *http.Request) {
 	tenant, _ := tenantFrom(r.Context())
 	var points []store.ScanPoint
+	var engines map[uuid.UUID][]string
+	var leases map[uuid.UUID]int
 	err := s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
-		points, err = (store.ScanPoints{}).ListAll(ctx, c)
+		if points, err = (store.ScanPoints{}).ListAll(ctx, c); err != nil {
+			return err
+		}
+		if engines, err = (store.ScanPoints{}).EnabledEngines(ctx, c); err != nil {
+			return err
+		}
+		leases, err = (store.ScanPoints{}).HeldLeaseCounts(ctx, c)
 		return err
 	})
 	if err != nil {
 		storeError(w, r, s.log, err)
 		return
 	}
-	out := ScanPointListResponse{ScanPoints: make([]ScanPointResponse, 0, len(points))}
-	for _, p := range points {
-		out.ScanPoints = append(out.ScanPoints, ScanPointResponse{
-			ID: p.ID.String(), ZoneID: p.ZoneID.String(), Hostname: p.Hostname,
-			Status: string(p.Status), AgentVersion: p.AgentVersion,
-			ProtocolVersion: p.ProtocolVersion, LastHeartbeat: p.LastHeartbeat,
-		})
-	}
-	writeJSON(w, r, s.log, http.StatusOK, out)
+	writeJSON(w, r, s.log, http.StatusOK, ScanPointListResponse{
+		ScanPoints: s.scanPointResponses(points, engines, leases, time.Now())})
 }
 
 // EnrollmentTokenRequest issues a token for a zone.

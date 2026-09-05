@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/effaaykhan/cvap/internal/control/enrollment"
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
@@ -94,6 +95,13 @@ type Config struct {
 	// deployment can lower it and a test can prove the refusal without seeding
 	// the default cap's worth of rows.
 	ExportRowCap int
+
+	// ProtocolVersions is the same window Core enrolls and dispatches against
+	// (cmd/cvap-core passes the one value). Scan-point health reads it so an
+	// online scan point on an unsupported protocol version reports `degraded`
+	// rather than `healthy` — it is reachable but dispatch will not hand it work.
+	// One source, so the health judgement cannot disagree with the gate.
+	ProtocolVersions enrollment.VersionWindow
 }
 
 // Server is the operator API.

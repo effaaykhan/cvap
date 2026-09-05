@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/effaaykhan/cvap/internal/control/api"
+	"github.com/effaaykhan/cvap/internal/control/enrollment"
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
@@ -110,6 +111,8 @@ func newFixture(t *testing.T, permissions string) *fixture {
 	srv, err := api.New(db, slog.New(slog.NewJSONHandler(io.Discard, nil)), api.Config{
 		Version: "test", LocalAuthEnabled: true, Insecure: true,
 		ListenAddr: "127.0.0.1:0", SessionTTL: time.Hour,
+		// The supported protocol window scan-point health reads: "v1" is current.
+		ProtocolVersions: enrollment.VersionWindow{Accepted: "v1", MinSupported: "v1"},
 	})
 	if err != nil {
 		t.Fatal(err)

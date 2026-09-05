@@ -260,6 +260,10 @@ func run(log *slog.Logger) error {
 		AllowPrivateIssuers: os.Getenv("CVAP_CORE_OIDC_ALLOW_PRIVATE_ISSUER") == "1",
 		OIDCRootCAs:         oidcRoots,
 		SessionTTL:          apiSessionTTL(),
+		// The same window enrollment and dispatch use (declared at line ~158), so
+		// scan-point health's supported-version judgement cannot disagree with the
+		// gate that actually assigns work.
+		ProtocolVersions: versions,
 	})
 	if err != nil {
 		return fmt.Errorf("cvap-core: operator api: %w", err)

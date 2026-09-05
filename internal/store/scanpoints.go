@@ -224,6 +224,57 @@ func (ScanPoints) DeclareCapability(ctx context.Context, c *Conn, scanPointID uu
 	return &cap, nil
 }
 
+// EnabledEngines returns the enabled engine names for every scan point in the
+// tenant, one query for the whole fleet — the health list reads it, and a scan
+// point with none can be dispatched nothing (it is reachable but useless).
+func (ScanPoints) EnabledEngines(ctx context.Context, c *Conn) (map[uuid.UUID][]string, error) {
+	const q = `
+		SELECT scan_point_id, engine FROM scan_point_capabilities
+		 WHERE tenant_id = $1 AND enabled
+		 ORDER BY scan_point_id, engine`
+	rows, err := c.Query(ctx, q, c.Tenant().UUID())
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	out := map[uuid.UUID][]string{}
+	for rows.Next() {
+		var id uuid.UUID
+		var engine string
+		if err := rows.Scan(&id, &engine); err != nil {
+			return nil, mapError(err)
+		}
+		out[id] = append(out[id], engine)
+	}
+	return out, mapError(rows.Err())
+}
+
+// HeldLeaseCounts returns how many granted leases each scan point holds, for the
+// whole fleet, one query. Informational context on the health list — a scan
+// point with live leases is actively working — not a health determinant (a
+// partitioned one shows offline via its heartbeat, which is the signal).
+func (ScanPoints) HeldLeaseCounts(ctx context.Context, c *Conn) (map[uuid.UUID]int, error) {
+	const q = `
+		SELECT holder_scan_point, count(*) FROM job_leases
+		 WHERE tenant_id = $1 AND state = 'granted'
+		 GROUP BY holder_scan_point`
+	rows, err := c.Query(ctx, q, c.Tenant().UUID())
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	out := map[uuid.UUID]int{}
+	for rows.Next() {
+		var id uuid.UUID
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, mapError(err)
+		}
+		out[id] = n
+	}
+	return out, mapError(rows.Err())
+}
+
 func (ScanPoints) Capabilities(ctx context.Context, c *Conn, scanPointID uuid.UUID) ([]Capability, error) {
 	const q = `
 		SELECT capability_id, scan_point_id, engine, engine_version, enabled, declared_at
