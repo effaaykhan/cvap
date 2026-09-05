@@ -14,14 +14,15 @@ import (
 
 // Token format and lifetime.
 const (
-	// TokenPrefix identifies a CVAP enrollment token on sight.
-	//
-	// The trade, stated: a prefix tells whoever finds a leaked token what it is.
-	// It also lets GitHub and GitLab secret scanning match it, lets us grep our
-	// own logs and ticket systems for one, and lets a scan point reject an
-	// obviously-wrong paste before spending a round trip. ghp_ and AKIA make the
-	// same trade for the same reasons. Detection beats obscurity here, because
-	// the token is short-lived and single-use and the leak is what matters.
+	// TokenPrefix identifies a CVAP enrollment token on sight. The trade — a
+	// prefix tells whoever finds a leaked token what it is — is worth it because
+	// the token is short-lived and single-use, so detection beats obscurity;
+	// ghp_ and AKIA make the same trade. See ADR-055 for the three rationales
+	// (greppable, identifiable on sight, secret-scanning-matchable) and their
+	// current status: the secret-scanning one does NOT apply today, because
+	// scanning a private repo needs GitHub Advanced Security, which this repo
+	// lacks. The comment points at the ADR rather than restating the rationale
+	// so it cannot claim a control that is currently off.
 	TokenPrefix = "cvapent_"
 
 	// tokenEntropyBytes is 256 bits from crypto/rand. Enough that the stored

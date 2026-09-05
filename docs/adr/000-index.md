@@ -62,3 +62,5 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 051 | A scope narrowing reaches an in-flight job at its next lease renewal | Accepted |
 | 052 | A CSV export refuses over its cap rather than truncating, and export is its own permission | Accepted |
 | 053 | The operator SPA is a public static route in the one registry, and its client is a third registry | Accepted |
+| 054 | What may live in the repo, now that it is private (hygiene relaxes, good practice does not) | Accepted |
+| 055 | The enrollment-token prefix, and its now-half-moot secret-scanning rationale | Accepted |
