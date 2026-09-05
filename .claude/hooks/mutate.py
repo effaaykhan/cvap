@@ -86,6 +86,24 @@ GO_SUITES = [
     "internal/domain/identity_test.go",
     "internal/rules/evaluators_test.go",
     "internal/control/api/api_read_test.go",
+    # The distributed fault-injection matrix (§6.4). Each fault case declares the
+    # sabotage its assertion must kill, so the matrix cannot pass vacuously. The
+    # e2e entries run real processes, so their mutations are slower than the rest;
+    # they are here rather than only under `make e2e` because a sabotage nothing
+    # verifies is the vacuous gate this matrix exists to refuse.
+    "internal/store/fault_completion_integration_test.go",
+    "internal/store/fault_clock_integration_test.go",
+    "test/e2e/fault_completion_e2e_test.go",
+    # F2's logic sabotage is unit-layer (checkEpoch runs inside the cvap-core
+    # binary the e2e harness builds separately, which -overlay cannot reach); the
+    # F2 e2e test is the end-to-end observation and carries no mutation. F4 also
+    # declares its resumption-vs-duplicate sabotage in ingest_test.go.
+    "internal/dispatch/ingest_test.go",
+    # F6a (buffer saturation reports HARD) and F6b (Core assigns nothing on HARD).
+    "internal/scanpoint/fault_backpressure_test.go",
+    "internal/dispatch/dispatch_test.go",
+    # F5 (a resumed upload restarts from the last acked chunk, not from zero).
+    "internal/scanpoint/fault_resume_test.go",
 ]
 
 # The declaration shape, in comments beside the tests:

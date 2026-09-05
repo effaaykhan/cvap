@@ -239,6 +239,21 @@ func TestSubmissionLandsPendingThenPromotes(t *testing.T) {
 // Epoch rejection. The first thing that must be right.
 // ============================================================================
 
+// This is the unit-layer sabotage for F2 (the superseded-epoch quarantine). It
+// lives here rather than beside the F2 e2e test on purpose: the e2e test builds
+// cvap-core as a separate binary with `go build`, which does not inherit `go
+// test`'s -overlay, so an overlay mutation can never reach the checkEpoch that
+// runs inside that binary — the mutation would test nothing there. The logic is
+// exercised in-process here, where the overlay bites; the e2e test is the
+// end-to-end OBSERVATION that a real scan point's stale submission is
+// quarantined over real gRPC. (Fault-matrix note, ADR-056.)
+//
+// mutate:subject internal/dispatch/ingest.go
+// mutate:test    ./internal/dispatch/ -run TestSupersededEpochIsQuarantinedNotDropped|TestSupersessionMidUploadQuarantinesEverything|TestIncompleteSubmissionResumesWhileCompletedIsDuplicate
+//
+// mutate:case    a superseded epoch is treated as current (fencing skipped)
+// mutate:old     	case epoch < lease.Epoch:
+// mutate:new     	case epoch < 0:
 func TestSupersededEpochIsQuarantinedNotDropped(t *testing.T) {
 	db := testDB(t)
 	svc := newIngestService(t, db)
@@ -622,5 +637,68 @@ func TestSubmissionIdCollisionAcrossTenantsIsNotADuplicate(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// ============================================================================
+// F4 — a resumption is not a duplicate.
+// ============================================================================
+//
+// submission_id makes a retried submission idempotent, but "same id again" has
+// two meanings and they must not be conflated. A COMPLETED submission re-sent is
+// a genuine duplicate — the scan point lost the final ack and should clear its
+// buffer, so REJECTED_DUPLICATE is the right and safe answer. An INCOMPLETE one
+// re-sent is a resumption: the stream dropped mid-upload and the scan point is
+// continuing. Rejecting THAT as a duplicate tells the scan point to discard a
+// buffer that was never fully delivered — the results in it are lost, which is
+// the failure ADR-026 exists to prevent.
+//
+// TestDuplicateSubmissionIsRejected covers the completed arm. This adds the
+// resumption arm, and pins both, so the CompletedAt distinction cannot be
+// flattened in either direction. The sabotage inverts it: an incomplete
+// submission is then rejected as a duplicate on reconnect, and the resume
+// assertion fails. Runs in-process against the ingest service, where -overlay
+// applies.
+//
+// mutate:subject internal/dispatch/ingest.go
+// mutate:test    ./internal/dispatch/ -run TestSupersededEpochIsQuarantinedNotDropped|TestSupersessionMidUploadQuarantinesEverything|TestIncompleteSubmissionResumesWhileCompletedIsDuplicate
+//
+// mutate:case    a resumption is treated as a completed duplicate (the arms are flattened)
+// mutate:old     	if existing.CompletedAt != nil {
+// mutate:new     	if existing.CompletedAt == nil {
+func TestIncompleteSubmissionResumesWhileCompletedIsDuplicate(t *testing.T) {
+	db := testDB(t)
+	svc := newIngestService(t, db)
+	tenant, leaf, spID := enrolledScanPoint(t, db)
+	jobID, taskID, zoneID, epoch := leased(t, db, tenant, spID)
+
+	subID := "sub-" + uuid.NewString()
+
+	// Stream 1: one non-terminal chunk, then the stream ends. The submission is
+	// left incomplete and resumable — no terminal chunk ever arrived.
+	runIngest(t, svc, leaf, chunk(subID, jobID, epoch, 0, false, taskID, zoneID, 1))
+
+	// Reconnect, same submission_id: a resumption. The already-ingested chunk is
+	// re-acked, and a terminal chunk completes it. Nothing here may be rejected
+	// as a duplicate.
+	fs2 := runIngest(t, svc, leaf,
+		chunk(subID, jobID, epoch, 0, false, taskID, zoneID, 1),
+		chunk(subID, jobID, epoch, 1, true, taskID, zoneID, 1))
+	for _, a := range fs2.allAcks() {
+		if a.GetStatus() == scanpointv1.SubmitStatus_REJECTED_DUPLICATE {
+			t.Fatalf("an incomplete submission was rejected as a duplicate on reconnect; a " +
+				"resumption is not a duplicate, and rejecting it drops results the scan point " +
+				"still holds (ADR-026)")
+		}
+	}
+	if got := fs2.lastAck(t).GetStatus(); got != scanpointv1.SubmitStatus_ACCEPTED {
+		t.Errorf("terminal ack on resume = %v, want ACCEPTED", got)
+	}
+
+	// Now it is completed. The same submission_id a third time IS a duplicate —
+	// the ack the scan point needs to clear its buffer.
+	fs3 := runIngest(t, svc, leaf, chunk(subID, jobID, epoch, 0, true, taskID, zoneID, 1))
+	if got := fs3.lastAck(t).GetStatus(); got != scanpointv1.SubmitStatus_REJECTED_DUPLICATE {
+		t.Errorf("re-sending a completed submission = %v, want REJECTED_DUPLICATE", got)
 	}
 }

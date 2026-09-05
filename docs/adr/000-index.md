@@ -64,3 +64,4 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 053 | The operator SPA is a public static route in the one registry, and its client is a third registry | Accepted |
 | 054 | What may live in the repo, now that it is private (hygiene relaxes, good practice does not) | Accepted |
 | 055 | The enrollment-token prefix, and its now-half-moot secret-scanning rationale | Accepted |
+| 056 | A fault worth testing is one the deployed binary can experience (the §6.4 fault matrix) | Accepted |

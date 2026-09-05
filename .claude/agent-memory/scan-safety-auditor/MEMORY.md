@@ -7,3 +7,4 @@
 - [Discovery engine wire findings](discovery_engine_wire_findings.md) — measured with tcpdump on commit 9d982b5: token re-banking, fabricated liveness, hostname resolution, probes on fragile
 - [Fingerprint engine wire findings](fingerprint_engine_wire_findings.md) — ADR-048/session 13: bucket undercharges 2x on TLS, payload bound beaten by {{target}}, gate measures zero handshakes
 - [SafetyDrive budget drift](safetydrive_budget_drift.md) — session 17 harness skips job.budget(): no rate clamp, no fragile probe/rate/concurrency cap; scope faithful, rate not. Measured 2026-09-05
+- [Fault matrix session 20](fault_matrix_session20.md) — all 8 declared F1-F6 mutations kill; F1a holder/IDOR sub-property only ~75% caught, no mutation; F3-covers-holder claim wrong. Measured 2026-09-05

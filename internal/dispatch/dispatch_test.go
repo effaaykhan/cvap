@@ -919,3 +919,107 @@ func TestANonCanonicalTaskTargetRefusesTheJob(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// ============================================================================
+// F6b — Core assigns nothing to a scan point reporting HARD backpressure.
+// ============================================================================
+//
+// The scan-point half of backpressure (F6a, internal/scanpoint) proves the
+// buffer reports HARD at its ceiling. This is the half that makes the signal do
+// something: the dispatch pump reads the reported state and, on HARD, assigns
+// nothing — the only lever in ADR-026's flow control that can actually stop the
+// buffer growing, because only Core can stop handing out work. It was covered
+// only at the wire-contract level; nothing drove a HARD session and checked that
+// a claimable job stays unclaimed.
+//
+// The job is seeded AFTER the HARD signal is in effect and proven assignable
+// afterwards (once OK is reported), so "stayed queued" means the pump withheld
+// it, not that it was never claimable. Runs against the in-process dispatch
+// service, where -overlay applies.
+//
+// mutate:subject internal/dispatch/dispatch.go
+// mutate:test    ./internal/dispatch/ -run TestNoAssignmentUnderHardBackpressure
+//
+// mutate:case    the HARD case is mislabelled, so a saturated scan point is still fed work
+// mutate:old     		case scanpointv1.BackpressureState_BACKPRESSURE_STATE_HARD:
+// mutate:new     		case scanpointv1.BackpressureState_BACKPRESSURE_STATE_UNSPECIFIED:
+func TestNoAssignmentUnderHardBackpressure(t *testing.T) {
+	db := testDB(t)
+	tenant, leaf, spID := enrolledScanPoint(t, db)
+
+	svc := newService(t, db)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fs := newFakeStream(peerCtx(ctx, leaf))
+
+	done := make(chan error, 1)
+	go func() { done <- svc.Connect(fs) }()
+
+	fs.push(&scanpointv1.ScanPointMessage{
+		Msg: &scanpointv1.ScanPointMessage_Hello{Hello: &scanpointv1.Hello{
+			ScanPointId:     spID.String(),
+			ProtocolVersion: testVersion,
+			AgentVersion:    "0.1.0",
+			Capabilities: []*scanpointv1.Capability{
+				{Engine: "discovery", EngineVersion: "0.1.0", Enabled: true},
+			},
+		}},
+	})
+	fs.waitFor(t, "ServerHello", func(m *scanpointv1.CoreMessage) bool {
+		return m.GetServerHello() != nil
+	})
+
+	// Report HARD, and give the pump a couple of polls to record it before any
+	// job exists to assign.
+	fs.push(&scanpointv1.ScanPointMessage{
+		Msg: &scanpointv1.ScanPointMessage_Backpressure{Backpressure: &scanpointv1.Backpressure{
+			State: scanpointv1.BackpressureState_BACKPRESSURE_STATE_HARD,
+		}},
+	})
+	time.Sleep(2 * time.Second)
+
+	// Now a claimable job exists. Under HARD it must stay queued.
+	jobID := seedQueuedJob(t, db, tenant, true)
+	jobStatus := func() store.JobStatus {
+		var st store.JobStatus
+		if err := db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+			j, err := (store.Jobs{}).GetByID(ctx, c, jobID)
+			if err != nil {
+				return err
+			}
+			st = j.Status
+			return nil
+		}); err != nil {
+			t.Fatalf("read job: %v", err)
+		}
+		return st
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if s := jobStatus(); s != store.JobQueued {
+			t.Fatalf("job status %q under HARD backpressure, want queued; Core fed work to a "+
+				"scan point whose buffer is at its ceiling (ADR-026)", s)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	// Recover: report OK, and the same job must now be assigned — proof the job
+	// was claimable all along and HARD is what withheld it.
+	fs.push(&scanpointv1.ScanPointMessage{
+		Msg: &scanpointv1.ScanPointMessage_Backpressure{Backpressure: &scanpointv1.Backpressure{
+			State: scanpointv1.BackpressureState_BACKPRESSURE_STATE_OK,
+		}},
+	})
+	assigned := time.Now().Add(10 * time.Second)
+	for {
+		if jobStatus() == store.JobAssigned {
+			break
+		}
+		if time.Now().After(assigned) {
+			t.Fatal("job never assigned after backpressure cleared; the negative above is not " +
+				"meaningful unless the job was assignable once HARD lifted")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
