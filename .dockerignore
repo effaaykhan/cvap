@@ -1,0 +1,15 @@
+# The deploy image build context is the repo root. Keep out of it: secrets (they
+# are MOUNTED at runtime, never baked in — the CA key is the whole compromise if
+# it leaks), local env files, the git history, build output, and the web/node
+# tree the Go image does not need.
+.git
+.github
+secrets/
+**/.env
+**/.env.*
+bin/
+web/node_modules/
+web/dist/
+lab/
+docs/
+*.md

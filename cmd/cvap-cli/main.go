@@ -30,6 +30,16 @@ func main() {
 			log.Error("dev-ca failed", slog.Any("error", err))
 			os.Exit(1)
 		}
+	case "bootstrap":
+		if err := bootstrap(log, os.Args[2:]); err != nil {
+			log.Error("bootstrap failed", slog.Any("error", err))
+			os.Exit(1)
+		}
+	case "enroll-token":
+		if err := enrollToken(log, os.Args[2:]); err != nil {
+			log.Error("enroll-token failed", slog.Any("error", err))
+			os.Exit(1)
+		}
 	default:
 		log.Error("unknown command", slog.String("command", os.Args[1]))
 		usage()
@@ -40,7 +50,16 @@ func main() {
 func usage() {
 	fmt.Fprintf(os.Stderr, `cvap-cli %s
 
-  dev-ca <dir>   Generate a DEVELOPMENT certificate authority into <dir>.
+  dev-ca <dir>       Generate a DEVELOPMENT certificate authority into <dir>.
+
+  bootstrap          Create the first tenant, an admin user (with a generated
+                     first-login password), an operator role and a default zone.
+                     Run once, on the Core host. Needs APP_DATABASE_URL.
+                     --admin-email is required.
+
+  enroll-token       Issue a single-use enrollment token for a zone, printed
+                     once. Needs APP_DATABASE_URL, --tenant and --zone (both
+                     from bootstrap's output).
 
 `, version)
 }

@@ -157,8 +157,9 @@ func (t PlaintextToken) reveal() string {
 // Reveal returns the token itself.
 //
 // The only accessor, and named so that every call site says out loud what it is
-// doing. There are exactly two legitimate callers: the operator API returning a
-// freshly issued token once, and a test. Anything else is a defect.
+// doing. The legitimate callers are the two places an operator receives a
+// freshly issued token once — the operator API's issue handler and cvap-cli's
+// enroll-token command — plus tests. Anything else is a defect.
 func (t PlaintextToken) Reveal() string { return t.reveal() }
 
 // IsZero reports whether this is the zero value rather than a real token.

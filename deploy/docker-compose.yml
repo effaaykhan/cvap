@@ -1,0 +1,156 @@
+# CVAP single-node deployment.
+#
+# Compose-first is the primary deployment target (ADR-023); this is that target,
+# not the dev stack. The dev docker-compose.yml at the repo root runs the data
+# layer only, with cvap-core on the host. This runs the WHOLE control plane in
+# containers on one host: postgres, minio, the schema migration, the application
+# role, and cvap-core.
+#
+# Read deploy/INSTALL.md before running. The short version: copy env.example to
+# .env, put a CA keypair in ./secrets, `docker compose up -d`, then run the
+# cvap-cli bootstrap and enroll-token one-shots documented there.
+#
+# A scan point is NOT a service here. It enrolls with a token that does not exist
+# until bootstrap and enroll-token have run, so it cannot come up with `up`; the
+# runbook starts it as a one-shot once a token is in hand.
+
+name: cvap
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # No host port. Nothing outside this compose network speaks to the database;
+    # cvap-core reaches it as postgres:5432. An exposed database is the shape of
+    # the breach that does not need Core at all.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set in .env}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # One-shot: create the evidence bucket, then exit.
+  createbuckets:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing local/$${MINIO_BUCKET} &&
+      echo 'bucket ready: '$${MINIO_BUCKET}
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set in .env}
+      MINIO_BUCKET: ${MINIO_BUCKET:-cvap-evidence}
+
+  # One-shot: apply migrations as the MIGRATION role (superuser). Creates the
+  # cvap_app group role (migration 0001), the schema, RLS, and grants. Pinned by
+  # digest, the same image `make migrate-up` uses.
+  migrate:
+    image: migrate/migrate@sha256:f21c436af23c282f4516b00ba3e93bccf5c5fe5cd52530fd5c319a936998f539
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../migrations:/migrations:ro
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+      - "up"
+
+  # One-shot: provision the LOGIN role cvap-core connects as, AFTER migrations
+  # (it grants membership of cvap_app, which migration 0001 creates). psql from
+  # the postgres image; the app-role password arrives as a variable, never a
+  # committed literal.
+  provision:
+    image: postgres:16-alpine
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./provision-app-role.sql:/provision-app-role.sql:ro
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set in .env}
+      APP_ROLE_PASSWORD: ${APP_ROLE_PASSWORD:?set in .env}
+    entrypoint: >
+      /bin/sh -c "
+      psql -h postgres -U $${POSTGRES_USER} -d $${POSTGRES_DB}
+      -v ON_ERROR_STOP=1 -v app_password=\"$${APP_ROLE_PASSWORD}\"
+      -f /provision-app-role.sql
+      "
+
+  cvap-core:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        VERSION: ${CVAP_VERSION:-dev}
+    restart: unless-stopped
+    depends_on:
+      provision:
+        condition: service_completed_successfully
+      createbuckets:
+        condition: service_completed_successfully
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Connect as the application role, over the compose network.
+      APP_DATABASE_URL: "postgres://cvap_app_login:${APP_ROLE_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+      # Bind 0.0.0.0 inside the container so the published ports and the scan
+      # point can reach the listeners; the host publishes them below.
+      CVAP_CORE_ENROLL_LISTEN: "0.0.0.0:8443"
+      CVAP_CORE_MTLS_LISTEN: "0.0.0.0:8444"
+      CVAP_CORE_API_LISTEN: "0.0.0.0:8445"
+      # What Core advertises to a scan point at enrollment: the address the scan
+      # point uses to reach THIS host. Set CVAP_ADVERTISE_HOST in .env to the
+      # host's name or IP; a scan point cannot reach 0.0.0.0 or a container name.
+      CVAP_CORE_DISPATCH_ENDPOINT: "${CVAP_ADVERTISE_HOST:?set in .env}:8444"
+      CVAP_CORE_INGEST_ENDPOINT: "${CVAP_ADVERTISE_HOST}:8444"
+      CVAP_CORE_RULEPACKS_ENDPOINT: "${CVAP_ADVERTISE_HOST}:8444"
+      CVAP_CORE_SERVER_HOSTS: "${CVAP_ADVERTISE_HOST},localhost,127.0.0.1"
+      CVAP_CORE_CA_CERT: /secrets/ca.crt
+      CVAP_CORE_CA_KEY: /secrets/ca.key
+      # Local operator login. On-prem, so all three conditions can be met; still
+      # nothing until a tenant is bootstrapped (its deployment_mode is onprem and
+      # its auth method local, both set by cvap-cli bootstrap).
+      CVAP_CORE_LOCAL_AUTH: ${CVAP_CORE_LOCAL_AUTH:-1}
+      CVAP_CORE_SESSION_TTL_SECONDS: ${CVAP_CORE_SESSION_TTL_SECONDS:-28800}
+    volumes:
+      # The trust anchor, read-only. The key mints fleet identities: it is the
+      # whole compromise if it leaks, so it is mounted, never baked into the image.
+      - ./secrets:/secrets:ro
+    ports:
+      - "${CVAP_BIND_ADDR:-0.0.0.0}:8443:8443" # enrollment (server TLS)
+      - "${CVAP_BIND_ADDR:-0.0.0.0}:8444:8444" # dispatch + ingest (mTLS)
+      - "${CVAP_BIND_ADDR:-0.0.0.0}:8445:8445" # operator API (server TLS + session)
+
+volumes:
+  postgres-data:
+  minio-data:
