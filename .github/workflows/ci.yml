@@ -377,6 +377,15 @@ jobs:
       - name: ADR index is complete
         run: python3 .github/scripts/check_adr_index.py
 
+      # The Makefile `ci` line and this workflow are two registries that must
+      # agree: a check added to `make ci` does not run here unless a job step
+      # runs it, and this workflow never calls `make ci`. corpus-check and
+      # adr-index both shipped enforced-locally-only through exactly that gap.
+      # This reconciles them mechanically -- every `ci` target must have its
+      # command present in some job, or an allowlist entry with a reason.
+      - name: Makefile ci line and this workflow agree
+        run: python3 .github/scripts/check_ci_parity.py
+
       # The always-on half of the golden-corpus gate, and only that half: the
       # corpus is well-formed and every finding label agrees with the
       # containers' own account of themselves in lab/corpus/ground-truth.json.
@@ -386,15 +395,6 @@ jobs:
       # skipped -- and the `corpus` job below is where those metrics are fatal.
       - name: Golden corpus labels (always-on half)
         run: make corpus-check
-
-      # Mutation testing for the guard scripts, and it earns its place: these
-      # suites have been green over checks they never reached three sessions
-      # running, every time because each existing case was caught by a
-      # DIFFERENT check first. A surviving mutation fails the build naming the
-      # check nothing exercises.
-      #
-      # It runs the secret-logging suite too, which is the gate standing
-      # between an enrollment token and a log line.
 
   # The scan-and-diff half of the golden-corpus gate, where the six ADR §6.2
   # accuracy metrics are actually measured and enforced. The always-on config

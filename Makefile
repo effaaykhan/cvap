@@ -11,7 +11,7 @@
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
         env-check app-role store-test e2e dev-ca gosec mutate \
         contract-guard-test fmt-check tidy-check govulncheck db-gates db-reachable \
-        safety-sabotage adr-index
+        safety-sabotage adr-index ci-parity
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
 # under a running project (ADR-025: consume commodity infrastructure).
@@ -163,7 +163,8 @@ govulncheck: ## Known vulnerabilities in the dependency graph, as CI runs it
 # CI too and is the point of running it.
 ci: fmt-check tidy-check build vet test lint gosec govulncheck proto frontmatter \
     gitignore-test scope-guard-test contract-guard-test secret-logging \
-    secret-logging-test env-check licences db-gates adr-index corpus-check ## Everything CI runs, locally
+    secret-logging-test env-check licences db-gates adr-index corpus-check \
+    ci-parity ## Everything CI runs, locally
 
 ## ---------- wire contract ----------
 
@@ -509,6 +510,9 @@ frontmatter: ## Validate .claude agent and skill frontmatter
 
 adr-index: ## Every ADR has an index row and every row has a file
 	python3 .github/scripts/check_adr_index.py
+
+ci-parity: ## Every target in the `ci` line actually runs in .github/workflows/ci.yml
+	python3 .github/scripts/check_ci_parity.py
 
 gitignore-test: ## Assert .gitignore still covers what it must
 	python3 .github/scripts/check_gitignore.py
