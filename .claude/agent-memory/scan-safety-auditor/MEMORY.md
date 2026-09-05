@@ -8,3 +8,5 @@
 - [Fingerprint engine wire findings](fingerprint_engine_wire_findings.md) — ADR-048/session 13: bucket undercharges 2x on TLS, payload bound beaten by {{target}}, gate measures zero handshakes
 - [SafetyDrive budget drift](safetydrive_budget_drift.md) — session 17 harness skips job.budget(): no rate clamp, no fragile probe/rate/concurrency cap; scope faithful, rate not. Measured 2026-09-05
 - [Fault matrix session 20](fault_matrix_session20.md) — all 8 declared F1-F6 mutations kill; F1a holder/IDOR sub-property only ~75% caught, no mutation; F3-covers-holder claim wrong. Measured 2026-09-05
+- [Shutdown drain result loss](shutdown_drain_result_loss.md) — SIGTERM with a job in flight loses gathered results; drain declares "drained" before the abort enqueues. Measured 2026-09-05
+- [First-chunk retry fix + heartbeat drift](retry_first_chunk_and_heartbeat_drift.md) — submit.go fix complete incl. multi-chunk; no retry const shadows config; HeartbeatTimeout=90s duplicated as SQL literal in kill.go
