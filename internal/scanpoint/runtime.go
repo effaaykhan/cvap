@@ -592,6 +592,13 @@ func (r *Runtime) terminate(j *job, reason scanpointv1.TerminationReason, incomp
 	// closes exactly once.
 	defer close(j.terminated)
 
+	// Zeroise first and independently of the submission below (ADR-020): the
+	// credential is not needed to upload, and the drain can block for minutes
+	// against an unreachable Core. When a credentialed engine's submission must
+	// carry a value DERIVED from the credential, that derivation goes BEFORE this
+	// zeroise, with the derived value carried into the assembly below — there is
+	// no such seam today, and adding it is the scheduled Phase 4 change ADR-057
+	// pre-decides. Do not move a credential read below this line.
 	j.zeroiseCredentials()
 
 	var observations []*scanpointv1.Observation
