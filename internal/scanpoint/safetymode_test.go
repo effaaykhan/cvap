@@ -21,13 +21,17 @@ import (
 // mutate:subject internal/scanpoint/job.go
 // mutate:test    ./internal/scanpoint/ -run TestSafeMode|TestIntrusiveMode|TestAJobWhoseMode|TestTheCorpus|TestEveryProbe|TestAFragileTarget|TestNoProbeReaches|TestThePerScanPoint|TestTheAllocator
 //
+// The probe-suppression decision moved from budget() into clampToBudget (shared
+// with the safety harness so the two enforce the same ceiling); the anchors
+// follow it. The tests above still reach it through j.budget().
+//
 // mutate:case    an unrecognised safety mode supplies probes
-// mutate:old     if c.GetSafetyMode() == SafetyIntrusive && !anyFragile {
-// mutate:new     if c.GetSafetyMode() != "safe" && !anyFragile {
+// mutate:old     if in.SafetyMode == SafetyIntrusive && !in.AnyFragile {
+// mutate:new     if in.SafetyMode != "safe" && !in.AnyFragile {
 //
 // mutate:case    a fragile target is handed probes anyway
-// mutate:old     if c.GetSafetyMode() == SafetyIntrusive && !anyFragile {
-// mutate:new     if c.GetSafetyMode() == SafetyIntrusive && (!anyFragile || true) {
+// mutate:old     if in.SafetyMode == SafetyIntrusive && !in.AnyFragile {
+// mutate:new     if in.SafetyMode == SafetyIntrusive && (!in.AnyFragile || true) {
 //
 // The obvious form — dropping `&& !anyFragile` — leaves anyFragile declared and
 // unused, so the mutant does not compile and tests nothing. The driver reports

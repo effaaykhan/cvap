@@ -295,6 +295,14 @@ COVERAGE_STATEMENTS = [
      "plain v4) is a canonicalisation property of internal/target, asserted there and in "
      "internal/scope/scopetest; it is not a runtime decision and so has nothing to put on this "
      "wire that the plain-v4 exclusion does not already."),
+    ("address-shaped-targets-that-wont-parse",
+     "the notation class ADR-040 closed (10.10.0.14:443, [10.10.0.14], 192.000.2.5, 0xC0000205, "
+     "hyphen ranges, comma lists, fullwidth digits) is refused, not scanned: at planning "
+     "expandFor/Canonicalise fails the scan, and at the runtime target.Matches rejects the "
+     "non-canonical form before scope — the same refusal the hostname case shows on the wire "
+     "(no engine, no egress). Which spellings reach which verdict is asserted in "
+     "internal/scope/scopetest and internal/target; a refusal produces no packet, so there is "
+     "nothing to distinguish on this wire beyond the zero-egress the hostname case already puts there."),
     ("redirect-to-out-of-scope-host",
      "the fingerprint engine follows no redirect (HTTP HEAD, no Location handling in "
      "internal/engines/fingerprint), so it never constructs the redirect target and there is "
