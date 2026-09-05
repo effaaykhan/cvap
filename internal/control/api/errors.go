@@ -114,18 +114,12 @@ func storeError(w http.ResponseWriter, r *http.Request, log *slog.Logger, err er
 
 func writeJSON(w http.ResponseWriter, r *http.Request, log *slog.Logger, status int, body any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	// Response headers every answer carries.
+	// The class-of-response security headers (nosniff, X-Frame-Options,
+	// Referrer-Policy, HSTS, CSP) are set once for every path by the
+	// securityHeaders middleware (middleware.go), not here — a per-write helper
+	// cannot cover the static SPA path, which does not call writeJSON. Only the
+	// response-specific headers stay here: the JSON content type, and:
 	//
-	// nosniff, because a JSON body that a browser decides to treat as HTML is a
-	// stored-XSS vector out of any field an operator can set — a scan name, a
-	// policy name. X-Frame-Options, because nothing here should ever be framed
-	// and the kill switch in particular must not be clickjackable. HSTS,
-	// because the session cookie is a bearer credential and the first plaintext
-	// request is the one that leaks it.
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 	// Nothing this API returns should be cached: every response is
 	// tenant-scoped and most are session-scoped, and a shared cache holding one
 	// is a cross-tenant disclosure delivered by infrastructure.

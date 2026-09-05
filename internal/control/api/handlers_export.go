@@ -117,7 +117,8 @@ func (s *Server) exportFindingsCSV(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="findings.csv"`)
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// nosniff (and the rest of the class) is set for every path by the
+	// securityHeaders middleware; the CSV must not be re-typed as HTML.
 	w.WriteHeader(http.StatusOK)
 
 	cw := csv.NewWriter(w)
@@ -194,7 +195,8 @@ func (s *Server) exportAssetsCSV(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="assets.csv"`)
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// nosniff (and the rest of the class) is set for every path by the
+	// securityHeaders middleware; the CSV must not be re-typed as HTML.
 	w.WriteHeader(http.StatusOK)
 
 	cw := csv.NewWriter(w)

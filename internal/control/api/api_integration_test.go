@@ -1096,25 +1096,60 @@ func TestAMalformedCidrRuleIsRefused(t *testing.T) {
 	}
 }
 
-// TestEveryResponseCarriesTheSecurityHeaders.
+// TestEveryResponseCarriesTheSecurityHeaders asserts the class-of-response
+// headers on BOTH a JSON response and the static SPA path.
+//
+// The static path is the load-bearing case: session 19 shipped the SPA serving
+// through spa.go, which does not call writeJSON, and the headers used to live in
+// writeJSON — so the operator console (the one origin that executes JS and
+// renders scan-target-derived data) was served with none of them. The headers
+// moved to a mux-wrapping middleware; this proves the static path inherits them,
+// so a header set in the write helper can never again be the whole story. GET /
+// is exercised under the default build (the not-built placeholder), which is
+// enough — the middleware runs regardless of the embedui tag.
 func TestEveryResponseCarriesTheSecurityHeaders(t *testing.T) {
 	f := newFixture(t, `{"scan.read": true}`)
 	cookies, csrf := f.login(t)
 
-	w := f.do(t, http.MethodGet, "/v1/scans", nil, cookies, csrf)
-	for header, want := range map[string]string{
-		"X-Content-Type-Options": "nosniff",
-		"X-Frame-Options":        "DENY",
-		"Cache-Control":          "no-store",
-	} {
-		if got := w.Header().Get(header); got != want {
-			t.Errorf("%s = %q, want %q", header, got, want)
+	// The class every path must carry, wherever it is served from.
+	theClass := func(t *testing.T, w *httptest.ResponseRecorder, where string) {
+		t.Helper()
+		for header, want := range map[string]string{
+			"X-Content-Type-Options": "nosniff",
+			"X-Frame-Options":        "DENY",
+			"Referrer-Policy":        "no-referrer",
+			"Content-Security-Policy": "default-src 'self'; base-uri 'self'; " +
+				"frame-ancestors 'none'; object-src 'none'",
+		} {
+			if got := w.Header().Get(header); got != want {
+				t.Errorf("%s: %s = %q, want %q", where, header, got, want)
+			}
+		}
+		if w.Header().Get("Strict-Transport-Security") == "" {
+			t.Errorf("%s: no Strict-Transport-Security; the session cookie is a bearer "+
+				"credential and the first plaintext request is the one that leaks it", where)
 		}
 	}
-	if w.Header().Get("Strict-Transport-Security") == "" {
-		t.Error("no Strict-Transport-Security; the session cookie is a bearer credential and " +
-			"the first plaintext request is the one that leaks it")
+
+	// The JSON API path (writeJSON), which also carries its own no-store.
+	wj := f.do(t, http.MethodGet, "/v1/scans", nil, cookies, csrf)
+	theClass(t, wj, "GET /v1/scans")
+	if got := wj.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("GET /v1/scans: Cache-Control = %q, want no-store", got)
 	}
+
+	// The static SPA path (spa.go), which does NOT call writeJSON — the case the
+	// per-write helper could not cover. Public route, so no session needed. The
+	// status differs by build (200 with the UI embedded, 503 for the not-built
+	// placeholder under the default build this test runs), but the middleware
+	// stamps the header class before the handler writes either — which is exactly
+	// the property under test, so both statuses are acceptable and neither may be
+	// a 404 (the route must exist).
+	ws := f.do(t, http.MethodGet, "/", nil, nil, "")
+	if ws.Code != http.StatusOK && ws.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET / gave %d, want 200 (embedded UI) or 503 (not-built placeholder)", ws.Code)
+	}
+	theClass(t, ws, "GET /")
 }
 
 // TestALockedAccountIsA401AndNotA500.

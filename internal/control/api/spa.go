@@ -69,6 +69,12 @@ func spaHandler() http.HandlerFunc {
 			if strings.HasPrefix(name, "assets/") {
 				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 			}
+			// #nosec G705 -- b is compile-time content from the go:embed dist, not
+			// attacker data: the caller only chooses WHICH embedded file, the path
+			// is path.Clean'd and the FS is fs.Sub-scoped to web/dist so traversal
+			// cannot escape it, Content-Type is set from the extension above, and
+			// nosniff + CSP are set for every path by the securityHeaders
+			// middleware. There is no untrusted byte on this write.
 			_, _ = w.Write(b)
 			return
 		}

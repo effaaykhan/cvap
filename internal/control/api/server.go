@@ -204,7 +204,12 @@ func New(db *store.DB, log *slog.Logger, cfg Config) (*Server, error) {
 }
 
 // Handler is the API's http.Handler, with the outermost middleware applied.
-func (s *Server) Handler() http.Handler { return s.withRequestID(s.mux) }
+// securityHeaders wraps the mux so every path — API, export and static SPA —
+// carries the class-of-response headers; withRequestID is outermost so the id
+// is stamped even on a response the inner chain never reaches.
+func (s *Server) Handler() http.Handler {
+	return s.withRequestID(s.securityHeaders(s.mux))
+}
 
 // Registry exposes the routes, for the OpenAPI generator and for tests that
 // assert properties of the whole surface.

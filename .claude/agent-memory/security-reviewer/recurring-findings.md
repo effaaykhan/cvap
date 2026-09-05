@@ -1,6 +1,6 @@
 ---
 name: recurring-findings
-description: Recurring security defect classes found in CVAP reviews (31 classes), and the repo-specific constraints that shape acceptable fixes
+description: Recurring security defect classes found in CVAP reviews (34 classes), and the repo-specific constraints that shape acceptable fixes
 metadata:
   type: project
 ---
@@ -451,3 +451,23 @@ whose `TLS != nil` but `chain == []` it panics (reproduced). Currently unreachab
 caller guards with `leaf, ok := leafOf(s); if !ok { continue }` before building the finding —
 but it is one new cert evaluator away from a fleet-wide panic on an attacker-presented empty
 chain. Note-level defensive fix: have `certEvidence` return early on `!ok`.
+
+**34. Security headers set at the JSON write, not globally — static/SPA path escapes them.**
+`writeJSON`/`writeError` (`internal/control/api/errors.go`) set nosniff, X-Frame-Options,
+Referrer-Policy and HSTS on every API response, and the CSV export re-sets nosniff by hand.
+The SPA handler (`internal/control/api/spa.go spaHandler`) sets only Content-Type and
+Cache-Control, so the operator UI shell and its JS/CSS are served with NONE of them, and
+there is no CSP anywhere in the repo (grep confirmed). Session 19 shipped this; the new
+`TestSPACatchAllServesWithoutShadowingTheAPI` asserts content-type and not-404, never a
+security header, so it proved nothing about this. Probe: `spaHandler()` in an httptest with
+the embedded dist under `-tags embedui` — real `index.html` and hashed assets return 200 with
+all five header slots empty. Clickjacking impact is blunted because SameSite=Lax withholds
+the session cookie from a cross-site iframe, so the framed app is unauthenticated; the live
+gaps are CSP absence (no XSS containment on the one origin that executes script and renders
+scan-target-derived data) and nosniff absence on served assets.
+**Why:** the header-setting lives in the response helper, not in a middleware that wraps the
+whole mux, so any handler that writes bytes directly (static files, future streaming/non-JSON
+handlers) silently ships without them.
+**How to apply:** whenever a new handler writes a body without going through `writeJSON`, check
+which of the five headers it drops. The durable fix is a security-header middleware in
+`Server.Handler()`/`mount`, not per-handler Set calls.

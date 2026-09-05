@@ -86,6 +86,48 @@ func (s *Server) withRequestID(next http.Handler) http.Handler {
 	})
 }
 
+// securityHeaders sets the class-of-response headers that every path must carry,
+// wrapping the mux so it covers ALL of them — the JSON API, the CSV export, and
+// the static SPA alike.
+//
+// It lives here, in one middleware, rather than in writeJSON, because that is
+// where it used to live and the static SPA path (spa.go) does not go through
+// writeJSON — so it shipped serving the operator console, the one origin that
+// executes JavaScript and renders scan-target-derived data, with none of these.
+// A per-write helper cannot cover a handler that does not call it; a
+// mux-wrapping middleware covers every handler including the next one nobody
+// remembers to protect.
+//
+// Set BEFORE next.ServeHTTP so they are in the header map when the handler
+// writes its status; a handler that needs a different value for a
+// response-specific header (Content-Type, Cache-Control, Content-Disposition)
+// still overrides it, which is why those are NOT set here.
+//
+//   - nosniff: a body a browser decides to treat as HTML is a stored-XSS vector
+//     out of any field an operator can set — and the served JS/CSS must not be
+//     re-typed either.
+//   - CSP: the containment layer for the console. Everything it loads is
+//     same-origin (an external module script and stylesheet, no inline script
+//     or style, no data: assets — measured against the build), so 'self' is the
+//     whole policy; it blunts any future XSS or a compromised dependency, and
+//     is inert-but-harmless on the JSON responses that are never rendered.
+//   - X-Frame-Options / frame-ancestors: nothing here is ever framed, and the
+//     kill switch in particular must not be clickjackable.
+//   - HSTS: the session cookie is a bearer credential and the first plaintext
+//     request is the one that leaks it.
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // resolveTenant is the first thing every request meets.
 //
 // It runs on public routes too. A public route is unauthenticated, not
