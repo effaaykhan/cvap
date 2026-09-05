@@ -396,6 +396,46 @@ jobs:
       - name: Golden corpus labels (always-on half)
         run: make corpus-check
 
+  web:
+    name: Operator SPA
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: internal/control/api/web/package-lock.json
+
+      # Exactly the committed lockfile, so the build here is the build the
+      # `ui-*` targets run locally.
+      - name: Install the web toolchain
+        run: make ui-deps
+
+      # The generated client is a THIRD registry -- it must agree with the route
+      # registry and this workflow. This regenerates the TypeScript types from
+      # the OpenAPI the Route values emit (cmd/cvap-openapi) and fails on any
+      # diff against the checked-in schema.ts, the same treatment proto-verify
+      # gives gen/. A route added or reshaped without regenerating fails HERE.
+      - name: Generated client matches the route registry
+        run: make ui-verify
+
+      - name: Typecheck
+        run: make ui-typecheck
+
+      - name: Unit tests
+        run: make ui-test
+
+      # The default `go build ./...` compiles the stub (spa_stub.go). This is the
+      # only build that compiles the //go:build embedui files and links the SPA
+      # bundle into cvap-core, so a broken embed path fails here and nowhere else.
+      - name: cvap-core builds with the SPA embedded
+        run: make embedui-build
+
   # The scan-and-diff half of the golden-corpus gate, where the six ADR §6.2
   # accuracy metrics are actually measured and enforced. The always-on config
   # step above proves the corpus is internally consistent; this job proves the

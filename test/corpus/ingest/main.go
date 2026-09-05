@@ -76,6 +76,10 @@ type findingOut struct {
 	Port    int    `json:"port"`
 	Zones   int    `json:"zones"`
 	Status  string `json:"status"`
+	// EvidenceKeys is the key count of this finding's richest evidence row. Zero
+	// means no verifiable evidence; corpus-check asserts every finding has > 0
+	// (session 19, note on ADR-006).
+	EvidenceKeys int `json:"evidence_keys"`
 }
 
 type mergeOut struct {
@@ -181,7 +185,16 @@ func ingestScan(ctx context.Context, db *store.DB, byZone map[string][]obsIn) ([
 			       (SELECT count(*) FROM finding_exposure fe WHERE fe.finding_id = f.finding_id),
 			       coalesce((a.primary_hostname), ''),
 			       coalesce((SELECT host(ip_address) FROM asset_addresses aa
-			                  WHERE aa.asset_id = f.asset_id AND aa.valid_to IS NULL LIMIT 1), '')
+			                  WHERE aa.asset_id = f.asset_id AND aa.valid_to IS NULL LIMIT 1), ''),
+			       -- The most-populated evidence row for this finding: the key count
+			       -- of its richest evidence object. Zero means no evidence, or
+			       -- evidence with an empty object — either way a finding an analyst
+			       -- cannot verify by hand (ADR-006). corpus-check asserts this is > 0
+			       -- for every finding.
+			       coalesce((SELECT max((SELECT count(*)::int FROM jsonb_object_keys(e.data)))
+			                   FROM evidence e
+			                  WHERE e.tenant_id = f.tenant_id AND e.finding_id = f.finding_id
+			                    AND jsonb_typeof(e.data) = 'object'), 0)
 			  FROM findings f
 			  JOIN rules r ON r.rule_id = f.rule_id
 			  JOIN assets a ON a.asset_id = f.asset_id
@@ -193,7 +206,7 @@ func ingestScan(ctx context.Context, db *store.DB, byZone map[string][]obsIn) ([
 		for rows.Next() {
 			var fo findingOut
 			var locator, hostname, addr string
-			if err := rows.Scan(&fo.Rule, &locator, &fo.Status, &fo.Zones, &hostname, &addr); err != nil {
+			if err := rows.Scan(&fo.Rule, &locator, &fo.Status, &fo.Zones, &hostname, &addr, &fo.EvidenceKeys); err != nil {
 				return err
 			}
 			fo.Address = addr

@@ -70,6 +70,14 @@ type Route struct {
 	Request  any
 	Response any
 
+	// Static marks a route that serves the web UI's static assets rather than an
+	// API operation. It still flows through the full middleware chain (there is
+	// no handler path that skips it, ADR-043), but it is EXCLUDED from the emitted
+	// OpenAPI document: the document describes the API, not the app shell, and a
+	// GET / returning HTML is not an operation a client generates against
+	// (ADR-053). The registry still enforces its Access.
+	Static bool
+
 	// ResponseContentType overrides the default application/json for the success
 	// response. Set it for a route whose body is not JSON — the CSV export is the
 	// first, and ADR-043 says a shape the emitter cannot express is a reason to

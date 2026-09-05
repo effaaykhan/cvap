@@ -11,12 +11,20 @@
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
         env-check app-role store-test e2e dev-ca gosec mutate \
         contract-guard-test fmt-check tidy-check govulncheck db-gates db-reachable \
-        safety-sabotage adr-index ci-parity
+        safety-sabotage adr-index ci-parity \
+        ui ui-deps ui-types ui-verify ui-typecheck ui-test ui-build embedui-build
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
 # under a running project (ADR-025: consume commodity infrastructure).
 MIGRATE_IMAGE := migrate/migrate@sha256:f21c436af23c282f4516b00ba3e93bccf5c5fe5cd52530fd5c319a936998f539
 MIGRATIONS_DIR := migrations
+
+# The operator SPA (session 19). Served same-origin by cvap-core behind the
+# `embedui` build tag; its types are generated FROM the route registry, which
+# makes the checked-in client a third registry held to the proto-verify rule:
+# regenerate and diff, fail on drift.
+WEB_DIR := internal/control/api/web
+WEB_SCHEMA := $(WEB_DIR)/src/api/schema.ts
 
 # Protobuf toolchain, pinned. Local plugins rather than buf.build remote ones,
 # so generating the contract is not a network call to a third party (ADR-025).
@@ -164,7 +172,7 @@ govulncheck: ## Known vulnerabilities in the dependency graph, as CI runs it
 ci: fmt-check tidy-check build vet test lint gosec govulncheck proto frontmatter \
     gitignore-test scope-guard-test contract-guard-test secret-logging \
     secret-logging-test env-check licences db-gates adr-index corpus-check \
-    ci-parity ## Everything CI runs, locally
+    ui ci-parity ## Everything CI runs, locally
 
 ## ---------- wire contract ----------
 
@@ -215,6 +223,63 @@ proto-verify: ## Assert gen/ matches proto/
 		exit 1; \
 	fi; \
 	echo "gen/ matches proto/"
+
+## ---------- operator SPA ----------
+
+# The web toolchain, like proto-tools, is a one-time setup step rather than a
+# per-run cost. `npm ci` installs exactly the committed lockfile, so a build
+# here is the build CI runs. The `ui-*` checks below assume it has run and fail
+# loudly if npx is absent -- a UI gate that silently skipped would be worse than
+# one that fails, the same reasoning corpus-check and safety carry.
+ui-deps: ## Install the web toolchain from the committed lockfile
+	@command -v npm >/dev/null || { echo "npm not on PATH -- the operator UI needs Node. Install nodejs+npm."; exit 1; }
+	cd $(WEB_DIR) && npm ci
+
+# The generated client is a THIRD registry (session 19, note 3): it must agree
+# with the route registry and the workflow, so it gets gen/'s treatment. The
+# spec is emitted from the Route values with no database (cmd/cvap-openapi) and
+# piped through openapi-typescript. ui-types rewrites the committed file;
+# ui-verify regenerates into a temp file and diffs, so `make ci` never mutates
+# the working tree -- proto-verify's exact shape.
+ui-types: ## Regenerate the web client's types in place from the route registry
+	@command -v npx >/dev/null || { echo "npx not on PATH -- run: make ui-deps"; exit 1; }
+	@spec=$$(mktemp); trap 'rm -f "$$spec"' EXIT; \
+	go run ./cmd/cvap-openapi > "$$spec"; \
+	cd $(WEB_DIR) && npx --no-install openapi-typescript "$$spec" -o src/api/schema.ts
+	@echo "regenerated $(WEB_SCHEMA)"
+
+ui-verify: ## Assert the checked-in web client matches the route registry (proto-verify for the UI)
+	@command -v npx >/dev/null || { echo "npx not on PATH -- run: make ui-deps"; exit 1; }
+	@spec=$$(mktemp); gen=$$(mktemp); trap 'rm -f "$$spec" "$$gen"' EXIT; \
+	go run ./cmd/cvap-openapi > "$$spec"; \
+	( cd $(WEB_DIR) && npx --no-install openapi-typescript "$$spec" ) > "$$gen"; \
+	if ! diff -q $(WEB_SCHEMA) "$$gen" >/dev/null 2>&1; then \
+		echo "$(WEB_SCHEMA) does not match the route registry. Run: make ui-types"; \
+		diff $(WEB_SCHEMA) "$$gen" | head -60; \
+		exit 1; \
+	fi; \
+	echo "$(WEB_SCHEMA) matches the route registry"
+
+ui-typecheck: ## Typecheck the web client
+	@command -v npx >/dev/null || { echo "npx not on PATH -- run: make ui-deps"; exit 1; }
+	cd $(WEB_DIR) && npx --no-install tsc -b --noEmit
+
+ui-test: ## Run the web client unit tests
+	@command -v npx >/dev/null || { echo "npx not on PATH -- run: make ui-deps"; exit 1; }
+	cd $(WEB_DIR) && npx --no-install vitest run
+
+ui-build: ## Build the SPA bundle into web/dist
+	@command -v npx >/dev/null || { echo "npx not on PATH -- run: make ui-deps"; exit 1; }
+	cd $(WEB_DIR) && npx --no-install vite build
+
+# The default `build` target compiles the stub (spa_stub.go); the embed files
+# only compile under the tag, so this is the one build that proves the embedded
+# dist actually links. It needs a built bundle, hence the ui-build prerequisite.
+embedui-build: ui-build ## Build cvap-core with the SPA embedded
+	go build -tags embedui -o /dev/null ./cmd/cvap-core
+	@echo "cvap-core builds with the SPA embedded"
+
+ui: ui-verify ui-typecheck ui-test embedui-build ## The full web gate: registry parity, types, tests, embedded build
 
 ## ---------- dev stack ----------
 

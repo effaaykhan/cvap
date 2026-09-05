@@ -188,6 +188,17 @@ def _score(corpus, always_msg, found_hosts, found_ports, services, result):
     fails = []
     report = []
 
+    # Every finding must carry non-empty evidence — the value an analyst verifies
+    # by hand (ADR-006). Found once by a query run by hand (session 19); asserted
+    # here so the next rule added cannot ship empty evidence unnoticed. A finding
+    # whose richest evidence row has zero keys is decorative and fails the gate,
+    # named by rule.
+    no_evidence = sorted({f["rule"] for f in result.get("findings", [])
+                          if f.get("evidence_keys", 0) < 1})
+    if no_evidence:
+        fails.append("findings produced with EMPTY evidence (unverifiable by hand): "
+                     + ", ".join(no_evidence))
+
     # Host recall.
     hr = _ratio(len([a for a in exp_alive if a in found_hosts]), len(exp_alive))
     report.append(("host discovery recall", hr, THRESH("host_recall"), hr >= THRESH("host_recall")))

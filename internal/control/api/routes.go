@@ -382,6 +382,10 @@ func (s *Server) routes() {
 		Access:  AccessPublic,
 		Handler: s.openAPIDoc,
 	})
+
+	// The operator web UI, same-origin, as the last (catch-all) route so /v1/*
+	// match first. Static and excluded from the OpenAPI document (ADR-053).
+	s.registerSPA()
 }
 
 // openAPIDoc serves the generated document.

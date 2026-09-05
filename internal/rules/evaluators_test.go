@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"testing"
 	"time"
@@ -320,5 +321,84 @@ func TestSSHWeakAlgorithmsReportsOfferedLegacyAlgorithms(t *testing.T) {
 	}
 	if g := run(t, r, strong, ""); len(g) != 0 {
 		t.Errorf("a modern-only server raised %d", len(g))
+	}
+}
+
+// TestSetEvaluatorsCarryTheSetTheyMatchedAgainst — the four set-matching
+// evaluators must store not just the member they matched but the SET they
+// matched against, so the evidence records what the branch actually decided on
+// rather than a re-derivation that could disagree (session 19, note on ADR-050's
+// evidence rule).
+func TestSetEvaluatorsCarryTheSetTheyMatchedAgainst(t *testing.T) {
+	nonEmptyStrs := func(t *testing.T, ev map[string]any, key string) {
+		t.Helper()
+		v, ok := ev[key].([]string)
+		if !ok || len(v) == 0 {
+			t.Errorf("evidence[%q] = %#v, want a non-empty []string (the set matched against)", key, ev[key])
+		}
+	}
+
+	// tls.legacy_negotiated
+	{
+		s := withCert(svc(443, "tcp"), now.Add(time.Hour), false, 2, 2048)
+		s.TLS.Version = "TLSv1.0"
+		got := run(t, mkRule("tls.legacy_negotiated", nil), s, "")
+		if len(got) != 1 {
+			t.Fatalf("legacy: raised %d, want 1", len(got))
+		}
+		nonEmptyStrs(t, got[0].Evidence, "legacy_versions")
+	}
+
+	// tls.weak_cipher_negotiated — unfireable at the wire (session 16), but a
+	// unit test can present an insecure suite directly.
+	{
+		insecure := tls.InsecureCipherSuites()
+		if len(insecure) == 0 {
+			t.Skip("no insecure cipher suites in this Go build")
+		}
+		s := withCert(svc(443, "tcp"), now.Add(time.Hour), false, 2, 2048)
+		s.TLS.CipherSuite = insecure[0].Name
+		got := run(t, mkRule("tls.weak_cipher_negotiated", nil), s, "")
+		if len(got) != 1 {
+			t.Fatalf("weak cipher: raised %d, want 1", len(got))
+		}
+		nonEmptyStrs(t, got[0].Evidence, "insecure_suites")
+	}
+
+	// exposure.management_untrusted
+	{
+		r := mkRule("exposure.management_untrusted", map[string]any{
+			"ports": []int{22}, "zone_types": []string{"external"},
+		})
+		s := svc(22, "tcp")
+		s.Service = "ssh"
+		sub := Subject{AssetID: uuid.New(), Services: []ServiceObservation{s},
+			ZoneType: func(uuid.UUID) string { return "external" }}
+		got, err := Evaluators[r.Evaluator](r, sub, now)
+		if err != nil || len(got) != 1 {
+			t.Fatalf("management: %d findings, err %v", len(got), err)
+		}
+		if v, ok := got[0].Evidence["management_ports"].([]int); !ok || len(v) == 0 {
+			t.Errorf("evidence[management_ports] = %#v, want non-empty []int", got[0].Evidence["management_ports"])
+		}
+		nonEmptyStrs(t, got[0].Evidence, "untrusted_zone_types")
+	}
+
+	// ssh.weak_algorithms
+	{
+		r := mkRule("ssh.weak_algorithms", map[string]any{
+			"host_key": []string{"ssh-rsa"}, "kex": []string{"diffie-hellman-group1-sha1"},
+		})
+		s := svc(22, "tcp")
+		s.SSH = &SSHEvidence{
+			HostKeyAlgorithms: []string{"ssh-ed25519", "ssh-rsa"},
+			KexAlgorithms:     []string{"curve25519-sha256", "diffie-hellman-group1-sha1"},
+		}
+		got := run(t, r, s, "")
+		if len(got) != 1 {
+			t.Fatalf("ssh: raised %d, want 1", len(got))
+		}
+		nonEmptyStrs(t, got[0].Evidence, "weak_host_key_set")
+		nonEmptyStrs(t, got[0].Evidence, "weak_kex_set")
 	}
 }

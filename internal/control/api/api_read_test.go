@@ -484,3 +484,27 @@ func TestExportRequiresExportPermissionNotRead(t *testing.T) {
 		}
 	}
 }
+
+// TestSPACatchAllServesWithoutShadowingTheAPI — the UI catch-all serves app
+// paths (ADR-053) and does NOT shadow /v1/*. Build-agnostic: with the UI
+// embedded GET / is 200 HTML, without it 503 "not built" — either way the
+// catch-all handled it (not a 404), and the API still routes.
+func TestSPACatchAllServesWithoutShadowingTheAPI(t *testing.T) {
+	f := newFixture(t, `{}`)
+
+	for _, p := range []string{"/", "/findings/anything", "/assets"} {
+		w := f.do(t, http.MethodGet, p, nil, nil, "")
+		if w.Code == http.StatusNotFound {
+			t.Errorf("GET %s was 404; the SPA catch-all should serve it", p)
+		}
+		if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+			t.Errorf("GET %s content-type = %q, want text/html", p, ct)
+		}
+	}
+
+	// The API is not shadowed by the catch-all.
+	w := f.do(t, http.MethodGet, "/v1/openapi.json", nil, nil, "")
+	if w.Code != http.StatusOK {
+		t.Errorf("GET /v1/openapi.json = %d, want 200 (the catch-all must not shadow the API)", w.Code)
+	}
+}

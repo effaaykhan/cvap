@@ -76,6 +76,13 @@ SIGNATURES = {
     # job -- letting the metrics half die while the label half survives -- fails
     # this gate.
     "corpus-check":        ["make corpus-check", "CVAP_REQUIRE_LAB"],
+    # ui decomposes into the web job's steps, one per load-bearing half: the
+    # registry-parity diff (ui-verify, the proto-verify of the generated
+    # client), the typecheck, the unit tests, and the embedded build that is
+    # the only one to compile the //go:build embedui files. Requiring each by
+    # name means deleting any of them from CI fails this gate.
+    "ui":                  ["make ui-verify", "make ui-typecheck", "make ui-test",
+                            "make embedui-build"],
     "ci-parity":           ["check_ci_parity.py"],
 }
 

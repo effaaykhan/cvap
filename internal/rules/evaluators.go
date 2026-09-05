@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -255,15 +256,19 @@ func tlsWeakKey(r Rule, sub Subject, _ time.Time) ([]Finding, error) {
 // or may not also accept 1.0, and this rule cannot see that. "Enabled" needs a
 // version-ladder probe, one handshake per version, which is a packet cost per
 // port and a session 13 gap named in ADR-050.
+// legacyTLSVersions is the deny-set for tls.legacy_negotiated, defined once so
+// the branch and the evidence match against the SAME set: a stored set that
+// could differ from the one the code tested would be decorative (note: session
+// 19, ADR-050's evidence rule).
+var legacyTLSVersions = []string{"TLSv1.0", "TLSv1.1"}
+
 func tlsLegacyNegotiated(r Rule, sub Subject, _ time.Time) ([]Finding, error) {
 	var out []Finding
 	for _, s := range sub.Services {
 		if s.TLS == nil {
 			continue
 		}
-		switch s.TLS.Version {
-		case "TLSv1.0", "TLSv1.1":
-		default:
+		if !containsFold(legacyTLSVersions, s.TLS.Version) {
 			continue
 		}
 		out = append(out, Finding{
@@ -272,8 +277,11 @@ func tlsLegacyNegotiated(r Rule, sub Subject, _ time.Time) ([]Finding, error) {
 				s.Port, s.Protocol, s.TLS.Version),
 			Evidence: map[string]any{
 				"port": s.Port, "protocol": s.Protocol,
-				"negotiated_version": s.TLS.Version, "cipher_suite": s.TLS.CipherSuite,
-				"client_offered": "TLSv1.0 through TLSv1.3",
+				// The member matched, and the set it matched against.
+				"negotiated_version": s.TLS.Version,
+				"legacy_versions":    legacyTLSVersions,
+				"cipher_suite":       s.TLS.CipherSuite,
+				"client_offered":     "TLSv1.0 through TLSv1.3",
 			},
 		})
 	}
@@ -289,9 +297,12 @@ func tlsLegacyNegotiated(r Rule, sub Subject, _ time.Time) ([]Finding, error) {
 // consume the TLS stack's judgement, build the rule on it.
 func tlsWeakCipherNegotiated(r Rule, sub Subject, _ time.Time) ([]Finding, error) {
 	weak := map[string]bool{}
+	var weakNames []string
 	for _, cs := range tls.InsecureCipherSuites() {
 		weak[cs.Name] = true
+		weakNames = append(weakNames, cs.Name)
 	}
+	sort.Strings(weakNames) // stable evidence across runs
 
 	var out []Finding
 	for _, s := range sub.Services {
@@ -304,8 +315,12 @@ func tlsWeakCipherNegotiated(r Rule, sub Subject, _ time.Time) ([]Finding, error
 				s.Port, s.Protocol, s.TLS.CipherSuite),
 			Evidence: map[string]any{
 				"port": s.Port, "protocol": s.Protocol,
-				"negotiated_version": s.TLS.Version, "cipher_suite": s.TLS.CipherSuite,
-				"classification": "crypto/tls InsecureCipherSuites",
+				"negotiated_version": s.TLS.Version,
+				// The member matched, and the actual set it matched against —
+				// crypto/tls's own InsecureCipherSuites, not just a name for it.
+				"cipher_suite":    s.TLS.CipherSuite,
+				"insecure_suites": weakNames,
+				"classification":  "crypto/tls InsecureCipherSuites",
 			},
 		})
 	}
@@ -554,7 +569,14 @@ func exposureManagementUntrusted(r Rule, sub Subject, _ time.Time) ([]Finding, e
 				s.Port, s.Protocol, orUnset(s.Service), zt),
 			Evidence: map[string]any{
 				"port": s.Port, "protocol": s.Protocol, "service": s.Service,
-				"observed_from_zone": s.ZoneID.String(), "zone_type": zt,
+				// The members matched (this port, this zone type), and the two
+				// sets they were matched against — the rule's management ports and
+				// its untrusted zone types. Both come from the params the branch
+				// tested, so the evidence cannot claim a set the code did not use.
+				"observed_from_zone":   s.ZoneID.String(),
+				"zone_type":            zt,
+				"management_ports":     p.Ports,
+				"untrusted_zone_types": p.ZoneTypes,
 			},
 		})
 	}
@@ -598,7 +620,14 @@ func sshWeakAlgorithms(r Rule, sub Subject, _ time.Time) ([]Finding, error) {
 			Summary: fmt.Sprintf("SSH on %d/%s offers %s", s.Port, s.Protocol, strings.Join(offered, ", ")),
 			Evidence: map[string]any{
 				"port": s.Port, "protocol": s.Protocol,
+				// The members matched (weak_offered), the sets they were matched
+				// against (the rule's weak host-key and kex lists), and the host's
+				// full offered lists the members were drawn from. weak_host_key_set
+				// and weak_kex_set are the params the branch tested, so the stored
+				// set is the one the code used.
 				"weak_offered":         offered,
+				"weak_host_key_set":    p.HostKey,
+				"weak_kex_set":         p.Kex,
 				"host_key_algorithms":  s.SSH.HostKeyAlgorithms,
 				"kex_algorithms":       s.SSH.KexAlgorithms,
 				"host_key_fingerprint": s.SSH.Fingerprint,

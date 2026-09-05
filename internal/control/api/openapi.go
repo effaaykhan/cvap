@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"strings"
@@ -85,6 +87,11 @@ type oaSchema struct {
 	Description string              `json:"description,omitempty"`
 	Nullable    bool                `json:"nullable,omitempty"`
 	Enum        []string            `json:"enum,omitempty"`
+	// AdditionalProperties describes a map's value type. true for map[string]any
+	// (an open object), a schema for map[string]T. Without it a map emits as a
+	// bare object and openapi-typescript widens it to Record<string, never>,
+	// which is unusable — the gap that made evidence.data untypable.
+	AdditionalProperties any `json:"additionalProperties,omitempty"`
 }
 
 type oaComponents struct {
@@ -126,6 +133,11 @@ func (reg *Registry) OpenAPI(version string) ([]byte, error) {
 	}
 
 	for _, r := range reg.Routes() {
+		// Static UI routes are served but are not API operations (ADR-053): the
+		// document describes the API a client generates against, not the app shell.
+		if r.Static {
+			continue
+		}
 		op := oaOperation{
 			Summary:     r.Summary,
 			Description: r.Description,
@@ -288,6 +300,28 @@ func structSchema(into map[string]oaSchema, t reflect.Type) oaSchema {
 		if !f.IsExported() {
 			continue
 		}
+
+		// An embedded (anonymous) struct with no explicit json name has its
+		// fields PROMOTED to the parent object by encoding/json. The emitter must
+		// do the same, or the document describes a nested object the server never
+		// sends — which is exactly what a generated client would then be wrong
+		// about. Inline the embedded type's properties rather than nesting it.
+		if f.Anonymous {
+			et := f.Type
+			if et.Kind() == reflect.Pointer {
+				et = et.Elem()
+			}
+			explicit, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			if et.Kind() == reflect.Struct && et != reflect.TypeOf(time.Time{}) && explicit == "" {
+				emb := structSchema(into, et)
+				for k, v := range emb.Properties {
+					s.Properties[k] = v
+				}
+				s.Required = append(s.Required, emb.Required...)
+				continue
+			}
+		}
+
 		name, opts, ok := jsonName(f)
 		if !ok {
 			continue
@@ -345,7 +379,14 @@ func schemaFor(into map[string]oaSchema, t reflect.Type) oaSchema {
 		}
 		return oaSchema{Type: "array", Items: &items}
 	case reflect.Map:
-		return oaSchema{Type: "object"}
+		// map[string]any is an open object (additionalProperties: true); a typed
+		// map carries its value schema. Either way it must NOT emit as a bare
+		// object, which openapi-typescript reads as Record<string, never>.
+		if t.Elem().Kind() == reflect.Interface {
+			return oaSchema{Type: "object", AdditionalProperties: true}
+		}
+		ev := schemaFor(into, t.Elem())
+		return oaSchema{Type: "object", AdditionalProperties: &ev}
 	case reflect.Struct:
 		return schemaRef(into, reflect.New(t).Elem().Interface())
 	default:
@@ -381,4 +422,23 @@ func sortStrings(s []string) {
 			s[j], s[j-1] = s[j-1], s[j]
 		}
 	}
+}
+
+// OpenAPISpec renders the OpenAPI document from the route registry with no
+// database, for the codegen that generates the web client's types.
+//
+// It builds the SAME registry the server serves (s.routes()), so the generated
+// client cannot describe a route the server does not — the client is a third
+// registry that must agree with this one, and cmd/cvap-openapi + the web CI job
+// give it proto-verify's treatment: regenerate and fail on a diff. The Server it
+// builds has no db and its handlers are never called, only referenced as values
+// for the document.
+func OpenAPISpec(version string) ([]byte, error) {
+	s := &Server{
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		reg: NewRegistry(),
+		cfg: Config{Version: version},
+	}
+	s.routes()
+	return s.reg.OpenAPI(version)
 }

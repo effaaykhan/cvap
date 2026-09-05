@@ -49,7 +49,11 @@ func TestEveryRouteDeclaresWhoMayReachIt(t *testing.T) {
 				// takes a third party's redirect, and what makes it safe is not
 				// authentication but that it can name no tenant of its own: the
 				// host resolves the tenant, and the state is redeemed inside it.
-				"GET /v1/auth/oidc/start", "GET /v1/auth/oidc/callback":
+				"GET /v1/auth/oidc/start", "GET /v1/auth/oidc/callback",
+				// The operator web UI (ADR-053). Public because the SPA shell
+				// loads before authentication, which then happens through /v1/auth;
+				// it serves only static assets and holds no tenant data of its own.
+				"GET /":
 			default:
 				t.Errorf("%s %s is public and is not one of the routes this test knows about. "+
 					"If that is deliberate, add it here — and say why in the route's Description.",
@@ -171,6 +175,12 @@ func TestTheDocumentDescribesEveryRoute(t *testing.T) {
 	}
 
 	for _, r := range reg.Routes() {
+		if r.Static {
+			// A Static route (the SPA catch-all) is served but is deliberately not
+			// an API operation, so it is absent from the document by design
+			// (ADR-053). It is verified instead by TestStaticRoutesAreExcludedFromTheDocument.
+			continue
+		}
 		op, ok := parsed.Paths[r.Path][strings.ToLower(r.Method)]
 		if !ok {
 			t.Errorf("%s %s is served and is not in the document", r.Method, r.Path)
@@ -290,5 +300,36 @@ func TestThereIsNoPermissionHierarchy(t *testing.T) {
 		if set.Has(p) {
 			t.Errorf("a role holding only scan.create also holds %s", p)
 		}
+	}
+}
+
+// TestStaticRoutesAreExcludedFromTheDocument — the SPA catch-all is served but is
+// not an API operation, so it must not appear in the OpenAPI document (ADR-053).
+// The document describes the API a client generates against, not the app shell.
+func TestStaticRoutesAreExcludedFromTheDocument(t *testing.T) {
+	reg := testRegistry(t)
+
+	var static int
+	for _, r := range reg.Routes() {
+		if r.Static {
+			static++
+		}
+	}
+	if static == 0 {
+		t.Fatal("no Static route registered; expected the SPA catch-all")
+	}
+
+	doc, err := reg.OpenAPI("test")
+	if err != nil {
+		t.Fatalf("OpenAPI: %v", err)
+	}
+	var parsed struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(doc, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := parsed.Paths["/"]["get"]; ok {
+		t.Error("the static SPA route GET / is in the OpenAPI document; static routes must be excluded (ADR-053)")
 	}
 }
