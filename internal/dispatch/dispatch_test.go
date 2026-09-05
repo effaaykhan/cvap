@@ -1011,12 +1011,9 @@ func TestNoAssignmentUnderHardBackpressure(t *testing.T) {
 			State: scanpointv1.BackpressureState_BACKPRESSURE_STATE_OK,
 		}},
 	})
-	assigned := time.Now().Add(10 * time.Second)
-	for {
-		if jobStatus() == store.JobAssigned {
-			break
-		}
-		if time.Now().After(assigned) {
+	deadlineOK := time.Now().Add(10 * time.Second)
+	for jobStatus() != store.JobAssigned {
+		if time.Now().After(deadlineOK) {
 			t.Fatal("job never assigned after backpressure cleared; the negative above is not " +
 				"meaningful unless the job was assignable once HARD lifted")
 		}
