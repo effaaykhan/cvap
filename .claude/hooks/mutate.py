@@ -104,6 +104,9 @@ GO_SUITES = [
     "internal/dispatch/dispatch_test.go",
     # F5 (a resumed upload restarts from the last acked chunk, not from zero).
     "internal/scanpoint/fault_resume_test.go",
+    # F6×F5 (sustained rejection keeps the buffer and loses nothing) — the compose
+    # that surfaced the RETRY_LATER-on-chunk-0 data-loss fix in submit.go.
+    "internal/scanpoint/fault_backpressure_buffer_test.go",
 ]
 
 # The declaration shape, in comments beside the tests:

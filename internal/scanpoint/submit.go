@@ -272,10 +272,6 @@ func (s *Submitter) deliver(ctx context.Context, sub *Submission) (keep bool, er
 			return true, err
 		}
 
-		if ack.GetLastChunkAccepted() >= idx {
-			sub.resumeFrom = ack.GetLastChunkAccepted()
-			sub.hasResume = true
-		}
 		if ms := ack.GetRetryAfterMs(); ms > 0 {
 			// Core-initiated backpressure, arriving while the upload is still
 			// running. Honoured mid-stream, because a saturation signal
@@ -290,6 +286,20 @@ func (s *Submitter) deliver(ctx context.Context, sub *Submission) (keep bool, er
 
 		switch ack.GetStatus() {
 		case scanpointv1.SubmitStatus_ACCEPTED:
+			// This chunk is committed, so advance the resumption point — and ONLY
+			// here. LastChunkAccepted is a uint32 whose proto3 default is 0, which
+			// collides with "chunk 0": Core leaves it unset on a RETRY_LATER when
+			// nothing was committed (ingest.go only sets it once hasAccepted), so
+			// advancing it on a non-ACCEPTED ack would read that default 0 as
+			// "chunk 0 accepted", skip chunk 0 on the retry, and drop a
+			// single-chunk submission — results lost, the ADR-026 failure. The
+			// scan point already tracks resumeFrom from the ACCEPTED acks it has
+			// seen, so a RETRY_LATER needs to move nothing. Guarded by
+			// TestSustainedRejectionKeepsTheBufferThenDelivers.
+			if ack.GetLastChunkAccepted() >= idx {
+				sub.resumeFrom = ack.GetLastChunkAccepted()
+				sub.hasResume = true
+			}
 			// Keep going; the terminal ack decides.
 		case scanpointv1.SubmitStatus_ACCEPTED_QUARANTINED:
 			// Stored, withheld from the finding pipeline, surfaced to an
