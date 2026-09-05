@@ -159,7 +159,16 @@ func (reg *Registry) OpenAPI(version string) ([]byte, error) {
 			status = http.StatusOK
 		}
 		resp := oaResponse{Description: http.StatusText(status)}
-		if r.Response != nil {
+		switch {
+		case r.ResponseContentType != "" && r.ResponseContentType != "application/json":
+			// A non-JSON body (the CSV export). There is no Go struct to
+			// reflect, so it is described as an opaque string rather than a
+			// schema — ADR-043's "extend the emitter" for a shape it cannot
+			// otherwise express.
+			resp.Content = map[string]oaMediaType{
+				r.ResponseContentType: {Schema: oaSchema{Type: "string", Format: "binary"}},
+			}
+		case r.Response != nil:
 			resp.Content = map[string]oaMediaType{"application/json": {Schema: schemaRef(doc.Components.Schemas, r.Response)}}
 		}
 		op.Responses[itoa(status)] = resp

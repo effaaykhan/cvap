@@ -87,6 +87,13 @@ type Config struct {
 	// SessionTTL is capped by a CHECK constraint on sessions at 12 hours. Set
 	// lower here; it cannot be set higher, and the database is what says so.
 	SessionTTL time.Duration
+
+	// ExportRowCap bounds a CSV export; 0 means store.ExportRowCap. An export
+	// matching more than the cap is refused rather than truncated, so an
+	// incomplete file never masquerades as complete. Configurable so a
+	// deployment can lower it and a test can prove the refusal without seeding
+	// the default cap's worth of rows.
+	ExportRowCap int
 }
 
 // Server is the operator API.

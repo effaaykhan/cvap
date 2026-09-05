@@ -339,6 +339,33 @@ func (s *Server) listScanPoints(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, s.log, http.StatusOK, out)
 }
 
+// listAllScanPoints is the fleet health list: every scan point in the tenant,
+// so the UI shows scan-point health without iterating zones. The per-zone
+// listScanPoints stays for the zone view. Certificate fingerprints are never
+// rendered, same as the per-zone route.
+func (s *Server) listAllScanPoints(w http.ResponseWriter, r *http.Request) {
+	tenant, _ := tenantFrom(r.Context())
+	var points []store.ScanPoint
+	err := s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
+		var err error
+		points, err = (store.ScanPoints{}).ListAll(ctx, c)
+		return err
+	})
+	if err != nil {
+		storeError(w, r, s.log, err)
+		return
+	}
+	out := ScanPointListResponse{ScanPoints: make([]ScanPointResponse, 0, len(points))}
+	for _, p := range points {
+		out.ScanPoints = append(out.ScanPoints, ScanPointResponse{
+			ID: p.ID.String(), ZoneID: p.ZoneID.String(), Hostname: p.Hostname,
+			Status: string(p.Status), AgentVersion: p.AgentVersion,
+			ProtocolVersion: p.ProtocolVersion, LastHeartbeat: p.LastHeartbeat,
+		})
+	}
+	writeJSON(w, r, s.log, http.StatusOK, out)
+}
+
 // EnrollmentTokenRequest issues a token for a zone.
 type EnrollmentTokenRequest struct {
 	ZoneID      string `json:"zone_id" doc:"The zone the scan point is enrolled INTO. A scan point never asserts its own zone (ADR-018)."`

@@ -36,6 +36,17 @@ const (
 	PermScanPointRead   Permission = "scanpoint.read"
 	PermScanPointEnroll Permission = "scanpoint.enroll"
 
+	// The read surface the operator UI consumes (session 18). Held apart from
+	// scan.read because an asset inventory and a finding backlog are a different
+	// authority from watching a scan run — a read-only analyst who may see
+	// findings need not be able to enumerate the scan queue, and the reverse.
+	// Exposure and CSV export reuse finding.read: they are the same findings in
+	// another shape, and a separate permission would be an authority nobody
+	// distinguishes. Like every permission here, these are granted only in test
+	// fixtures today; production role provisioning is a later session.
+	PermAssetRead   Permission = "asset.read"
+	PermFindingRead Permission = "finding.read"
+
 	// The fleet stop. Held apart from every other permission because it is the
 	// control ADR-024 requires to be reachable in seconds by whoever is holding
 	// the pager, which is not necessarily whoever administers policy.
@@ -55,6 +66,7 @@ var allPermissions = map[Permission]bool{
 	PermScanPointRead: true, PermScanPointEnroll: true,
 	PermKillIssue: true, PermKillResolve: true,
 	PermAuthConfigRead: true, PermAuthConfigWrite: true,
+	PermAssetRead: true, PermFindingRead: true,
 }
 
 // PermissionNames lists the closed set, sorted. For the OpenAPI document and

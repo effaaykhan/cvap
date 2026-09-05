@@ -85,6 +85,7 @@ GO_SUITES = [
     "internal/scanpoint/corpus_test.go",
     "internal/domain/identity_test.go",
     "internal/rules/evaluators_test.go",
+    "internal/control/api/api_read_test.go",
 ]
 
 # The declaration shape, in comments beside the tests:

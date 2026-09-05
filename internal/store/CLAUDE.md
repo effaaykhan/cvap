@@ -96,9 +96,14 @@ never be used by the running application.
   `SECURITY DEFINER`, `STABLE`, parameterless and returns `SETOF uuid`.
 
 There is no *general* unscoped path, deliberately. The knowledge tables carry no `tenant_id`,
-so they would need one — but nothing in this package reads them yet, and an escape hatch with
-no caller is how escape hatches get misused. The session that needs `rules` on the finding read
-path should make the case then, the way ADR-036 made it for the sweep.
+so they would need one — and an escape hatch with no caller is how escape hatches get misused.
+The finding read path (session 18) DOES now read `rules`, but it needed no such primitive: the
+join `findings f JOIN rules r ON r.rule_id = f.rule_id` runs inside a tenant-scoped `Read`
+transaction on `findings`, and `rules` is a global no-RLS table `cvap_app` may `SELECT`
+(migration 0010's grant). A global table read from inside a tenant transaction is not an
+unscoped read of tenant data — it is the case ADR-030 anticipated. A future need to read a
+knowledge table with *no* finding to anchor the join to is the one that would still have to make
+the case, the way ADR-036 made it for the sweep.
 
 ## Observations
 

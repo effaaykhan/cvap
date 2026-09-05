@@ -104,11 +104,39 @@ type AssetPage struct {
 	NextID     uuid.UUID
 }
 
+// AssetFilter narrows the asset list. Empty fields do not filter.
+type AssetFilter struct {
+	// Query matches a substring of the primary hostname OR of any current
+	// address (asset_addresses with valid_to IS NULL). Empty matches all.
+	Query string
+	// Environment is an exact match on the environment tag. Empty matches all.
+	Environment string
+	// Fragile filters on the fragile flag when non-nil.
+	Fragile *bool
+}
+
 // List returns assets newest-seen first, backed by the (tenant_id, last_seen DESC)
-// index. Pass a zero `before` for the first page.
-func (Assets) List(ctx context.Context, c *Conn, before time.Time, beforeID uuid.UUID, limit int) (*AssetPage, error) {
+// index, narrowed by f. Pass a zero `before` for the first page.
+func (Assets) List(ctx context.Context, c *Conn, f AssetFilter, before time.Time, beforeID uuid.UUID, limit int) (*AssetPage, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
+	}
+
+	// Search over hostname OR a current address, as an operator would type it.
+	// The pattern is a bound parameter, never interpolated, so a value with %
+	// or _ in it searches literally-enough and cannot alter the statement. The
+	// address arm is an EXISTS over the current-addresses partial index rather
+	// than a join, so a host with several addresses is not returned several
+	// times.
+	var qArg, envArg, fragileArg any
+	if f.Query != "" {
+		qArg = "%" + f.Query + "%"
+	}
+	if f.Environment != "" {
+		envArg = f.Environment
+	}
+	if f.Fragile != nil {
+		fragileArg = *f.Fragile
 	}
 
 	const q = `
@@ -119,6 +147,12 @@ func (Assets) List(ctx context.Context, c *Conn, before time.Time, beforeID uuid
 		  FROM assets
 		 WHERE tenant_id = $1
 		   AND ($2::timestamptz IS NULL OR (last_seen, asset_id) < ($2, $3))
+		   AND ($5::text IS NULL OR primary_hostname ILIKE $5 OR EXISTS (
+		         SELECT 1 FROM asset_addresses aa
+		          WHERE aa.tenant_id = assets.tenant_id AND aa.asset_id = assets.asset_id
+		            AND aa.valid_to IS NULL AND host(aa.ip_address) ILIKE $5))
+		   AND ($6::text IS NULL OR environment = $6)
+		   AND ($7::boolean IS NULL OR fragile = $7)
 		 ORDER BY last_seen DESC, asset_id DESC
 		 LIMIT $4`
 
@@ -128,7 +162,7 @@ func (Assets) List(ctx context.Context, c *Conn, before time.Time, beforeID uuid
 		beforeArg = before
 	}
 
-	rows, err := c.Query(ctx, q, c.Tenant().UUID(), beforeArg, beforeIDArg, limit)
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), beforeArg, beforeIDArg, limit, qArg, envArg, fragileArg)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -198,4 +232,103 @@ func (Assets) SetFragile(ctx context.Context, c *Conn, id uuid.UUID, fragile boo
 		return ErrNotFound
 	}
 	return nil
+}
+
+// ============================================================================
+// Asset detail (session 18): the base row plus its current addresses and
+// services, for the operator UI's asset view.
+// ============================================================================
+
+// AssetAddress is one current address of an asset (valid_to IS NULL). Held as
+// text — host(ip) and mac::text — because the API renders it and never does
+// arithmetic on it.
+type AssetAddress struct {
+	IP        string
+	MAC       string
+	ValidFrom time.Time
+}
+
+// AssetService is one listening endpoint on an asset.
+type AssetService struct {
+	Port       int
+	Protocol   string
+	Service    string
+	Product    string
+	Version    string
+	Confidence *float64 // nil when the version was not inferred with a confidence
+	LastSeen   time.Time
+}
+
+// AssetDetail is one asset with everything the UI shows on its page.
+type AssetDetail struct {
+	Asset
+	Addresses    []AssetAddress
+	Services     []AssetService
+	OpenFindings int
+}
+
+// GetDetail returns the full asset view, or ErrNotFound (also what a
+// cross-tenant id gives — indistinguishable under RLS, deliberately).
+func (Assets) GetDetail(ctx context.Context, c *Conn, id uuid.UUID) (*AssetDetail, error) {
+	base, err := (Assets{}).GetByID(ctx, c, id)
+	if err != nil {
+		return nil, err
+	}
+	d := &AssetDetail{Asset: *base}
+
+	const addrQ = `
+		SELECT coalesce(host(ip_address), ''), coalesce(mac_address::text, ''), valid_from
+		  FROM asset_addresses
+		 WHERE tenant_id = $1 AND asset_id = $2 AND valid_to IS NULL
+		 ORDER BY valid_from`
+	rows, err := c.Query(ctx, addrQ, c.Tenant().UUID(), id)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	for rows.Next() {
+		var a AssetAddress
+		if err := rows.Scan(&a.IP, &a.MAC, &a.ValidFrom); err != nil {
+			rows.Close()
+			return nil, mapError(err)
+		}
+		d.Addresses = append(d.Addresses, a)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, mapError(err)
+	}
+	rows.Close()
+
+	const svcQ = `
+		SELECT port, protocol, coalesce(service_name,''), coalesce(product,''),
+		       coalesce(version,''), version_confidence, last_seen
+		  FROM services
+		 WHERE tenant_id = $1 AND asset_id = $2
+		 ORDER BY port, protocol`
+	srows, err := c.Query(ctx, svcQ, c.Tenant().UUID(), id)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	for srows.Next() {
+		var s AssetService
+		if err := srows.Scan(&s.Port, &s.Protocol, &s.Service, &s.Product,
+			&s.Version, &s.Confidence, &s.LastSeen); err != nil {
+			srows.Close()
+			return nil, mapError(err)
+		}
+		d.Services = append(d.Services, s)
+	}
+	if err := srows.Err(); err != nil {
+		srows.Close()
+		return nil, mapError(err)
+	}
+	srows.Close()
+
+	const cntQ = `
+		SELECT count(*) FROM findings
+		 WHERE tenant_id = $1 AND asset_id = $2 AND status IN ('open','confirmed')`
+	if err := c.QueryRow(ctx, cntQ, c.Tenant().UUID(), id).Scan(&d.OpenFindings); err != nil {
+		return nil, mapError(err)
+	}
+	return d, nil
 }

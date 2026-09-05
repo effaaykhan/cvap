@@ -248,3 +248,37 @@ func (ScanPoints) Capabilities(ctx context.Context, c *Conn, scanPointID uuid.UU
 	}
 	return out, mapError(rows.Err())
 }
+
+// ListAll returns every scan point in the tenant, WORST-first by liveness: the
+// ones an operator worries about — never heard from (NULL heartbeat), then
+// longest-silent — surface at the top, healthiest last. This is a fleet HEALTH
+// list, so it sorts the way the finding views do (worst first), not
+// newest-first, which would bury exactly the points that need attention. The
+// per-zone ListByZone remains for the zone view; this is what the UI reads
+// without iterating zones. cert_fingerprint is selected for the struct but the
+// API never renders it (handlers_ops).
+func (ScanPoints) ListAll(ctx context.Context, c *Conn) ([]ScanPoint, error) {
+	const q = `
+		SELECT scan_point_id, zone_id, hostname, agent_version, protocol_version,
+		       status, cert_fingerprint, last_heartbeat, enrolled_at
+		  FROM scan_points
+		 WHERE tenant_id = $1
+		 ORDER BY last_heartbeat ASC NULLS FIRST, hostname`
+
+	rows, err := c.Query(ctx, q, c.Tenant().UUID())
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+
+	var out []ScanPoint
+	for rows.Next() {
+		var sp ScanPoint
+		if err := rows.Scan(&sp.ID, &sp.ZoneID, &sp.Hostname, &sp.AgentVersion, &sp.ProtocolVersion,
+			&sp.Status, &sp.CertFingerprint, &sp.LastHeartbeat, &sp.EnrolledAt); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, sp)
+	}
+	return out, mapError(rows.Err())
+}

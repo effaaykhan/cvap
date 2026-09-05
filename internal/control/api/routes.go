@@ -280,6 +280,84 @@ func (s *Server) routes() {
 		Handler: s.issueEnrollmentToken,
 	})
 
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/scan-points",
+		Summary: "List all scan points (fleet health)",
+		Description: "Every scan point in the tenant, worst-first by liveness, so the UI shows " +
+			"fleet health without iterating zones. Certificate fingerprints are never returned.",
+		Access: AccessPermission, Permission: PermScanPointRead,
+		Response: ScanPointListResponse{},
+		Handler:  s.listAllScanPoints,
+	})
+
+	// ----------------------------------------------------------- assets
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/assets",
+		Summary: "List assets",
+		Description: "The asset inventory, newest-seen first, by keyset cursor. Filter with " +
+			"?q= (hostname or a current address), ?environment=, ?fragile=true|false.",
+		Access: AccessPermission, Permission: PermAssetRead,
+		Response: AssetListResponse{},
+		Handler:  s.listAssets,
+	})
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/assets/{asset_id}",
+		Summary: "Get an asset",
+		Description: "Current addresses (time-bounded, ADR-008), listening services, and the " +
+			"count of open findings. Assets are derived from observations, never written by a scan point (ADR-006).",
+		Access: AccessPermission, Permission: PermAssetRead,
+		Response: AssetResponse{},
+		Handler:  s.getAsset,
+	})
+
+	// ----------------------------------------------------------- findings
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/findings",
+		Summary: "List findings",
+		Description: "Newest-seen first, by keyset cursor. Filter with ?status=, ?severity=, " +
+			"?asset_id=, ?rule_id=. One finding seen from several zones is one row (ADR-010).",
+		Access: AccessPermission, Permission: PermFindingRead,
+		Response: FindingListResponse{},
+		Handler:  s.listFindings,
+	})
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/findings/{finding_id}",
+		Summary: "Get a finding, with the evidence a human verifies it by",
+		Description: "The finding, its rule and remediation, every vantage point it is exposed " +
+			"from, and the evidence copied from the observation at finding creation (ADR-016). " +
+			"When an observation has aged out, its evidence remains and the response says so " +
+			"rather than showing a dead link.",
+		Access: AccessPermission, Permission: PermFindingRead,
+		Response: FindingResponse{},
+		Handler:  s.getFinding,
+	})
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/exposure",
+		Summary: "Exposure by zone",
+		Description: "Open findings visible from each zone, by severity, worst-first (ADR-008). " +
+			"Each count is DISTINCT findings for that zone; the counts are not summable across " +
+			"zones, because a finding seen from three zones is one finding (ADR-010).",
+		Access: AccessPermission, Permission: PermFindingRead,
+		Response: ExposureByZoneResponse{},
+		Handler:  s.exposureByZone,
+	})
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/findings.csv",
+		Summary: "Export findings as CSV",
+		Description: "The findings list (same filters) as CSV, for the reporting §2 permits. " +
+			"Bounded: an export matching more than the cap is REFUSED with 422 rather than " +
+			"truncated, so an incomplete file never masquerades as complete — narrow it with a filter.",
+		Access: AccessPermission, Permission: PermFindingRead,
+		ResponseContentType: "text/csv",
+		Handler:             s.exportFindingsCSV,
+	})
+
 	// ----------------------------------------------------------- discovery
 
 	r.Register(Route{

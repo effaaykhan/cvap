@@ -70,6 +70,15 @@ type Route struct {
 	Request  any
 	Response any
 
+	// ResponseContentType overrides the default application/json for the success
+	// response. Set it for a route whose body is not JSON — the CSV export is the
+	// first, and ADR-043 says a shape the emitter cannot express is a reason to
+	// extend it, not to hand-write around it. When set to something other than
+	// application/json, the emitter describes the body as an opaque string
+	// (type: string, format: binary) rather than a schema, because there is no Go
+	// struct to reflect; Response should be nil in that case.
+	ResponseContentType string
+
 	// Status is the success status. 0 means 200.
 	Status int
 
