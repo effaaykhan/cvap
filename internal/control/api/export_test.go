@@ -4,19 +4,17 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"testing"
+
+	"github.com/effaaykhan/cvap/internal/control/credential"
 )
 
-// HashPasswordForTest exposes the password hasher to the integration test, which
-// lives in api_test and therefore cannot reach an unexported function.
-//
-// A test-only export rather than making hashPassword public: nothing outside
-// this package should be producing verifiers, because the parameters and the
-// encoding are this package's to change.
+// HashPasswordForTest wraps credential.Hash so the integration test seeds a
+// verifier the same way production does, with a t.Fatalf on error.
 func HashPasswordForTest(t *testing.T, password string) string {
 	t.Helper()
-	phc, err := hashPassword(password)
+	phc, err := credential.Hash(password)
 	if err != nil {
-		t.Fatalf("hashPassword: %v", err)
+		t.Fatalf("credential.Hash: %v", err)
 	}
 	return phc
 }

@@ -2,16 +2,12 @@ package api
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/argon2"
-
+	"github.com/effaaykhan/cvap/internal/control/credential"
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
@@ -256,7 +252,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			// The stored hash used weaker parameters than this build asks for.
 			// Rewritten now, while the plaintext is in hand — the only moment it
 			// can be.
-			upgraded, err := hashPassword(req.Password)
+			upgraded, err := credential.Hash(req.Password)
 			if err != nil {
 				return err
 			}
@@ -308,7 +304,7 @@ func (s *Server) verifyUnderLimit(ctx context.Context, phc, password string) (ma
 		return false, false
 	}
 
-	ok, rehash, err := verifyPassword(phc, password)
+	ok, rehash, err := credential.Verify(phc, password)
 	if err != nil {
 		// A corrupt stored hash. Denies, and is logged where the request id can
 		// be joined to it — this is a row an operator has to repair, not
@@ -471,7 +467,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	var phc string
 	if matched {
 		var err error
-		if phc, err = hashPassword(req.NewPassword); err != nil {
+		if phc, err = credential.Hash(req.NewPassword); err != nil {
 			writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
 				"An unexpected error occurred.", err)
 			return
@@ -522,86 +518,6 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 }
 
 var errWrongPassword = errors.New("api: password mismatch")
-
-// Argon2id parameters.
-//
-// RFC 9106's second recommended configuration for memory and passes — 64 MiB,
-// three — chosen over the first (2 GiB) because Core handles several logins at
-// once and 2 GiB per verification is a denial of service against ourselves.
-//
-// **One lane, not the RFC's four**, and that is the deliberate departure.
-// Parallelism inside a single hash lowers the latency of ONE verification and
-// does not change the total work; the RFC's p=4 assumes a machine doing nothing
-// else. Core is a server, and four lanes per hash meant each verification
-// saturated four cores, so a handful of concurrent unauthenticated logins
-// starved every other handler. Throughput and responsiveness are what matter
-// here, and p=1 with the same memory and passes costs an attacker exactly as
-// much per guess.
-//
-// Existing hashes verify unchanged: the parameters travel in the PHC string, so
-// a row written with p=4 is decoded and verified with p=4.
-const (
-	argonTime    = 3
-	argonMemory  = 64 * 1024
-	argonThreads = 1
-	argonKeyLen  = 32
-	argonSaltLen = 16
-)
-
-// hashPassword produces a PHC-format argon2id string.
-func hashPassword(password string) (string, error) {
-	// Random BYTES, not the first sixteen characters of a base64 string.
-	//
-	// The earlier version sliced newToken()'s output, which is base64: sixteen
-	// of those characters carry 96 bits of entropy, not the 128 the length
-	// implies. Nothing about the code said so, which is what made it worth
-	// fixing rather than documenting.
-	salt := make([]byte, argonSaltLen)
-	if _, err := rand.Read(salt); err != nil {
-		return "", fmt.Errorf("api: generating a salt: %w", err)
-	}
-	key := argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
-	return encodePHC(salt, key), nil
-}
-
-// verifyPassword checks a password against a stored PHC string.
-//
-// Returns needsRehash when the stored parameters are weaker than this build's,
-// so an old hash is upgraded at the one moment the plaintext is available.
-func verifyPassword(phc, password string) (ok bool, needsRehash bool, err error) {
-	p, salt, want, err := decodePHC(phc)
-	if err != nil {
-		return false, false, err
-	}
-	// decodePHC bounds len(want) to [16, 1024], so the conversion cannot
-	// overflow. Verifying against the STORED length rather than argonKeyLen is
-	// what lets a hash written by an older build still verify.
-	// #nosec G115 -- bounded by decodePHC
-	got := argon2.IDKey([]byte(password), salt, p.time, p.memory, p.threads, uint32(len(want)))
-	if subtle.ConstantTimeCompare(got, want) != 1 {
-		return false, false, nil
-	}
-	// threads is deliberately NOT compared. It is a latency knob rather than a
-	// strength one — total work is memory times passes — so a hash with more
-	// lanes is not stronger and one with fewer is not weaker, and rehashing on
-	// that axis would rewrite every row for nothing.
-	weaker := p.time < argonTime || p.memory < argonMemory || len(want) < argonKeyLen
-	return true, weaker, nil
-}
-
-type argonParams struct {
-	memory  uint32
-	time    uint32
-	threads uint8
-}
-
-func encodePHC(salt, key []byte) string {
-	return strings.Join([]string{
-		"", "argon2id", "v=" + itoa(argon2.Version),
-		"m=" + itoa(argonMemory) + ",t=" + itoa(argonTime) + ",p=" + itoa(argonThreads),
-		b64(salt), b64(key),
-	}, "$")
-}
 
 func isInfrastructureError(err error) bool {
 	// A store sentinel is an outcome; anything else that reaches the login

@@ -74,6 +74,7 @@ SUITES = [
 # for Python — a suite that quietly opts out is how this stops covering
 # anything.
 GO_SUITES = [
+    "internal/control/credential/phc_test.go",
     "internal/control/api/oidc_ssrf_test.go",
     "internal/control/api/oidc_test.go",
     "internal/dispatch/scope_conformance_test.go",

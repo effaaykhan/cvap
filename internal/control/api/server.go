@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/effaaykhan/cvap/internal/control/credential"
 	"github.com/effaaykhan/cvap/internal/control/enrollment"
 	"github.com/effaaykhan/cvap/internal/store"
 )
@@ -193,7 +194,7 @@ func New(db *store.DB, log *slog.Logger, cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("api: session_ttl %s exceeds the 12h cap enforced by the sessions CHECK constraint", cfg.SessionTTL)
 	}
 
-	decoy, err := hashPassword(uuid.NewString())
+	decoy, err := credential.Hash(uuid.NewString())
 	if err != nil {
 		return nil, fmt.Errorf("api: decoy verifier: %w", err)
 	}
