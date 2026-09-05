@@ -75,6 +75,9 @@ SUITES = [
 # anything.
 GO_SUITES = [
     "internal/control/credential/phc_test.go",
+    # The load test's coarse/precise gate split — each half sabotaged
+    # independently, DB-free so the mutation runs without a seeded 10k corpus.
+    "test/load/gate_test.go",
     "internal/control/api/oidc_ssrf_test.go",
     "internal/control/api/oidc_test.go",
     "internal/dispatch/scope_conformance_test.go",

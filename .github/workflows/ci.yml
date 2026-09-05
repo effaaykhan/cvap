@@ -217,6 +217,19 @@ jobs:
           CVAP_TEST_DATABASE_URL: postgres://cvap_app_login:cvap_dev_only_app_password@localhost:5432/cvap?sslmode=disable
         run: go test ./test/e2e/... -count=1 -timeout 10m
 
+      # The 10k-asset load test against the published SLOs (§5). CVAP_RUN_LOADTEST
+      # is deliberately UNSET here: CI enforces the coarse, order-of-magnitude
+      # ceiling only. The precise p95 SLO flakes at the exact threshold on a
+      # shared runner, and a gate people mute is worse than no gate — so precise
+      # runs where the machine is quiet (a developer's box and the nightly job),
+      # never here. The numbers are printed either way (-v), so the trend is
+      # visible before it crosses anything. (ci-parity asserts this step exists;
+      # ADR-058 records why coarse-in-CI is correct rather than a concession.)
+      - name: Load test (coarse SLO ceiling)
+        env:
+          APP_DATABASE_URL: postgres://cvap_app_login:cvap_dev_only_app_password@localhost:5432/cvap?sslmode=disable
+        run: make loadtest
+
       # Mutation testing lives in THIS job, not the config one, because it now
       # covers Go suites that need a database — and a suite that skips passes,
       # so every mutation it would have killed survives instead. The driver

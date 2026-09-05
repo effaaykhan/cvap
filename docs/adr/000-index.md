@@ -66,3 +66,4 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 055 | The enrollment-token prefix, and its now-half-moot secret-scanning rationale | Accepted |
 | 056 | A fault worth testing is one the deployed binary can experience (the §6.4 fault matrix) | Accepted |
 | 057 | Credential zeroisation is immediate and independent of submission (derive-before-zeroise) | Accepted |
+| 058 | The load test enforces a coarse ceiling in CI and the precise SLO locally (no exposure overshoot) | Accepted |

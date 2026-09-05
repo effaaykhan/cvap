@@ -67,8 +67,16 @@ SIGNATURES = {
     "licences":            ["check_licences.py"],
     # db-gates is decomposed into the schema job's steps. Require the load-
     # bearing ones by name, so deleting any of them from CI fails here.
+    #
+    # `make loadtest` is required present, which is the coarse SLO ceiling: CI
+    # enforces the order-of-magnitude bound. The precise p95 SLO is enforced
+    # locally and nightly; CI enforces the coarse ceiling only, because runner
+    # noise at the exact threshold produces a gate people mute. That is why the
+    # precise switch, CVAP_RUN_LOADTEST, is NOT in this signature and must not be
+    # added to the CI workflow: requiring it here would be requiring the flaky
+    # gate CI deliberately omits. (ADR-058.)
     "db-gates":            ["make migrate-verify", "make app-role", "make rls-test",
-                            "make store-test", "make mutate"],
+                            "make store-test", "make loadtest", "make mutate"],
     "adr-index":           ["check_adr_index.py"],
     # corpus-check has two halves and BOTH must run: the always-on labels (the
     # config job) and the enforced metrics (the corpus job, whose whole point is

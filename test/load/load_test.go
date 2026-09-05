@@ -2,8 +2,6 @@ package load
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,28 +12,27 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/argon2"
 
 	"github.com/effaaykhan/cvap/internal/control/api"
+	"github.com/effaaykhan/cvap/internal/control/credential"
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
 const loadPassword = "correct horse battery staple"
 
-// hashPasswordLoad reproduces the api package's unexported hashPassword (argon2id
-// PHC, m=64MiB t=3 p=1, 16-byte salt, 32-byte key, RawStdEncoding) so the real
-// login endpoint accepts the seeded credential. Kept faithful to phc.go /
-// handlers_auth.go; if those change, this credential stops verifying and the
-// load test fails loudly rather than measuring nothing.
-func hashPasswordLoad(t *testing.T, password string) string {
+// hashLoadPassword hashes the seeded operator's password with the SAME encoder
+// the login endpoint verifies against — credential.Hash, not a copy. This test
+// once carried its own argon2id encoder because the api hasher was test-only;
+// extracting internal/control/credential removed the reason for the copy, so the
+// copy is gone. If the parameters change, they change in one place and this
+// still verifies.
+func hashLoadPassword(t *testing.T, password string) string {
 	t.Helper()
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		t.Fatal(err)
+	phc, err := credential.Hash(password)
+	if err != nil {
+		t.Fatalf("credential.Hash: %v", err)
 	}
-	key := argon2.IDKey([]byte(password), salt, 3, 64*1024, 1, 32)
-	return fmt.Sprintf("$argon2id$v=%d$m=65536,t=3,p=1$%s$%s", argon2.Version,
-		base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(key))
+	return phc
 }
 
 // Published SLOs (execution-plan §5). Coarse = 2x (or /2 for throughput):
@@ -86,7 +83,7 @@ func newLoadFix(t *testing.T, db *store.DB) *loadFix {
 		if err := (store.AuthConfigs{}).Upsert(ctx, c, store.AuthConfig{Method: store.AuthLocal}, nil); err != nil {
 			return err
 		}
-		return (store.Credentials{}).Set(ctx, c, user.ID, hashPasswordLoad(t, loadPassword), false)
+		return (store.Credentials{}).Set(ctx, c, user.ID, hashLoadPassword(t, loadPassword), false)
 	}); err != nil {
 		t.Fatalf("set up load tenant: %v", err)
 	}
@@ -243,44 +240,74 @@ func measureIngestOps(t *testing.T, db *store.DB, tenant store.TenantID) float64
 	return float64(chunk*rounds) / time.Since(start).Seconds()
 }
 
+// gateVerdict is the decision a gate reaches, separated from reporting it so the
+// decision is a pure function a fast DB-free test can sabotage. Exactly one of
+// the failed fields is ever true.
+type gateVerdict struct {
+	coarseFailed  bool
+	preciseFailed bool
+}
+
+// checkLatency is the LATENCY gate's decision. The coarse ceiling (2x the SLO) is
+// enforced always; the precise SLO only when precise is set. The two are separate
+// comparisons on purpose, so a change to one cannot silently move the other —
+// gate_test.go sabotages each independently.
+func checkLatency(measuredMs float64, sloMs int, precise bool) gateVerdict {
+	coarseMs := 2 * sloMs
+	if measuredMs > float64(coarseMs) {
+		return gateVerdict{coarseFailed: true}
+	}
+	if precise && measuredMs > float64(sloMs) {
+		return gateVerdict{preciseFailed: true}
+	}
+	return gateVerdict{}
+}
+
+// checkThroughput is the THROUGHPUT gate's decision — a floor rather than a
+// ceiling, so the coarse bound is SLO/2 and the comparison is <.
+func checkThroughput(measured float64, slo int, precise bool) gateVerdict {
+	coarse := slo / 2
+	if measured < float64(coarse) {
+		return gateVerdict{coarseFailed: true}
+	}
+	if precise && measured < float64(slo) {
+		return gateVerdict{preciseFailed: true}
+	}
+	return gateVerdict{}
+}
+
 func gateLatency(t *testing.T, precise bool, name string, measuredMs float64, sloMs int) {
 	t.Helper()
 	coarse := 2 * sloMs
 	t.Logf("loadtest: %s = %.0fms", name, measuredMs)
-	if measuredMs > float64(coarse) {
+	switch v := checkLatency(measuredMs, sloMs, precise); {
+	case v.coarseFailed:
 		t.Errorf("%s: coarse ceiling FAILED (p95 %.0fms > %dms) — order-of-magnitude regression", name, measuredMs, coarse)
-		return
+	case v.preciseFailed:
+		t.Errorf("%s: precise SLO FAILED (p95 %.0fms > %dms)", name, measuredMs, sloMs)
+	case precise:
+		t.Logf("loadtest: %s coarse PASSED (%.0fms < %dms), precise SLO PASSED (%.0fms < %dms)",
+			name, measuredMs, coarse, measuredMs, sloMs)
+	default:
+		t.Logf("loadtest: %s coarse ceiling PASSED (p95 %.0fms < %dms), precise SLO NOT ENFORCED (CVAP_RUN_LOADTEST unset)",
+			name, measuredMs, coarse)
 	}
-	if precise {
-		if measuredMs > float64(sloMs) {
-			t.Errorf("%s: precise SLO FAILED (p95 %.0fms > %dms)", name, measuredMs, sloMs)
-		} else {
-			t.Logf("loadtest: %s coarse PASSED (%.0fms < %dms), precise SLO PASSED (%.0fms < %dms)",
-				name, measuredMs, coarse, measuredMs, sloMs)
-		}
-		return
-	}
-	t.Logf("loadtest: %s coarse ceiling PASSED (p95 %.0fms < %dms), precise SLO NOT ENFORCED (CVAP_RUN_LOADTEST unset)",
-		name, measuredMs, coarse)
 }
 
 func gateThroughput(t *testing.T, precise bool, name string, measured float64, slo int) {
 	t.Helper()
 	coarse := slo / 2
 	t.Logf("loadtest: %s = %.0f/sec", name, measured)
-	if measured < float64(coarse) {
+	switch v := checkThroughput(measured, slo, precise); {
+	case v.coarseFailed:
 		t.Errorf("%s: coarse floor FAILED (%.0f/sec < %d/sec) — order-of-magnitude regression", name, measured, coarse)
-		return
+	case v.preciseFailed:
+		t.Errorf("%s: precise SLO FAILED (%.0f/sec < %d/sec)", name, measured, slo)
+	case precise:
+		t.Logf("loadtest: %s coarse PASSED (%.0f/sec > %d/sec), precise SLO PASSED (%.0f/sec > %d/sec)",
+			name, measured, coarse, measured, slo)
+	default:
+		t.Logf("loadtest: %s coarse floor PASSED (%.0f/sec > %d/sec), precise SLO NOT ENFORCED (CVAP_RUN_LOADTEST unset)",
+			name, measured, coarse)
 	}
-	if precise {
-		if measured < float64(slo) {
-			t.Errorf("%s: precise SLO FAILED (%.0f/sec < %d/sec)", name, measured, slo)
-		} else {
-			t.Logf("loadtest: %s coarse PASSED (%.0f/sec > %d/sec), precise SLO PASSED (%.0f/sec > %d/sec)",
-				name, measured, coarse, measured, slo)
-		}
-		return
-	}
-	t.Logf("loadtest: %s coarse floor PASSED (%.0f/sec > %d/sec), precise SLO NOT ENFORCED (CVAP_RUN_LOADTEST unset)",
-		name, measured, coarse)
 }

@@ -395,13 +395,14 @@ db-gates: ## Every gate needing Postgres. Skips loudly, never silently, when the
 		$(MAKE) --no-print-directory rls-test; \
 		$(MAKE) --no-print-directory store-test; \
 		$(MAKE) --no-print-directory e2e; \
+		$(MAKE) --no-print-directory loadtest; \
 		$(MAKE) --no-print-directory mutate; \
 	else \
 		echo ""; \
 		echo "################################################################"; \
 		echo "#  SKIPPED: every gate that needs a database                   #"; \
 		echo "#                                                              #"; \
-		echo "#  NOT RUN:  migrate-verify   rls-test                         #"; \
+		echo "#  NOT RUN:  migrate-verify   rls-test     loadtest            #"; \
 		echo "#            store-test       e2e         mutate               #"; \
 		echo "#                                                              #"; \
 		echo "#  THIS IS NOT A PASS. rls-test proves tenant isolation and    #"; \
@@ -507,6 +508,16 @@ DB_TEST_PKGS = ./internal/store/... ./internal/control/... ./internal/dispatch/.
 store-test: ## Run the database-backed suites against the dev database as the application role
 	@test -n "$(APP_DATABASE_URL)" || { echo "APP_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
 	CVAP_TEST_DATABASE_URL="$(APP_DATABASE_URL)" go test $(DB_TEST_PKGS) -count=1 $(GOTEST_FLAGS)
+
+loadtest: ## 10k-asset load test against the §5 SLOs. Coarse ceiling always; precise SLO only with CVAP_RUN_LOADTEST=1
+	@test -n "$(APP_DATABASE_URL)" || { echo "APP_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
+	@# CVAP_RUN_LOADTEST is deliberately NOT set here, so `make ci` (and CI)
+	@# enforce the ORDER-OF-MAGNITUDE coarse ceiling only. The precise p95 SLO is
+	@# a real gate but a flaky one on a shared runner at the exact threshold, so it
+	@# runs where the machine is quiet: a developer's `CVAP_RUN_LOADTEST=1 make
+	@# loadtest`, and the nightly job. Every measured number is printed each run
+	@# regardless, so the trend is visible before it crosses anything.
+	CVAP_TEST_DATABASE_URL="$(APP_DATABASE_URL)" go test ./test/load/... -count=1 -timeout 15m -v
 
 migrate-new: ## Scaffold a migration pair: make migrate-new NAME=snake_case
 	@test -n "$(NAME)" || { echo "usage: make migrate-new NAME=snake_case"; exit 1; }
