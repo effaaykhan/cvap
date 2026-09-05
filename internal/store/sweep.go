@@ -59,6 +59,19 @@ func (db *DB) ActiveTenantIDs(ctx context.Context) ([]TenantID, error) {
 	return out, nil
 }
 
+// HeartbeatTimeout is how long a scan point may be silent before Core treats it
+// as offline (execution-plan §5, "Core times out at 90s"). It lives HERE, in the
+// lowest package both readers import, because it has two of them and they must
+// agree: the dispatch sweeper computes MarkStaleOffline's cutoff from it, and
+// KillSwitches.Unacknowledged uses it as the window that decides which scan
+// points are still live enough to owe a kill acknowledgement. That second reader
+// was a raw `interval '90 seconds'` SQL literal in kill.go — a second value that
+// drifts the instant this one changes, quietly making the kill-ack chase set
+// (the denominator for "is the fleet stopped") wrong. One constant, read by both,
+// removes the second value rather than testing that two agree. dispatch cannot
+// hold it because store cannot import dispatch (the cycle runs the other way).
+const HeartbeatTimeout = 90 * time.Second
+
 // MarkStaleOffline flags scan points that have stopped heartbeating.
 //
 // The heartbeat timeout was a constant with no enforcement: HeartbeatTimeout was

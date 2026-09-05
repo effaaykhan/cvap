@@ -148,7 +148,7 @@ func (s *Sweeper) sweepTenant(ctx context.Context, tenant store.TenantID) {
 			return err
 		}
 
-		if offline, err = (store.ScanPoints{}).MarkStaleOffline(ctx, c, s.now().Add(-HeartbeatTimeout)); err != nil {
+		if offline, err = (store.ScanPoints{}).MarkStaleOffline(ctx, c, s.now().Add(-store.HeartbeatTimeout)); err != nil {
 			return err
 		}
 
@@ -220,6 +220,6 @@ func (s *Sweeper) sweepTenant(ctx context.Context, tenant store.TenantID) {
 	for _, id := range offline {
 		s.log.InfoContext(ctx, "scan point missed the heartbeat timeout, marked offline",
 			"tenant_id", tenant.String(), "scan_point_id", id.String(),
-			"timeout", HeartbeatTimeout.String())
+			"timeout", store.HeartbeatTimeout.String())
 	}
 }

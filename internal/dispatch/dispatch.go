@@ -69,10 +69,11 @@ import (
 )
 
 // Timings from execution-plan §5. Heartbeat every 30s, Core times out at 90s;
-// lease TTL 60s with renewal at 20s.
+// lease TTL 60s with renewal at 20s. The 90s timeout is store.HeartbeatTimeout,
+// not a constant here: it has a second reader (KillSwitches.Unacknowledged's
+// staleness window), and one source read by both is what stops the two drifting.
 const (
 	HeartbeatInterval = 30 * time.Second
-	HeartbeatTimeout  = 90 * time.Second
 
 	// pollInterval is how often a connected scan point is offered work. It is
 	// deliberately not driven by a database NOTIFY: a poll that misses adds

@@ -212,7 +212,7 @@ func TestSweeperMarksStaleScanPointsOffline(t *testing.T) {
 		}
 		if sp.Status != store.ScanPointOffline {
 			t.Errorf("scan point status %q after %s without a heartbeat, want offline",
-				sp.Status, dispatch.HeartbeatTimeout)
+				sp.Status, store.HeartbeatTimeout)
 		}
 		return nil
 	}); err != nil {

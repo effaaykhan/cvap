@@ -329,7 +329,12 @@ func (KillSwitches) Unacknowledged(ctx context.Context, c *Conn, killID uuid.UUI
 		    ON k.tenant_id = sp.tenant_id AND k.kill_id = $2
 		 WHERE sp.tenant_id = $1
 		   AND sp.last_heartbeat IS NOT NULL
-		   AND sp.last_heartbeat > k.issued_at - interval '90 seconds'
+		   -- The staleness window is HeartbeatTimeout, passed as $3 rather than a
+		   -- hardcoded 90-second interval: this window IS the sweeper's offline
+		   -- threshold, and a second literal drifts from it silently (see
+		   -- HeartbeatTimeout in sweep.go). make_interval takes seconds so the Go
+		   -- Duration crosses the boundary without a format Postgres cannot parse.
+		   AND sp.last_heartbeat > k.issued_at - make_interval(secs => $3)
 		   AND NOT EXISTS (
 		       SELECT 1 FROM kill_acks a
 		        WHERE a.tenant_id = $1 AND a.kill_id = $2
@@ -337,7 +342,7 @@ func (KillSwitches) Unacknowledged(ctx context.Context, c *Conn, killID uuid.UUI
 		   )` + killCoversScanPoint + `
 		 ORDER BY sp.scan_point_id`
 
-	rows, err := c.Query(ctx, q, c.Tenant().UUID(), killID)
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), killID, HeartbeatTimeout.Seconds())
 	if err != nil {
 		return nil, mapError(err)
 	}
