@@ -431,6 +431,26 @@ func (Scans) Plan(ctx context.Context, c *Conn, scanID uuid.UUID, engine Engine,
 	return jobID, nil
 }
 
+// EngineForScanType maps a scan's type to the engine that runs it, and is the
+// ONE place that mapping lives. Both the planner (deciding what to queue) and the
+// API (deciding at creation whether any scan point can run it) ask this, so the
+// two cannot disagree about which types are plannable — a scan the API accepts
+// but the planner has no engine for is the silent non-result this centralisation
+// exists to prevent. `scans.scan_type` is deliberately free text (engines are
+// extensible); this is Core stating what it can actually plan today.
+func EngineForScanType(scanType string) (Engine, bool) {
+	switch scanType {
+	case "discovery":
+		return EngineDiscovery, true
+	case "fingerprint":
+		return EngineFingerprint, true
+	case "rules":
+		return EngineRules, true
+	default:
+		return "", false
+	}
+}
+
 // SetStatus moves a scan between statuses, guarded by the statuses it may move
 // from.
 //

@@ -45,6 +45,10 @@ type fixture struct {
 	password string
 	policyID uuid.UUID
 	zoneID   uuid.UUID
+	// scanPointID is a capable (discovery + fingerprint), online scan point in
+	// zoneID — so scan creation, which now refuses a scan no scan point can run,
+	// succeeds in the fixture the way it does in a real deployment.
+	scanPointID uuid.UUID
 }
 
 const testPassword = "correct horse battery staple"
@@ -102,7 +106,21 @@ func newFixture(t *testing.T, permissions string) *fixture {
 			return err
 		}
 		f.policyID = p.ID
-		return nil
+
+		// A capable, online scan point, so createScan's dispatchable check passes.
+		// A real deployment has one before an operator runs a scan; the fixture
+		// mirrors that rather than testing against a fleet that cannot scan.
+		sp, err := (store.ScanPoints{}).Create(ctx, c, z.ID, "fixture-sp", "dev", "v1", "fp-"+uuid.NewString())
+		if err != nil {
+			return err
+		}
+		f.scanPointID = sp.ID
+		for _, e := range []store.Engine{store.EngineDiscovery, store.EngineFingerprint} {
+			if _, err := (store.ScanPoints{}).DeclareCapability(ctx, c, sp.ID, e, "dev", true); err != nil {
+				return err
+			}
+		}
+		return (store.ScanPoints{}).Heartbeat(ctx, c, sp.ID, time.Now())
 	})
 	if err != nil {
 		t.Fatal(err)

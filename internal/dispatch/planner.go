@@ -372,16 +372,11 @@ func engineFor(ctx context.Context, db *store.DB, tenant store.TenantID, scanID 
 	// type is shown to be safe to duplicate. Discovery looks obviously
 	// idempotent and is not — a second sweep of the same range is a second set
 	// of packets at a host that may be fragile.
-	switch scan.ScanType {
-	case "discovery":
-		return store.EngineDiscovery, false, nil
-	case "fingerprint":
-		return store.EngineFingerprint, false, nil
-	case "rules":
-		return store.EngineRules, false, nil
-	default:
+	engine, ok := store.EngineForScanType(scan.ScanType)
+	if !ok {
 		return "", false, fmt.Errorf("%w: scan_type %q", ErrUnplannableScanType, scan.ScanType)
 	}
+	return engine, false, nil
 }
 
 // ErrUnplannableScanType means Core has no engine for a scan's type.

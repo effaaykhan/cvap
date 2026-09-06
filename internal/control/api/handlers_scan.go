@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -151,10 +152,42 @@ func (s *Server) createScan(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// The engine that would run this scan. Refused HERE rather than left to fail
+	// at planning, because a scan_type Core cannot plan is a scan that would sit
+	// pending and then fail minutes later while the operator has moved on — the
+	// error belongs where they can act on it. EngineForScanType is the one place
+	// the mapping lives, shared with the planner, so the two cannot disagree.
+	engine, plannable := store.EngineForScanType(req.ScanType)
+	if !plannable {
+		writeError(w, r, s.log, http.StatusUnprocessableEntity, CodeUnprocessable,
+			fmt.Sprintf("Core has no engine that runs a %q scan.", req.ScanType), nil)
+		return
+	}
+
 	tenant, _ := tenantFrom(r.Context())
 	var scan *store.Scan
+	var noCapableScanPoint bool
 	err = s.db.Write(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
-		var err error
+		// Refuse a scan that would queue jobs no scan point can claim, rather than
+		// create it and let it sit `running` against nothing. A scanner reporting
+		// activity while scanning nothing is the worst failure this product has —
+		// the operator reads "clean" where the truth is "nothing ran". This is
+		// session 12's P3 ("capable scan point online in zone?" → BLOCKED), which
+		// existed only in the diagram until now. The count mirrors Jobs.Claim's
+		// predicate (engine capability, online heartbeat, policy zones), so a scan
+		// accepted here is one Core can actually dispatch.
+		//
+		// The refusal is BEFORE any write, so returning early rolls back nothing —
+		// there is no record to preserve, unlike the refusal-durability shape.
+		n, err := (store.ScanPoints{}).CountDispatchable(ctx, c, engine, policyID)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			noCapableScanPoint = true
+			return nil
+		}
+
 		scan, err = (store.Scans{}).Create(ctx, c, policyID, req.ScanType, actor(r), targets)
 		if err != nil {
 			return err
@@ -176,6 +209,13 @@ func (s *Server) createScan(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		storeError(w, r, s.log, err)
+		return
+	}
+	if noCapableScanPoint {
+		writeError(w, r, s.log, http.StatusUnprocessableEntity, CodeUnprocessable,
+			fmt.Sprintf("No scan point is online and capable of the %q engine in a zone this "+
+				"scan's policy permits, so the scan would run against nothing. Enrol or bring a "+
+				"scan point online (or widen the policy's allowed zones), then retry.", engine), nil)
 		return
 	}
 

@@ -90,6 +90,7 @@ GO_SUITES = [
     "internal/domain/identity_test.go",
     "internal/rules/evaluators_test.go",
     "internal/control/api/api_read_test.go",
+    "internal/control/api/handlers_scan_gate_test.go",
     # The distributed fault-injection matrix (§6.4). Each fault case declares the
     # sabotage its assertion must kill, so the matrix cannot pass vacuously. The
     # e2e entries run real processes, so their mutations are slower than the rest;

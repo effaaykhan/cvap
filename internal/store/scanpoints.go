@@ -249,6 +249,51 @@ func (ScanPoints) EnabledEngines(ctx context.Context, c *Conn) (map[uuid.UUID][]
 	return out, mapError(rows.Err())
 }
 
+// CountDispatchable counts the scan points that could actually run a job for the
+// given engine under the given policy: online (a heartbeat within the timeout,
+// recomputed here rather than trusting the stored status, which lags a sweep),
+// not disabled or revoked, holding an ENABLED capability for the engine, and in a
+// zone the policy permits.
+//
+// The zone clause MIRRORS Jobs.Claim's exactly — empty/absent allowed_zones is
+// unrestricted (ADR-037), otherwise the scan point's zone_id must appear in the
+// jsonb array, matched as lowercase text (no ::uuid cast, so one malformed entry
+// cannot fail the whole query). It must mirror it, because this is the check that
+// promises a scan can be dispatched and Claim is what actually dispatches it: if
+// the two disagreed, a scan accepted here would still hang unclaimed, which is
+// the exact silent non-result this exists to refuse.
+//
+// Zero means "creating this scan would queue jobs no scan point can claim" — the
+// caller refuses the scan rather than letting it sit `running` against nothing.
+func (ScanPoints) CountDispatchable(ctx context.Context, c *Conn, engine Engine, policyID uuid.UUID) (int, error) {
+	const q = `
+		SELECT count(DISTINCT sp.scan_point_id)
+		  FROM scan_points sp
+		  JOIN scan_point_capabilities cap
+		    ON cap.tenant_id = sp.tenant_id AND cap.scan_point_id = sp.scan_point_id
+		 WHERE sp.tenant_id = $1
+		   AND cap.engine = $2::text::engine_kind
+		   AND cap.enabled
+		   AND sp.status NOT IN ('disabled', 'revoked')
+		   AND sp.last_heartbeat IS NOT NULL
+		   AND sp.last_heartbeat > now() - make_interval(secs => $4)
+		   AND NOT EXISTS (
+		       SELECT 1 FROM scan_policies p
+		        WHERE p.tenant_id = sp.tenant_id AND p.policy_id = $3
+		          AND jsonb_array_length(p.allowed_zones) > 0
+		          AND NOT EXISTS (
+		              SELECT 1 FROM jsonb_array_elements_text(p.allowed_zones) z
+		               WHERE lower(z) = sp.zone_id::text
+		          )
+		   )`
+	var n int
+	err := c.QueryRow(ctx, q, c.Tenant().UUID(), string(engine), policyID, HeartbeatTimeout.Seconds()).Scan(&n)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
 // HeldLeaseCounts returns how many granted leases each scan point holds, for the
 // whole fleet, one query. Informational context on the health list — a scan
 // point with live leases is actively working — not a health determinant (a
