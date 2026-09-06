@@ -114,6 +114,14 @@ services:
       args:
         VERSION: ${CVAP_VERSION:-dev}
     restart: unless-stopped
+    # The image runs as nonroot (UID 65532). The CA loader requires the signing
+    # key to be mode 0600 (it refuses a group/other-readable key), so the key
+    # must be OWNED by the user this container runs as — a 0600 key owned by the
+    # operator who created it is unreadable by 65532. Set CVAP_UID/CVAP_GID in
+    # .env to the owner of ./secrets (your `id -u`/`id -g`) so the two agree;
+    # default 65532 is for a deployment that provisions the secrets to the
+    # nonroot user directly.
+    user: "${CVAP_UID:-65532}:${CVAP_GID:-65532}"
     depends_on:
       provision:
         condition: service_completed_successfully

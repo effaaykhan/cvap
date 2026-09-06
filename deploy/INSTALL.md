@@ -16,16 +16,31 @@ feature, it says so, and the plainly-named limitations are collected in
 ## 1. Prerequisites
 
 - Docker Engine with the Compose plugin (`docker compose`, not `docker-compose`).
+- **Permission to run Docker without sudo.** Every command here calls `docker`.
+  If `docker ps` gives "permission denied … /var/run/docker.sock", add yourself to
+  the `docker` group once — `sudo usermod -aG docker "$USER"` — then open a new
+  login shell (or `newgrp docker`) so the membership takes effect. Otherwise
+  prefix every `docker` command with `sudo`, and set `CVAP_UID`/`CVAP_GID` (below)
+  to the user that will OWN `deploy/secrets`, not to root.
 - A trust anchor: a CA certificate and key at `deploy/secrets/ca.crt` and
-  `deploy/secrets/ca.key`. This CA mints every scan point's identity, so its key
-  is the whole compromise if it leaks (architecture-v2 §18.3); it is mounted
-  read-only, never baked into an image.
-  - **Production:** supply your organisation's CA keypair. The trust anchor is
-    configuration, not an assumption in the binary (ADR-018).
-  - **Evaluation only:** `cvap-cli dev-ca deploy/secrets` writes a throwaway
-    pair. It is valid for **24 hours** on purpose — a development CA that
-    outlives the afternoon ends up in a deployment. Do not use it for anything
-    real.
+  `deploy/secrets/ca.key`, mode `0600` on the key, and **owned by the UID the
+  cvap-core container runs as** — see `CVAP_UID`/`CVAP_GID` in §2, which exist
+  because the image runs nonroot and the CA loader refuses a key any wider than
+  `0600`, so the key's owner and the container's user have to be the same person.
+  This CA mints every scan point's identity, so its key is the whole compromise
+  if it leaks (architecture-v2 §18.3); it is mounted read-only, never baked in.
+  - **Production:** supply your organisation's CA keypair.
+  - **Evaluation only:** generate a throwaway pair with the image's own CLI, owned
+    by you, after building the image (`docker compose build cvap-core`):
+
+    ```sh
+    mkdir -p deploy/secrets
+    docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/deploy/secrets:/secrets" \
+      --entrypoint /usr/local/bin/cvap-cli cvap-deploy-cvap-core dev-ca /secrets
+    ```
+
+    It is valid for **24 hours** on purpose — a development CA that outlives the
+    afternoon ends up in a deployment. Do not use it for anything real.
 
 All commands below are run from the `deploy/` directory.
 
@@ -42,6 +57,12 @@ Edit `.env` and set every `CHANGE-ME` secret and `CVAP_ADVERTISE_HOST`. That las
 one is the address a scan point uses to reach this host — a DNS name or LAN IP,
 never `localhost` or a container name — because Core hands it to a scan point at
 enrollment. `.env` is gitignored and must never be committed.
+
+Also set `CVAP_UID` and `CVAP_GID` to the user that owns `deploy/secrets` — your
+`id -u` and `id -g`. cvap-core runs as this user so it can read the `0600` CA key
+(the image is nonroot, and the key must be owned by whoever the container runs
+as; the default `65532` is for a deployment that provisions secrets to the
+nonroot user directly).
 
 ---
 
@@ -141,30 +162,53 @@ printf '%s' 'cvapent_...' > secrets/enrollment-token
 A scan point is not a compose service, because it cannot come up until a token
 exists. Run it from the same image, pointed at this host's enrollment endpoint:
 
+The scan point must be on the **compose network** (to reach `cvap-core`) and be
+able to reach the hosts it will scan. The compose network is `<project>_default`
+— `cvap_default` for the default project name. It runs as the same UID as the
+secrets it reads, and its data dir (where it writes its issued certificate) must
+be writable by that UID, so use a host directory you own rather than a fresh
+named volume:
+
 ```sh
+mkdir -p "$PWD/scanpoint-data"
 docker run -d --name cvap-scanpoint \
-  -v "$PWD/secrets/ca.crt:/secrets/ca.crt:ro" \
-  -v "$PWD/secrets/enrollment-token:/secrets/enrollment-token:ro" \
-  -v cvap-scanpoint-data:/var/lib/cvap-scanpoint \
+  --network cvap_default \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/secrets/ca.crt:/creds/ca.crt:ro" \
+  -v "$PWD/secrets/enrollment-token:/creds/enrollment-token:ro" \
+  -v "$PWD/scanpoint-data:/data" \
   -e CVAP_SP_ENROLL_ENDPOINT="${CVAP_ADVERTISE_HOST}:8443" \
-  -e CVAP_SP_CA_BUNDLE=/secrets/ca.crt \
-  -e CVAP_SP_ENROLLMENT_TOKEN_FILE=/secrets/enrollment-token \
-  -e CVAP_SP_DATA_DIR=/var/lib/cvap-scanpoint \
+  -e CVAP_SP_CA_BUNDLE=/creds/ca.crt \
+  -e CVAP_SP_ENROLLMENT_TOKEN_FILE=/creds/enrollment-token \
+  -e CVAP_SP_DATA_DIR=/data \
   -e CVAP_SP_ENGINE_BINARIES=/usr/local/bin/cvap-engine-discovery,/usr/local/bin/cvap-engine-fingerprint \
   --entrypoint /usr/local/bin/cvap-scanpoint \
-  <the image built by compose, e.g. cvap-cvap-core>
+  cvap-cvap-core
 ```
+
+(`cvap-cvap-core` is the image compose built; adjust if your project name
+differs. If the scan point must reach a target network the compose network does
+not, `docker network connect <that-network> cvap-scanpoint` after it starts.)
 
 On start it reads the token, redeems it against the enrollment endpoint, receives
 a certificate and its dispatch/ingest/rule-pack endpoints, zeroises the token,
-and begins leasing jobs. Confirm it enrolled:
+and begins leasing jobs.
+
+**This is the end of the install path: an enrolled, connected scan point.**
+Confirm it — the log shows `enrolled` then `connected`:
 
 ```sh
-docker logs cvap-scanpoint | tail
+docker logs cvap-scanpoint
 ```
 
-You can also see it, and its synthesized health, through the API once you are
-logged in (step 7): `GET /v1/scan-points`.
+and, once you are logged in (§7), it appears in the fleet as `"health":"healthy"`:
+
+```sh
+curl -sS --cacert secrets/ca.crt -b cookies.txt https://localhost:8445/v1/scan-points
+```
+
+Everything below (§7–§8) is running an actual scan through that scan point, which
+you need before the operator UI screens have anything to show.
 
 ---
 
@@ -208,7 +252,19 @@ curl -sS --cacert secrets/ca.crt -b cookies.txt -X POST \
   -H "X-CVAP-CSRF: $CSRF" -H 'Content-Type: application/json' \
   -d '{"name":"baseline","safety_mode":"safe","time_windows":[],"allowed_engines":[],"allowed_zones":[]}'
 
-# Create a scan against an attested target.
+# Add an ALLOW scope rule to the policy. This is separate from the zone range
+# above and easy to miss: the zone range gates whether planning ACCEPTS a target,
+# but a job's on-the-wire allowlist comes from the policy's scope rules, and an
+# empty allowlist denies everything (ADR-037). Without this every job is refused
+# with scope_violation_halt and the scan produces nothing.
+curl -sS --cacert secrets/ca.crt -b cookies.txt -X POST \
+  https://localhost:8445/v1/policies/<POLICY_ID>/scope-rules \
+  -H "X-CVAP-CSRF: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"effect":"allow","match_type":"cidr","match_value":"192.0.2.0/24"}'
+
+# Create a scan against an attested target. It is refused (422) unless a scan
+# point capable of this engine is online in a zone the policy permits — so run it
+# after §6, not before.
 curl -sS --cacert secrets/ca.crt -b cookies.txt -X POST \
   https://localhost:8445/v1/scans \
   -H "X-CVAP-CSRF: $CSRF" -H 'Content-Type: application/json' \

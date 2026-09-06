@@ -27,21 +27,26 @@ BEGIN
 END
 $$;
 
--- Password from the -v variable. CREATE ... PASSWORD takes a string literal, so
--- the value is quoted with :'...', which psql escapes.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cvap_app_login') THEN
-        EXECUTE format(
-            'CREATE ROLE cvap_app_login LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD %L',
-            :'app_password');
-    ELSE
-        EXECUTE format(
-            'ALTER ROLE cvap_app_login LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD %L',
-            :'app_password');
-    END IF;
-END
-$$;
+-- Password from the -v variable.
+--
+-- This is NOT a DO block, deliberately: psql performs :variable interpolation at
+-- its own parse step, and it does NOT reach inside a dollar-quoted `$$ … $$`
+-- body — so `:'app_password'` in a DO block is passed through verbatim and
+-- Postgres raises "syntax error at or near :". The substitution has to happen in
+-- a plain statement. So a SELECT builds the CREATE/ALTER text with `%L` escaping
+-- (interpolation OK here, outside any dollar-quoting) and `\gexec` runs the
+-- statement the SELECT returns. The WHERE makes exactly one of the two fire.
+SELECT format(
+    'CREATE ROLE cvap_app_login LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD %L',
+    :'app_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cvap_app_login')
+\gexec
+
+SELECT format(
+    'ALTER ROLE cvap_app_login LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD %L',
+    :'app_password')
+WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cvap_app_login')
+\gexec
 
 GRANT cvap_app TO cvap_app_login;
 GRANT CONNECT ON DATABASE cvap TO cvap_app_login;

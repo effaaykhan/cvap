@@ -8,8 +8,10 @@ secrets/
 **/.env
 **/.env.*
 bin/
-web/node_modules/
-web/dist/
+# node_modules anywhere (the web tree is nested at internal/control/api/web);
+# the SPA is built fresh in the image's web stage, so a host dist is not used.
+**/node_modules
+internal/control/api/web/dist
 lab/
 docs/
 *.md
