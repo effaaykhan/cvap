@@ -258,6 +258,41 @@ limitations — "does not cover", "deliberately not", "harmless because", "for a
 long as" — and read each against the new capability. Ask: is this still harmless
 now?
 
+### 5.5 The presence assertion — needed a third time, so make it structural
+
+A test can assert everything about *how content behaves* and nothing about
+*whether the content is there, and whole*. §5.3 is one face of this; the sharper
+observation is that the corpus has now needed a presence assertion **three separate
+times**, each time fixed as its own instance:
+
+1. **The reverted probe corpus.** A stray `git checkout` cut a ten-entry corpus to
+   two, and every property test passed identically (§5.3, `restore-after-sabotage`).
+   Fixed with a test naming what the corpus must contain.
+2. **The empty-evidence rules.** Rules present in the pack whose evidence
+   requirements were empty — findings that named no evidence a human could verify —
+   passed every "the rule fires" test, because firing and being verifiable are
+   different properties. Fixed by asserting the evidence was non-empty.
+3. **The unreachable-rule denominator (S23).** The corpus gate cannot tell "rule
+   found nothing" from "rule cannot run here," so a rule set that is ~31%
+   unreachable reports the same FP/FN as one where everything works — a true number
+   over an unstated denominator (backlog #14). The fix is not another per-instance
+   test but a **manifest**: every rule in the registry declares one of EXERCISED /
+   NOT_PRESENT / UNREACHABLE, a rule added without an entry fails the build, and the
+   pass line reports the split so the denominator is stated.
+
+**Why it is its own pattern:** the first two were fixed one instance at a time,
+each with a bespoke "name what must be present" test. The recurrence is the signal.
+A property test says what content *does*; only a presence assertion tied to the
+registry says that content — and every category of it, including what is honestly
+absent — is *accounted for*. The third time a class of gap recurs, the fix is
+structural (fail the build on a missing entry), not another instance patch.
+
+**How to apply:** when a suite reports a rate, a count, or a pass over content
+drawn from a registry (rules, probes, corpus entries, migrations), make the
+registry membership drive a manifest the build checks for completeness, and report
+the denominator alongside the rate. A rate whose denominator is not printed is a
+rate whose denominator will drift unnoticed.
+
 ---
 
 ## 6. Standing requirement (from S23 onward)
