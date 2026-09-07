@@ -142,7 +142,11 @@ services:
       CVAP_CORE_DISPATCH_ENDPOINT: "${CVAP_ADVERTISE_HOST:?set in .env}:8444"
       CVAP_CORE_INGEST_ENDPOINT: "${CVAP_ADVERTISE_HOST}:8444"
       CVAP_CORE_RULEPACKS_ENDPOINT: "${CVAP_ADVERTISE_HOST}:8444"
-      CVAP_CORE_SERVER_HOSTS: "${CVAP_ADVERTISE_HOST},localhost,127.0.0.1"
+      # The scan-point advertise host, loopback, and any external address an
+      # operator reaches the API at (CVAP_EXTERNAL_HOST — a browser hitting the
+      # API by IP needs that IP in the certificate's SAN, or it is a name
+      # mismatch on top of the self-signed warning). Empty entries are dropped.
+      CVAP_CORE_SERVER_HOSTS: "${CVAP_ADVERTISE_HOST},localhost,127.0.0.1,${CVAP_EXTERNAL_HOST:-}"
       CVAP_CORE_CA_CERT: /secrets/ca.crt
       CVAP_CORE_CA_KEY: /secrets/ca.key
       # Local operator login. On-prem, so all three conditions can be met; still
