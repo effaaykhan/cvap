@@ -503,7 +503,7 @@ dev-ca: ## Generate a development CA into ./secrets (gitignored)
 # is the hazard: a suite that skips looks exactly like a suite that passes in
 # `make test`, and internal/dispatch sat unrun in CI for that reason. Adding a
 # package here is what makes its integration tests actually execute.
-DB_TEST_PKGS = ./internal/store/... ./internal/control/... ./internal/dispatch/...
+DB_TEST_PKGS = ./internal/store/... ./internal/control/... ./internal/dispatch/... ./cmd/cvap-cli/...
 
 store-test: ## Run the database-backed suites against the dev database as the application role
 	@test -n "$(APP_DATABASE_URL)" || { echo "APP_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }

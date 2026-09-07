@@ -75,6 +75,10 @@ SUITES = [
 # anything.
 GO_SUITES = [
     "internal/control/credential/phc_test.go",
+    # bootstrap verifies its own login path; the mutation inverts the credential
+    # check so a wrong password would pass — "a bootstrap that cannot log in has
+    # not bootstrapped".
+    "cmd/cvap-cli/bootstrap_test.go",
     # The load test's coarse/precise gate split — each half sabotaged
     # independently, DB-free so the mutation runs without a seeded 10k corpus.
     "test/load/gate_test.go",

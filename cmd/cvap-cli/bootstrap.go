@@ -161,7 +161,20 @@ func bootstrap(log *slog.Logger, args []string) error {
 		return fmt.Errorf("cvap-cli bootstrap: %w", err)
 	}
 
-	log.Info("bootstrapped a single-node deployment",
+	// A bootstrap that cannot log in has not bootstrapped. Before printing the
+	// password as if it works, exercise the login path against what was just
+	// written: the domain must resolve to the tenant (login reads the request
+	// Host, ADR-041), the user must exist in it, and the stored credential must
+	// verify the generated password with the same encoder login uses. This is the
+	// guard that would have turned every failure mode in this session — a domain
+	// nobody can reach, a wrote-vs-printed password, an argon2id parameter drift —
+	// into a loud bootstrap failure instead of a silent 401 the operator meets
+	// later and cannot diagnose.
+	if err := verifyBootstrapLogin(ctx, db, *domain, *adminEmail, password); err != nil {
+		return fmt.Errorf("cvap-cli bootstrap: the deployment was created but its own login does not work, so it is not usable: %w", err)
+	}
+
+	log.Info("bootstrapped a single-node deployment; verified its own login",
 		slog.String("tenant_id", tenPrnt),
 		slog.String("domain", *domain),
 		slog.String("admin_email", *adminEmail),
@@ -169,12 +182,58 @@ func bootstrap(log *slog.Logger, args []string) error {
 		slog.String("operator_role_id", roleID),
 		slog.String("zone_id", zoneID))
 	log.Warn("local login requires cvap-core to run with CVAP_CORE_LOCAL_AUTH=1")
+	// The domain-binding caveat, stated loudly because it is the defect this
+	// session hit: login resolves the tenant from the request Host, so an operator
+	// can ONLY sign in at this host. Reaching Core by any other name or IP is a
+	// 401 indistinguishable from a wrong password.
+	log.Warn("sign in ONLY at the host this domain names — the tenant resolves from the request Host (ADR-041)",
+		slog.String("domain", *domain))
 
 	// The password is written straight to stdout, never through a formatting call,
 	// for the same reason enrollment tokens are: a credential in a format string
 	// is a credential one refactor away from a log line. It is printed once.
 	emitSecret("initial admin password (must be changed on first login): ", password)
 	return nil
+}
+
+// verifyBootstrapLogin runs the login path against what bootstrap just wrote:
+// resolve the tenant from the domain (as a request Host would, ADR-041), find the
+// user in it, and verify the stored credential against the generated password
+// with the same argon2id encoder the login handler uses. An error here means the
+// deployment cannot be logged into — which the caller treats as a bootstrap
+// failure, not a warning.
+func verifyBootstrapLogin(ctx context.Context, db *store.DB, domain, email, password string) error {
+	tenant, err := db.ResolveDomainTenant(ctx, domain)
+	if err != nil {
+		return fmt.Errorf("the domain %q does not resolve to the tenant; no operator could sign in at that host: %w", domain, err)
+	}
+	var verifyErr error
+	readErr := db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		u, err := (store.Users{}).GetByEmail(ctx, c, email)
+		if err != nil {
+			return fmt.Errorf("the admin user %q is not in the tenant the domain resolved to: %w", email, err)
+		}
+		cred, err := (store.Credentials{}).Get(ctx, c, u.ID)
+		if err != nil {
+			return fmt.Errorf("the admin credential could not be read: %w", err)
+		}
+		ok, _, err := credential.Verify(cred.PasswordHash, password)
+		if err != nil {
+			return fmt.Errorf("the stored credential could not be decoded: %w", err)
+		}
+		if !ok {
+			// The printed password and the stored hash disagree — an encoding
+			// transform, a trailing newline, an argon2id parameter drift. Carried
+			// out rather than returned so a genuine fault and this integrity
+			// failure stay distinguishable, though both fail the bootstrap.
+			verifyErr = errors.New("the stored credential does not verify the generated password: the printed password and the stored hash disagree")
+		}
+		return nil
+	})
+	if readErr != nil {
+		return readErr
+	}
+	return verifyErr
 }
 
 // generatePassword returns a high-entropy first-login password.
