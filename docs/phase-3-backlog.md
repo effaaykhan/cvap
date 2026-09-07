@@ -5,7 +5,11 @@ scattered across ADRs, session summaries, and agent memory; this is the single
 place it is acted from. **The ordering is the deliverable** — the before/during/
 after marking against Phase 3 is what makes this a plan rather than a pile.
 
-Phase 3 itself is sequenced in [ADR-059](adr/059-phase-3-sequence.md).
+Phase 3 itself is sequenced in [ADR-059](adr/059-phase-3-sequence.md). Where this
+backlog and ADR-059's *consequence* notes differ on an item's timing — #6
+(`internet_reachable`) moved from during to **before** Phase 3 after ADR-059 was
+accepted and frozen — **this backlog is authoritative for item timing**; ADR-059's
+Phase-3 stage sequence (P3.1–P3.6) is unchanged.
 
 ## On "owner"
 
@@ -28,12 +32,13 @@ parallel and each is routed to the right reviewer.
 | 3 | **Populate & surface `expected_ack_count`.** The observability that makes the silent-success class visible to an operator: dispatched-vs-acknowledged per scan. Cheap, and Phase-3 scans lean on dispatch health. | `dispatch` → `control/api` → `web` | None. | **Gap — ScanDetail** |
 | 4 | **cvap-cli access control.** The CLI runs as the app role and can name any tenant (bootstrap, enroll-token, set-domain). Bound *who* may run it before Phase 3 adds rule-pack import to the CLI's reach. | `cli` / `control` | Needs a short ADR on the CLI trust boundary. | n/a |
 | 5 | **Audit-log surface (API + UI).** §2 MVP item, still partial: privileged CLI ops write `audit_events`, nothing reads them. Phase 3 adds more privileged ops (rule-pack import) — wire a read path and a view first. | `control/api` → `web` | None (table exists). | **Gap — no view** |
+| 6 | **`internet_reachable` — resolve the two-writers-one-fact (§5.2), do not carry it into Phase 3.** The write path never populates the authoritative column; the read path answers "is this internet-reachable" from `zone_type` instead. Two answers, and the authoritative one is empty. That number is on the operator landing view and is the one most likely to be quoted. Building the knowledge pipeline on it and designing the P3.4 triage view around it means two phases resting on a metric nobody verified. **Either** populate the authoritative write path **or** delete the column and make the `zone_type` derivation explicit — both are defensible; a column that exists and lies is not. Its consumption at P3.4 (KEV × internet-reachable × EPSS) is unchanged; only the metric's provenance is fixed first. | `correlate` → `web` | A decision: populate vs. delete-and-derive. | **Gap — Exposure / landing view** |
+| 13 | **`tls-weak-cipher-negotiated` ships but cannot fire end to end — a coverage claim that lies.** The rule is one of the 13 shipped and fires at the unit level, but the fingerprint TLS client offers only Go's secure cipher suites, so it never negotiates a weak one and a weak-only server cannot be handshaked (measured: handshake fails against nginx offering only ECDHE-RSA-AES128-SHA256). The console would present "weak cipher" coverage the end-to-end path cannot deliver — the rule-coverage twin of #6. Recorded today only in the corpus `uncovered` block; promoted here so it is tracked, not buried. Fix before the enterprise console (#12) claims the coverage. | `engines` | Known: `inspectOnlyTLSConfig` must OFFER the weak suites (as it offers old versions via `MinVersion`) so a server that accepts one is detectable. | n/a (coverage honesty) |
 
 ### During Phase 3 — folded into the phase's own work
 
 | # | Item | Owner | Unblocker | Dashboard? |
 |---|------|-------|-----------|------------|
-| 6 | **`internet_reachable` exposure signal.** Prioritisation (KEV/EPSS × exposure) needs a real internet-reachable derivation, not the placeholder. Write it as part of the enrichment stage. | `correlate` → `web` | ADR-059 P3.4 defines how exposure feeds prioritisation (KEV × internet-reachable × EPSS). | **Gap — Exposure** |
 | 7 | **enroll-token API home + UI.** The `/v1/enrollment-tokens` route exists; issuing a token is still a CLI step in the installer. Phase 3 growth (more scan points, rule-pack ops) makes enrollment a console task. Give it a UI home. | `control/api` / `web` | Depends on #5's admin-console surface. | **Gap — no UI** |
 | 8 | **Kill-switch UI + safety-mode indicator.** `/v1/kill` and `/v1/scans/{id}/safety-mode` exist as API; the console cannot show or trigger either. Do alongside the admin surface from #5/#7. | `web` | Depends on #5's admin-console surface. | **Gap — no UI** |
 | 12 | **Enterprise-console rebuild (dedicated session, after P3.4).** The current UI reads as a developer's view of the data model, not a security console. A dedicated session, not incremental patching. Scope and ordering below. Placed after P3.4 per ADR-059 — the data must carry real confidence and priority distinctions first, or the triage view is designed twice. | `web` | P3.4 complete (CVE-matched findings with KEV/EPSS priority + the full weak-data confidence spectrum). | **Rebuild of all** |
