@@ -40,7 +40,15 @@ func bootstrap(log *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
 	adminEmail := fs.String("admin-email", "", "email of the first admin user (required)")
 	tenantName := fs.String("tenant-name", "cvap", "display name for the tenant")
-	domain := fs.String("domain", "localhost", "the host this deployment is reached at; the tenant is resolved from it at login (ADR-041)")
+	// No default, deliberately. Login resolves the tenant from the request Host
+	// (ADR-041), so the domain must be the host operators will actually reach the
+	// deployment at. A `localhost` default is correct only for a loopback install
+	// and wrong for every other one — and wrong silently: the tenant is created,
+	// bootstrap's own self-check passes against localhost, and the operator meets
+	// a 401 at first login with no clue it is a domain mismatch. Forcing the
+	// operator to name the host moves that failure to install time with a clear
+	// message. (Whichever host they name, set-domain can correct it later.)
+	domain := fs.String("domain", "", "REQUIRED: the host operators reach this deployment at (an IP or DNS name); the tenant is resolved from it at login (ADR-041). Use localhost only for a loopback-only install")
 	zoneName := fs.String("zone", "internal", "name of the default scan zone")
 	zoneType := fs.String("zone-type", string(store.ZoneInternal), "external|dmz|internal|branch|cloud|mgmt")
 	if err := fs.Parse(args); err != nil {
@@ -48,6 +56,11 @@ func bootstrap(log *slog.Logger, args []string) error {
 	}
 	if *adminEmail == "" {
 		return errors.New("cvap-cli bootstrap: --admin-email is required")
+	}
+	if *domain == "" {
+		return errors.New("cvap-cli bootstrap: --domain is required — the host operators will reach this deployment at " +
+			"(e.g. the server's IP or DNS name; localhost only for a loopback-only install). Login resolves the tenant " +
+			"from the request Host, so a deployment whose domain is not the host operators use cannot be signed in to")
 	}
 
 	dbURL := os.Getenv("APP_DATABASE_URL")

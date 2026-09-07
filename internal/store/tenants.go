@@ -116,6 +116,31 @@ func (Tenants) Get(ctx context.Context, c *Conn) (*Tenant, error) {
 	return &t, nil
 }
 
+// SetDomain changes the host a tenant is reached at — the Host that resolves to
+// it before authentication (ADR-041). Lowercased and required, exactly as Create
+// treats it, because tenant_for_domain matches the stored value and a mixed-case
+// or empty domain is one nobody can sign in to. A domain already used by another
+// tenant fails on the unique index (mapped, not swallowed).
+//
+// This changes which request authenticates as this tenant, so it is a privileged
+// operation; its caller (cvap-cli tenant set-domain) records an audit event in
+// the same transaction, the way bootstrap and enroll-token do.
+func (Tenants) SetDomain(ctx context.Context, c *Conn, domain string) error {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return fmt.Errorf("store: a tenant needs a domain (ADR-041); on-prem deployments use the host operators reach them at")
+	}
+	const q = `UPDATE tenants SET domain = $2 WHERE tenant_id = $1`
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), domain)
+	if err != nil {
+		return mapError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetStatus updates the tenant's status.
 func (Tenants) SetStatus(ctx context.Context, c *Conn, status TenantStatus) error {
 	const q = `UPDATE tenants SET status = $2 WHERE tenant_id = $1`

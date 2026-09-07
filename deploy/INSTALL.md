@@ -112,11 +112,20 @@ predates authentication.
 docker compose run --rm \
   -e APP_DATABASE_URL="postgres://cvap_app_login:${APP_ROLE_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable" \
   --entrypoint /usr/local/bin/cvap-cli \
-  cvap-core bootstrap --admin-email you@example.com --domain localhost
+  cvap-core bootstrap --admin-email you@example.com --domain "$CVAP_EXTERNAL_HOST"
 ```
 
-(`${APP_ROLE_PASSWORD}` and `${POSTGRES_DB}` come from your shell if you
-`set -a; . ./.env; set +a` first, or paste the values.)
+(`${APP_ROLE_PASSWORD}`, `${POSTGRES_DB}` and `$CVAP_EXTERNAL_HOST` come from your
+shell if you `set -a; . ./.env; set +a` first, or paste the values.)
+
+`--domain` is **required and has no default**: it must be the host operators will
+actually reach the API at — the same address as `CVAP_EXTERNAL_HOST` — because the
+tenant is resolved from the request `Host` (ADR-041). Use `localhost` only for a
+loopback-only install. Getting this wrong does not fail here in a way you would
+notice later: it fails at *first login* with a 401 that looks like a bad password.
+If it is already wrong, or the address changes, correct it with
+`cvap-cli tenant set-domain --tenant <id> --domain <host>` (audited) rather than
+re-bootstrapping.
 
 It prints, once, the created ids and a **generated first-login password**:
 
@@ -124,11 +133,9 @@ It prints, once, the created ids and a **generated first-login password**:
 initial admin password (must be changed on first login): <captured here>
 ```
 
-Capture the password and the printed `zone_id` — you need both. `--domain`
-is the host the operator's browser or client will use to reach the API, because
-the tenant is resolved from the request host (ADR-041); `localhost` is right when
-the operator works on this host. Running bootstrap a second time for the same
-domain is refused — it is not an editing tool.
+Capture the password and the printed `zone_id` — you need both. Bootstrap ends by
+verifying its own login and refuses to report success otherwise, and running it a
+second time for the same domain is refused — it is not an editing tool.
 
 Local login also requires `CVAP_CORE_LOCAL_AUTH=1` (the compose default). It is a
 Core-wide flag, not a per-tenant one: that is the control, so a tenant admin

@@ -79,6 +79,10 @@ GO_SUITES = [
     # check so a wrong password would pass — "a bootstrap that cannot log in has
     # not bootstrapped".
     "cmd/cvap-cli/bootstrap_test.go",
+    # --domain is required (no localhost default), and tenant set-domain audits
+    # the privileged change — the two mutations restore the old bug and drop the
+    # audit.
+    "cmd/cvap-cli/tenant_test.go",
     # The load test's coarse/precise gate split — each half sabotaged
     # independently, DB-free so the mutation runs without a seeded 10k corpus.
     "test/load/gate_test.go",

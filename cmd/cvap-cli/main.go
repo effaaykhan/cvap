@@ -41,6 +41,11 @@ func main() {
 			log.Error("enroll-token failed", slog.Any("error", err))
 			os.Exit(1)
 		}
+	case "tenant":
+		if err := tenant(log, os.Args[2:]); err != nil {
+			log.Error("tenant command failed", slog.Any("error", err))
+			os.Exit(1)
+		}
 	default:
 		log.Error("unknown command", slog.String("command", os.Args[1]))
 		usage()
@@ -64,6 +69,10 @@ func usage() {
   enroll-token       Issue a single-use enrollment token for a zone, printed
                      once. Needs APP_DATABASE_URL, --tenant and --zone (both
                      from bootstrap's output).
+
+  tenant set-domain  Change the host a tenant authenticates at (--tenant, --domain).
+                     Audited. Use when the deployment's address changed or was set
+                     wrong at bootstrap. Needs APP_DATABASE_URL.
 
 `, version)
 }
