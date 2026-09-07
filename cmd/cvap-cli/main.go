@@ -2,6 +2,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -50,7 +51,10 @@ func main() {
 func usage() {
 	fmt.Fprintf(os.Stderr, `cvap-cli %s
 
-  dev-ca <dir>       Generate a DEVELOPMENT certificate authority into <dir>.
+  dev-ca [--valid-for D] <dir>
+                     Generate a DEVELOPMENT certificate authority into <dir>.
+                     Valid 24h by default; --valid-for extends it (e.g. 720h for
+                     a 30-day evaluation), capped at 90 days.
 
   bootstrap          Create the first tenant, an admin user (with a generated
                      first-login password), an operator role and a default zone.
@@ -74,12 +78,26 @@ func usage() {
 // what ADR-018 means by the trust anchor being configuration rather than an
 // assumption baked into the binary.
 //
-// Twenty-four hours, deliberately short. A development CA that outlives the
-// afternoon is one that ends up in a deployment.
+// Twenty-four hours by default, deliberately short: a development CA that
+// outlives the afternoon is one that ends up in a deployment. --valid-for raises
+// it — an evaluation stack needs the CA to survive the review, not expire
+// mid-session — but only up to a 90-day ceiling, because past that it stops being
+// a development CA and a real deployment must supply its own anchor (ADR-018).
 func devCA(log *slog.Logger, args []string) error {
+	fs := flag.NewFlagSet("dev-ca", flag.ContinueOnError)
+	validFor := fs.Duration("valid-for", 24*time.Hour,
+		"how long the CA is valid (e.g. 720h for a 30-day evaluation); capped at 90 days")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	const maxValidity = 90 * 24 * time.Hour
+	if *validFor <= 0 || *validFor > maxValidity {
+		return fmt.Errorf("cvap-cli: --valid-for must be between 0 and %s; a development CA that lives longer is one that ends up in a deployment", maxValidity)
+	}
+
 	dir := "./secrets"
-	if len(args) > 0 && args[0] != "" {
-		dir = args[0]
+	if fs.Arg(0) != "" {
+		dir = fs.Arg(0)
 	}
 	dir = filepath.Clean(dir)
 	// The argument is a path an operator typed, and writing there is the whole
@@ -97,13 +115,13 @@ func devCA(log *slog.Logger, args []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	certPath, keyPath, err := ca.GenerateSelfSigned(dir, "cvap development CA", 24*time.Hour)
+	certPath, keyPath, err := ca.GenerateSelfSigned(dir, "cvap development CA", *validFor)
 	if err != nil {
 		return err
 	}
 	log.Warn("generated a DEVELOPMENT certificate authority; never use this key anywhere real",
 		slog.String("cert", certPath),
 		slog.String("key", keyPath),
-		slog.Duration("valid_for", 24*time.Hour))
+		slog.Duration("valid_for", *validFor))
 	return nil
 }

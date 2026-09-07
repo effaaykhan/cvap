@@ -30,17 +30,23 @@ feature, it says so, and the plainly-named limitations are collected in
   This CA mints every scan point's identity, so its key is the whole compromise
   if it leaks (architecture-v2 §18.3); it is mounted read-only, never baked in.
   - **Production:** supply your organisation's CA keypair.
-  - **Evaluation only:** generate a throwaway pair with the image's own CLI, owned
-    by you, after building the image (`docker compose build cvap-core`):
+  - **Evaluation only:** generate a throwaway pair with the image's own CLI (no
+    local build needed), owned by you, after `docker compose build cvap-core`.
+    `--valid-for 720h` makes it last a 30-day evaluation rather than expire
+    mid-review; it is still a development CA (capped at 90 days), never a real
+    anchor:
 
     ```sh
     mkdir -p deploy/secrets
     docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/deploy/secrets:/secrets" \
-      --entrypoint /usr/local/bin/cvap-cli cvap-deploy-cvap-core dev-ca /secrets
+      --entrypoint /usr/local/bin/cvap-cli cvap-deploy-cvap-core dev-ca --valid-for 720h /secrets
     ```
 
-    It is valid for **24 hours** on purpose — a development CA that outlives the
-    afternoon ends up in a deployment. Do not use it for anything real.
+    **To regenerate** when it expires — same command, after clearing the old
+    pair (`rm -f deploy/secrets/ca.crt deploy/secrets/ca.key`), then restart Core
+    (`docker compose up -d --force-recreate cvap-core`). Enrolled scan points were
+    issued by the old CA and must re-enrol against the new one; existing scan data
+    is unaffected.
 
 All commands below are run from the `deploy/` directory.
 
