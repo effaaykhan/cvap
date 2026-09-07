@@ -39,6 +39,7 @@ import (
 // permits.
 func TestAScanWithNoCapableScanPointIsRefused(t *testing.T) {
 	f := newFixture(t, `{"scan.read": true, "scan.create": true}`)
+	f.seedScanPoint(t)
 	cookies, csrf := f.login(t)
 
 	body := map[string]any{
@@ -46,7 +47,7 @@ func TestAScanWithNoCapableScanPointIsRefused(t *testing.T) {
 		"targets": []map[string]any{{"type": "cidr", "value": "192.0.2.0/30", "authorization_verified": true}},
 	}
 
-	// The fixture's scan point is capable (discovery) and online, so the scan is
+	// The seeded scan point is capable (discovery) and online, so the scan is
 	// accepted — the gate must not refuse a scan Core CAN dispatch.
 	if w := f.do(t, http.MethodPost, "/v1/scans", body, cookies, csrf); w.Code != http.StatusCreated {
 		t.Fatalf("with a capable online scan point, create gave %d, want 201: %s", w.Code, w.Body.String())

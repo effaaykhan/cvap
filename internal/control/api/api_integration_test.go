@@ -106,21 +106,7 @@ func newFixture(t *testing.T, permissions string) *fixture {
 			return err
 		}
 		f.policyID = p.ID
-
-		// A capable, online scan point, so createScan's dispatchable check passes.
-		// A real deployment has one before an operator runs a scan; the fixture
-		// mirrors that rather than testing against a fleet that cannot scan.
-		sp, err := (store.ScanPoints{}).Create(ctx, c, z.ID, "fixture-sp", "dev", "v1", "fp-"+uuid.NewString())
-		if err != nil {
-			return err
-		}
-		f.scanPointID = sp.ID
-		for _, e := range []store.Engine{store.EngineDiscovery, store.EngineFingerprint} {
-			if _, err := (store.ScanPoints{}).DeclareCapability(ctx, c, sp.ID, e, "dev", true); err != nil {
-				return err
-			}
-		}
-		return (store.ScanPoints{}).Heartbeat(ctx, c, sp.ID, time.Now())
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +123,32 @@ func newFixture(t *testing.T, permissions string) *fixture {
 	}
 	f.srv = srv
 	return f
+}
+
+// seedScanPoint adds a capable (discovery + fingerprint), online scan point in
+// the fixture's zone and records its id. Call it from a test that CREATES a scan
+// — createScan now refuses one with no scan point to run it — rather than seeding
+// one in newFixture, which would put a phantom scan point in front of every test
+// that reads the fleet (TestScanPointsFleetListIsWorstFirst counts, and would
+// then see one too many).
+func (f *fixture) seedScanPoint(t *testing.T) uuid.UUID {
+	t.Helper()
+	if err := f.db.Write(context.Background(), f.tenant, func(ctx context.Context, c *store.Conn) error {
+		sp, err := (store.ScanPoints{}).Create(ctx, c, f.zoneID, "fixture-sp", "dev", "v1", "fp-"+uuid.NewString())
+		if err != nil {
+			return err
+		}
+		f.scanPointID = sp.ID
+		for _, e := range []store.Engine{store.EngineDiscovery, store.EngineFingerprint} {
+			if _, err := (store.ScanPoints{}).DeclareCapability(ctx, c, sp.ID, e, "dev", true); err != nil {
+				return err
+			}
+		}
+		return (store.ScanPoints{}).Heartbeat(ctx, c, sp.ID, time.Now())
+	}); err != nil {
+		t.Fatalf("seed scan point: %v", err)
+	}
+	return f.scanPointID
 }
 
 // do sends a request at this fixture's host.
@@ -418,6 +430,7 @@ func TestPermissionsAreEnforcedPerRoute(t *testing.T) {
 // TestAMutatingRequestNeedsTheCSRFHeader.
 func TestAMutatingRequestNeedsTheCSRFHeader(t *testing.T) {
 	f := newFixture(t, `{"scan.read": true, "scan.create": true}`)
+	f.seedScanPoint(t) // so the successful create below is not refused for want of one
 	cookies, csrf := f.login(t)
 
 	body := map[string]any{
@@ -777,8 +790,16 @@ func TestTheOpenAPIDocumentIsServedPublicly(t *testing.T) {
 }
 
 // createScan makes a scan and returns its id.
+//
+// It ensures a capable, online scan point exists first: createScan now refuses a
+// scan no scan point can run, and this helper's whole job is to produce a scan
+// the rest of a test operates on. Idempotent — a test that seeded its own is not
+// given a second.
 func (f *fixture) createScan(t *testing.T, cookies []*http.Cookie, csrf string) string {
 	t.Helper()
+	if f.scanPointID == uuid.Nil {
+		f.seedScanPoint(t)
+	}
 	w := f.do(t, http.MethodPost, "/v1/scans", map[string]any{
 		"policy_id": f.policyID.String(), "scan_type": "discovery",
 		"targets": []map[string]any{{"type": "cidr", "value": "192.0.2.0/30", "authorization_verified": true}},
