@@ -15,7 +15,7 @@ export function Exposure() {
   return (
     <section>
       <h1>Exposure by zone</h1>
-      <p className="muted">
+      <p className="note">
         Open findings visible from each zone. A finding seen from several zones is counted once in
         each — these columns are not a total. This reflects which vantage points observed a
         finding, not whether it is reachable from the internet (not yet assessed).
@@ -25,18 +25,26 @@ export function Exposure() {
       {data && (
         <table>
           <thead>
-            <tr><th>Zone</th><th>Type</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Info</th><th>Findings</th></tr>
+            <tr>
+              <th>Zone</th><th>Type</th>
+              <th className="num">Critical</th><th className="num">High</th><th className="num">Medium</th>
+              <th className="num">Low</th><th className="num">Info</th><th className="num">Findings</th>
+            </tr>
           </thead>
           <tbody>
             {data.zones.map((z) => (
               <tr key={z.zone_id}>
                 <td>{z.zone_name || z.zone_id}</td>
-                <td>{z.zone_type}</td>
-                <td>{z.critical}</td><td>{z.high}</td><td>{z.medium}</td><td>{z.low}</td><td>{z.info}</td>
-                <td>{z.total}</td>
+                <td className="muted">{z.zone_type}</td>
+                <td className="num sev-critical">{z.critical || <span className="faint">0</span>}</td>
+                <td className="num sev-high">{z.high || <span className="faint">0</span>}</td>
+                <td className="num sev-medium">{z.medium || <span className="faint">0</span>}</td>
+                <td className="num sev-low">{z.low || <span className="faint">0</span>}</td>
+                <td className="num muted">{z.info || <span className="faint">0</span>}</td>
+                <td className="num">{z.total}</td>
               </tr>
             ))}
-            {data.zones.length === 0 && <tr><td colSpan={8} className="muted">No exposed findings.</td></tr>}
+            {data.zones.length === 0 && <tr className="empty"><td colSpan={8}>No exposed findings.</td></tr>}
           </tbody>
         </table>
       )}

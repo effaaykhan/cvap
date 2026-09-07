@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CVAP</title>
+    <!-- Set the theme before first paint so there is no light flash on a dark
+         SOC screen. Dark is the default; the header toggle persists a choice. -->
+    <script>
+      try { document.documentElement.dataset.theme = localStorage.getItem("cvap-theme") || "dark"; }
+      catch (e) { document.documentElement.dataset.theme = "dark"; }
+    </script>
   </head>
   <body>
     <div id="root"></div>

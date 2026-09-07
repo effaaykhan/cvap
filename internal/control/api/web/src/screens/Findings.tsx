@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { ExportButton } from "../components/ExportButton";
+import { Confidence } from "../components/Confidence";
 
 const SEVERITIES = ["", "critical", "high", "medium", "low", "info"];
 const STATUSES = ["", "open", "confirmed", "false_positive", "accepted_risk", "remediated", "closed"];
@@ -44,21 +45,25 @@ export function Findings() {
       {data && (
         <table>
           <thead>
-            <tr><th>Severity</th><th>Rule</th><th>Asset</th><th>Where</th><th>Zones</th><th>Status</th></tr>
+            <tr>
+              <th>Severity</th><th>Rule</th><th>Asset</th><th>Where</th>
+              <th>Confidence</th><th className="num">Zones</th><th>Status</th>
+            </tr>
           </thead>
           <tbody>
             {data.findings.map((f) => (
-              <tr key={f.id}>
+              <tr key={f.id} className={`frow frow-${f.severity}`}>
                 <td><span className={`sev sev-${f.severity}`}>{f.severity}</span></td>
                 <td><Link to={`/findings/${f.id}`}>{f.rule}</Link></td>
-                <td>{f.asset_hostname || f.asset_id}</td>
-                <td>{f.instance_locator}</td>
-                <td>{f.exposure_zones}</td>
-                <td>{f.status}</td>
+                <td className="data">{f.asset_hostname || f.asset_id}</td>
+                <td className="data">{f.instance_locator || "—"}</td>
+                <td><Confidence value={f.confidence} /></td>
+                <td className="num muted">{f.exposure_zones}</td>
+                <td className="muted">{f.status}</td>
               </tr>
             ))}
             {data.findings.length === 0 && (
-              <tr><td colSpan={6} className="muted">No findings match.</td></tr>
+              <tr className="empty"><td colSpan={7}>No findings match these filters.</td></tr>
             )}
           </tbody>
         </table>

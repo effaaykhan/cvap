@@ -1,39 +1,240 @@
-:root { color-scheme: light dark; --fg:#1a1d21; --muted:#6b7280; --line:#e5e7eb; --bg:#fafafa; --accent:#2563eb; --card:#fff; }
-* { box-sizing: border-box; }
-body { margin:0; font:14px/1.5 system-ui,sans-serif; color:var(--fg); background:var(--bg); }
-a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
-.center { min-height:100vh; display:grid; place-items:center; }
-.app > header { display:flex; align-items:center; gap:1.5rem; padding:.6rem 1.2rem; background:var(--card); border-bottom:1px solid var(--line); }
-.brand { font-weight:700; letter-spacing:.05em; }
-header nav { display:flex; gap:1rem; } header nav a.active { font-weight:600; color:var(--fg); }
-.who { margin-left:auto; color:var(--muted); display:flex; gap:.75rem; align-items:center; }
-main { padding:1.5rem; max-width:1100px; }
-h1 { font-size:1.4rem; } h2 { font-size:1.05rem; margin-top:1.5rem; }
-table { width:100%; border-collapse:collapse; margin-top:.75rem; background:var(--card); }
-th,td { text-align:left; padding:.5rem .6rem; border-bottom:1px solid var(--line); }
-th { color:var(--muted); font-weight:600; font-size:.85rem; }
-.filters { display:flex; gap:.6rem; margin:.75rem 0; }
-input,select,textarea { padding:.4rem .5rem; border:1px solid var(--line); border-radius:6px; font:inherit; background:var(--card); color:var(--fg); }
-button { padding:.45rem .9rem; border:0; border-radius:6px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
-button:disabled { opacity:.6; cursor:not-allowed; }
-.link { background:none; color:var(--accent); padding:0; }
-.btn { display:inline-block; padding:.45rem .9rem; border-radius:6px; background:var(--accent); color:#fff; font-size:.9rem; }
-.btn.disabled { background:var(--line); color:var(--muted); cursor:not-allowed; }
+/* CVAP operator console.
+ *
+ * A security operations surface: dense, calm, dark by default (it runs in a SOC
+ * beside terminals). The list is the product, so the finding row is where the
+ * design spends its boldness — severity legible at a glance without relying on
+ * colour, confidence visible rather than buried, weak data that LOOKS weak.
+ * Everything else stays quiet: one accent, mono for data, tight rhythm.
+ */
+
+/* ---- tokens: dark is the default ---------------------------------------- */
+:root {
+  color-scheme: dark;
+  --bg:#0d1117; --surface:#161b22; --surface-2:#1b2230; --raised:#212a37;
+  --line:#272e39; --line-strong:#3a434f;
+  --fg:#e6edf3; --muted:#9aa5b1; --faint:#828d9b;
+  --accent:#4c9df0; --accent-strong:#69aef5; --on-accent:#08111c;
+  --ok:#57ab5a; --danger:#f85149;
+
+  /* Severity is its own scale, never the accent. Each value clears 4.5:1 on
+     --surface so the word itself passes AA; colour only reinforces the word,
+     the rail weight and the position. */
+  --sev-critical:#ff7b72; --sev-high:#ffa657; --sev-medium:#e3c341;
+  --sev-low:#6fb3ff; --sev-info:#9aa5b1;
+
+  --radius:8px;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg:#f6f7f9; --surface:#ffffff; --surface-2:#f0f2f5; --raised:#e9edf2;
+  --line:#dfe3e9; --line-strong:#c7cdd6;
+  --fg:#1a1f26; --muted:#5b6572; --faint:#69727e;
+  --accent:#1f6feb; --accent-strong:#1a5fd0; --on-accent:#ffffff;
+  --ok:#1a7f37; --danger:#cf222e;
+  --sev-critical:#b62324; --sev-high:#8a4b00; --sev-medium:#6f5500;
+  --sev-low:#1d4ed8; --sev-info:#57606a;
+}
+
+* { box-sizing:border-box; }
+html,body { margin:0; }
+body {
+  font:400 13px/1.5 var(--sans);
+  color:var(--fg); background:var(--bg);
+  -webkit-font-smoothing:antialiased;
+}
+a { color:var(--accent); text-decoration:none; }
+a:hover { color:var(--accent-strong); text-decoration:underline; }
+:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:3px; }
+code, .mono { font-family:var(--mono); }
+
+/* ---- app shell --------------------------------------------------------- */
+.center { min-height:100vh; display:grid; place-items:center; padding:1.5rem; }
+.app > header {
+  display:flex; align-items:center; gap:1.75rem;
+  padding:0 1.25rem; height:52px;
+  background:var(--surface); border-bottom:1px solid var(--line);
+  position:sticky; top:0; z-index:5;
+}
+.brand {
+  font-family:var(--mono); font-weight:700; font-size:.9rem;
+  letter-spacing:.18em; color:var(--fg);
+}
+header nav { display:flex; gap:.25rem; }
+header nav a {
+  color:var(--muted); padding:.35rem .7rem; border-radius:6px;
+  font-size:.82rem; font-weight:500;
+}
+header nav a:hover { color:var(--fg); background:var(--surface-2); text-decoration:none; }
+header nav a.active { color:var(--fg); background:var(--raised); }
+.who {
+  margin-left:auto; color:var(--muted); display:flex; gap:.9rem; align-items:center;
+  font-size:.82rem;
+}
+.who .email { font-family:var(--mono); font-size:.78rem; }
+.theme-toggle {
+  background:transparent; color:var(--muted); border:1px solid var(--line);
+  padding:.3rem .5rem; border-radius:6px; font-size:.9rem; line-height:1;
+}
+.theme-toggle:hover { color:var(--fg); border-color:var(--line-strong); background:transparent; }
+main { padding:1.5rem 1.25rem; max-width:1180px; }
+
+/* ---- type scale -------------------------------------------------------- */
+h1 { font-size:1.25rem; font-weight:650; letter-spacing:-.01em; margin:.2rem 0 1rem; }
+h2 {
+  font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.09em;
+  color:var(--muted); margin:1.75rem 0 .6rem;
+}
+.detail h1 { display:flex; align-items:center; gap:.6rem; }
+.muted { color:var(--muted); } .faint { color:var(--faint); }
+.small { font-size:.8rem; }
+
+/* ---- tables: dense, sticky header, calm -------------------------------- */
+table { width:100%; border-collapse:collapse; font-size:.82rem; }
+thead th {
+  position:sticky; top:52px; background:var(--bg);
+  text-align:left; padding:.5rem .7rem;
+  color:var(--faint); font-weight:600; font-size:.7rem;
+  text-transform:uppercase; letter-spacing:.06em;
+  border-bottom:1px solid var(--line-strong); white-space:nowrap;
+}
+tbody td { padding:.4rem .7rem; border-bottom:1px solid var(--line); vertical-align:middle; }
+tbody tr:hover td { background:var(--surface); }
+td.num, th.num { text-align:right; font-family:var(--mono); }
+/* Identifiers, ports, times read as data. */
+td .mono, .data { font-family:var(--mono); font-size:.78rem; }
+
+/* ---- the finding row: the signature ------------------------------------ */
+/* A left rail whose weight tracks rank, so severity reads in peripheral vision
+   and in greyscale; the severity WORD carries it for anyone who cannot see the
+   hue at all; colour reinforces. */
+tr.frow td:first-child { position:relative; }
+tr.frow td:first-child::before {
+  content:""; position:absolute; left:0; top:0; bottom:0; width:2px; background:var(--sev-info);
+}
+tr.frow-critical td:first-child::before { width:4px; background:var(--sev-critical); }
+tr.frow-high     td:first-child::before { width:4px; background:var(--sev-high); }
+tr.frow-medium   td:first-child::before { width:3px; background:var(--sev-medium); }
+tr.frow-low      td:first-child::before { width:2px; background:var(--sev-low); }
+tr.frow-info     td:first-child::before { width:2px; background:var(--sev-info); }
+
+.sev {
+  font-family:var(--mono); font-size:.72rem; letter-spacing:.06em;
+  text-transform:uppercase; font-weight:600;
+}
+.sev-critical { color:var(--sev-critical); font-weight:700; }
+.sev-high     { color:var(--sev-high); font-weight:700; }
+.sev-medium   { color:var(--sev-medium); }
+.sev-low      { color:var(--sev-low); }
+.sev-info     { color:var(--sev-info); }
+/* The detail-page severity, larger, as a tinted chip beside the title. */
+.detail h1 .sev {
+  font-size:.72rem; padding:.2rem .5rem; border-radius:5px;
+  border:1px solid color-mix(in srgb, currentColor 45%, transparent);
+  background:color-mix(in srgb, currentColor 14%, transparent);
+}
+
+/* ---- confidence: visible, and weak when the data is weak ---------------- */
+.conf { display:inline-flex; align-items:center; gap:.45rem; }
+.conf-track {
+  width:46px; height:5px; border-radius:3px; background:var(--line-strong);
+  overflow:hidden; flex:none;
+}
+.conf-fill { display:block; height:100%; background:var(--accent); }
+.conf-val { font-family:var(--mono); font-size:.72rem; color:var(--muted); }
+/* Low confidence recedes through the SHORT bar, the neutral (non-accent) fill
+   and the "low" label — not through opacity, which would drop the value below
+   the AA contrast the weak-data labels must still meet. It looks less certain
+   while staying legible. */
+.conf-low .conf-fill { background:var(--sev-info); }
+.conf-low .conf-val::after { content:" low"; color:var(--faint); }
+.conf-medium .conf-fill { background:var(--sev-medium); }
+
+/* A marker for inferred / unverified data, so it never reads as a hard fact. */
+.hint { color:var(--faint); font-size:.75rem; font-style:italic; }
+.unknown { color:var(--faint); font-family:var(--mono); font-size:.78rem; }
+
+/* ---- cards, forms ------------------------------------------------------ */
+.card {
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+  padding:1.25rem;
+}
+.detail { max-width:860px; }
+.crumb { margin:0 0 1rem; font-size:.82rem; }
 .row-between { display:flex; align-items:center; justify-content:space-between; gap:1rem; }
-.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:1.25rem; }
-.login { width:320px; display:flex; flex-direction:column; gap:.75rem; }
-.login label, .create label:not(.check) { display:flex; flex-direction:column; gap:.25rem; font-size:.85rem; color:var(--muted); }
-.create { margin:1rem 0; display:flex; flex-direction:column; gap:.6rem; }
-.check { flex-direction:row!important; align-items:center; gap:.5rem; color:var(--fg)!important; }
-.error { color:#b91c1c; } .muted { color:var(--muted); } .small { font-size:.85rem; }
-.tag { display:inline-block; padding:.1rem .5rem; border:1px solid var(--line); border-radius:999px; font-size:.8rem; color:var(--muted); }
-.sev { padding:.1rem .5rem; border-radius:4px; font-size:.8rem; font-weight:600; text-transform:capitalize; }
-.sev-critical{background:#fee2e2;color:#991b1b}.sev-high{background:#ffedd5;color:#9a3412}.sev-medium{background:#fef9c3;color:#854d0e}.sev-low{background:#dbeafe;color:#1e40af}.sev-info{background:#f3f4f6;color:#374151}
-.facts { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:.5rem 1.5rem; margin:1rem 0; }
-.kv { display:flex; gap:.5rem; } .kv dt { color:var(--muted); min-width:90px; } .kv dd { margin:0; }
-.crumb { margin:0 0 .5rem; }
-.evidence { display:flex; flex-direction:column; gap:.75rem; }
-.evidence-card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:.75rem 1rem; }
-.evidence-head { display:flex; justify-content:space-between; margin-bottom:.5rem; }
-.evidence dl { margin:0; } .provenance { margin:.5rem 0 0; font-size:.85rem; }
-code { background:var(--line); padding:.05rem .3rem; border-radius:4px; }
+
+.filters { display:flex; gap:.5rem; margin:0 0 1rem; }
+input,select,textarea {
+  padding:.4rem .55rem; border:1px solid var(--line-strong); border-radius:6px;
+  font:inherit; font-size:.82rem; background:var(--bg); color:var(--fg);
+}
+select { cursor:pointer; }
+button {
+  padding:.45rem .9rem; border:1px solid transparent; border-radius:6px;
+  background:var(--accent); color:var(--on-accent); font:inherit; font-size:.82rem;
+  font-weight:600; cursor:pointer;
+}
+button:hover { background:var(--accent-strong); }
+button:disabled { opacity:.55; cursor:not-allowed; }
+.link { background:none; color:var(--accent); padding:0; border:0; font-weight:500; }
+.link:hover { background:none; color:var(--accent-strong); text-decoration:underline; }
+.btn { display:inline-block; padding:.45rem .9rem; border-radius:6px; background:var(--accent); color:var(--on-accent); font-size:.82rem; font-weight:600; }
+.btn.disabled { background:var(--raised); color:var(--faint); cursor:not-allowed; }
+
+/* login / settings forms */
+.login { width:340px; display:flex; flex-direction:column; gap:.85rem; }
+.login h1 { font-family:var(--mono); letter-spacing:.18em; text-align:center; margin:.2rem 0 .4rem; }
+.login label, .detail form label {
+  display:flex; flex-direction:column; gap:.3rem;
+  font-size:.75rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em;
+}
+.detail form { display:flex; flex-direction:column; gap:.85rem; margin-top:.5rem; }
+
+/* ---- facts grid (detail pages) ---------------------------------------- */
+.facts {
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr));
+  gap:.1rem 2rem; margin:1rem 0; border-top:1px solid var(--line);
+}
+.kv { display:flex; gap:.75rem; padding:.45rem 0; border-bottom:1px solid var(--line); }
+.kv dt { color:var(--faint); min-width:104px; font-size:.75rem; text-transform:uppercase; letter-spacing:.04em; padding-top:.05rem; }
+.kv dd { margin:0; }
+.kv dd code, .kv dd .data { font-family:var(--mono); font-size:.78rem; }
+
+/* ---- evidence ---------------------------------------------------------- */
+.evidence { display:flex; flex-direction:column; gap:.6rem; }
+.evidence-card { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:.85rem 1rem; }
+.evidence-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:.6rem; }
+.evidence dl { margin:0; display:grid; grid-template-columns:auto 1fr; gap:.25rem .9rem; }
+.evidence .kv { display:contents; }
+.evidence .kv dt { color:var(--faint); font-family:var(--mono); font-size:.72rem; text-transform:none; letter-spacing:0; min-width:0; padding:0; border:0; }
+.evidence .kv dd { font-family:var(--mono); font-size:.76rem; border:0; padding:0; word-break:break-word; }
+.provenance { margin:.7rem 0 0; font-size:.75rem; color:var(--faint); }
+
+/* ---- tags, chips, notes ----------------------------------------------- */
+.tag {
+  display:inline-block; padding:.1rem .5rem; border:1px solid var(--line-strong);
+  border-radius:5px; font-size:.7rem; font-family:var(--mono); text-transform:uppercase;
+  letter-spacing:.04em; color:var(--muted);
+}
+.note {
+  border:1px solid var(--line); border-left:3px solid var(--faint);
+  background:var(--surface); border-radius:6px; padding:.6rem .8rem;
+  color:var(--muted); font-size:.8rem; margin:.75rem 0 0; max-width:70ch;
+}
+.error { color:var(--danger); }
+code { background:var(--surface-2); padding:.06rem .35rem; border-radius:4px; font-size:.78rem; }
+
+/* ---- empty & loading states: an invitation, not a shrug --------------- */
+.empty { color:var(--muted); padding:2rem .7rem; text-align:center; }
+.empty td { padding:2rem .7rem; text-align:center; color:var(--muted); }
+
+@media (prefers-reduced-motion:no-preference) {
+  header nav a, button, .conf-fill { transition:background .12s ease, color .12s ease, width .2s ease; }
+}
+@media (max-width:640px) {
+  .app > header { gap:.9rem; padding:0 .8rem; }
+  .who .email { display:none; }
+  main { padding:1rem .8rem; }
+}

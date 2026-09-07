@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./lib/auth";
 import { has } from "./lib/api";
@@ -10,9 +11,30 @@ import { AssetDetail } from "./screens/AssetDetail";
 import { Scans } from "./screens/Scans";
 import { ScanDetail } from "./screens/ScanDetail";
 import { Exposure } from "./screens/Exposure";
+import { Settings } from "./screens/Settings";
+
+function readTheme(): "dark" | "light" {
+  try {
+    return document.documentElement.dataset.theme === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
 
 export function App() {
   const { session, loading, mustChange, logout } = useAuth();
+  const [theme, setTheme] = useState<"dark" | "light">(readTheme);
+
+  const toggleTheme = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    try {
+      localStorage.setItem("cvap-theme", next);
+    } catch {
+      /* a viewer with storage disabled still gets the toggle for this session */
+    }
+    setTheme(next);
+  };
 
   if (loading) return <div className="center">Loading…</div>;
   if (mustChange) return <ChangePassword />;
@@ -26,6 +48,9 @@ export function App() {
     ["/assets", "Assets", has(session, "asset.read")],
     ["/scans", "Scans", has(session, "scan.read")],
     ["/exposure", "Exposure", has(session, "finding.read")],
+    // No permission gate: changing your own password is available to any
+    // signed-in operator.
+    ["/settings", "Settings", true],
   ];
 
   return (
@@ -40,7 +65,15 @@ export function App() {
           ))}
         </nav>
         <span className="who">
-          {session.email}
+          <button
+            className="theme-toggle"
+            onClick={toggleTheme}
+            title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+            aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          >
+            {theme === "dark" ? "☀" : "☾"}
+          </button>
+          <span className="email">{session.email}</span>
           <button className="link" onClick={() => void logout()}>
             Sign out
           </button>
@@ -55,6 +88,7 @@ export function App() {
           <Route path="/scans" element={<Scans />} />
           <Route path="/scans/:id" element={<ScanDetail />} />
           <Route path="/exposure" element={<Exposure />} />
+          <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/findings" replace />} />
         </Routes>
       </main>

@@ -2,6 +2,7 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { EvidenceBlock } from "../components/Evidence";
+import { Confidence } from "../components/Confidence";
 
 // The finding detail: read the finding, its rule, the evidence that produced it,
 // and the zones it is exposed from — and confirm the claim by hand without
@@ -25,9 +26,9 @@ export function FindingDetail() {
       </div>
       <dl className="facts">
         <div className="kv"><dt>Asset</dt><dd><Link to={`/assets/${f.asset_id}`}>{f.asset_hostname || f.asset_id}</Link></dd></div>
-        <div className="kv"><dt>Where</dt><dd>{f.instance_locator || "—"}</dd></div>
+        <div className="kv"><dt>Where</dt><dd className="data">{f.instance_locator || "—"}</dd></div>
         <div className="kv"><dt>Category</dt><dd>{f.category}</dd></div>
-        <div className="kv"><dt>Confidence</dt><dd>{Math.round((f.confidence ?? 0) * 100)}%</dd></div>
+        <div className="kv"><dt>Confidence</dt><dd><Confidence value={f.confidence} /></dd></div>
         {f.cwe && <div className="kv"><dt>CWE</dt><dd>{f.cwe}</dd></div>}
         <div className="kv"><dt>Dedup key</dt><dd><code>{f.dedup_key}</code></dd></div>
         <div className="kv"><dt>First seen</dt><dd>{fmt(f.first_seen)}</dd></div>
@@ -62,7 +63,7 @@ export function FindingDetail() {
       ) : (
         <p className="muted">No zone exposure recorded.</p>
       )}
-      <p className="muted small">
+      <p className="note">
         Exposure lists the zones this finding was seen from. It is not an internet-reachability
         assessment — that is not yet computed.
       </p>
