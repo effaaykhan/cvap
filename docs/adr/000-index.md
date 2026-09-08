@@ -73,3 +73,4 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 062 | Version comparators validated against the distributions' own corpora + a live library oracle differential; Go authoritative over SQL (P3.1) | Accepted |
 | 063 | The knowledge-import role writes exactly the five knowledge tables, never BYPASSRLS/SUPERUSER — ADR-030's argument from the writing role's side (P3.2) | Accepted |
 | 064 | Release resolution by upstream version band over the advisory keyspace — every failure mode is unresolved not wrong; ≥2 agreeing votes, feed codename, product→package map is content (P3.3) | Accepted |
+| 065 | Release-resolution confidence tiered by vote count (2/3/4+), and the measured service-coverage bound — the reach is B22 service identification, not the resolver (refines ADR-064) | Accepted |

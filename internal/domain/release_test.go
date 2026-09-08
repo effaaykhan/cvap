@@ -2,6 +2,14 @@ package domain
 
 import "testing"
 
+func approxEq(a, b float32) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d < 1e-4
+}
+
 func TestUpstreamBand(t *testing.T) {
 	cases := map[string]string{
 		"1:4.7p1-8ubuntu1.2":      "4.7p1",   // epoch + revision stripped
@@ -34,8 +42,8 @@ func TestResolveRelease_ThreeAgreeTwoAbstain(t *testing.T) {
 	if res.Release == nil || *res.Release != "hardy" {
 		t.Fatalf("release = %v, want hardy", res.Release)
 	}
-	if res.Confidence != 1.0 {
-		t.Errorf("confidence = %v, want 1.0 (3 of 3 clean votes agree)", res.Confidence)
+	if !approxEq(res.Confidence, 0.90) {
+		t.Errorf("confidence = %v, want 0.90 (3 agreeing, unanimous)", res.Confidence)
 	}
 	roles := map[string]ReleaseRole{}
 	reasons := map[string]string{}
@@ -114,8 +122,8 @@ func TestResolveRelease_PluralityWithDissent(t *testing.T) {
 	if res.Release == nil || *res.Release != "hardy" {
 		t.Fatalf("release = %v, want hardy (3 vs 1)", res.Release)
 	}
-	if res.Confidence != 0.75 {
-		t.Errorf("confidence = %v, want 0.75 (3 of 4 clean votes)", res.Confidence)
+	if !approxEq(res.Confidence, 0.675) {
+		t.Errorf("confidence = %v, want 0.675 (3-vote base 0.90 scaled by 3/4 for the dissenter)", res.Confidence)
 	}
 	var dissent ReleaseRole
 	for _, s := range res.Provenance {
@@ -189,6 +197,33 @@ func TestResolveRelease_VersionlessAbstainsVisibly(t *testing.T) {
 	}
 	if postfix.Reason == "" || postfix.Reason == "observed version matches no release's band" {
 		t.Errorf("versionless abstention needs its own reason (not the band-mismatch one), got %q", postfix.Reason)
+	}
+}
+
+// Confidence distinguishes a two-vote resolution from a three- and four-vote one,
+// and a unanimous pair outranks a disputed plurality (ADR-064) — both resolve,
+// but the finding pipeline must be able to tell them apart later.
+func TestResolveRelease_ConfidenceGrowsWithAgreement(t *testing.T) {
+	vote := func(svc, band string) ReleaseVote {
+		return ReleaseVote{Service: svc, Product: svc, Band: band, Candidates: []string{"hardy"}, HasAnalogue: true}
+	}
+	two := ResolveRelease([]ReleaseVote{vote("a", "1"), vote("b", "2")})
+	three := ResolveRelease([]ReleaseVote{vote("a", "1"), vote("b", "2"), vote("c", "3")})
+	four := ResolveRelease([]ReleaseVote{vote("a", "1"), vote("b", "2"), vote("c", "3"), vote("d", "4")})
+	if !(two.Confidence < three.Confidence && three.Confidence < four.Confidence) {
+		t.Errorf("confidence must grow with agreement: 2=%v 3=%v 4=%v", two.Confidence, three.Confidence, four.Confidence)
+	}
+	// A unanimous pair (2/2 = 0.80) beats a disputed plurality (3/5, 0.90*3/5=0.54).
+	disputed := ResolveRelease([]ReleaseVote{
+		vote("a", "1"), vote("b", "2"), vote("c", "3"),
+		{Service: "d", Product: "d", Band: "9", Candidates: []string{"lucid"}, HasAnalogue: true},
+		{Service: "e", Product: "e", Band: "9", Candidates: []string{"lucid"}, HasAnalogue: true},
+	})
+	if disputed.Release == nil || *disputed.Release != "hardy" {
+		t.Fatalf("3 vs 2 should resolve hardy, got %v", disputed.Release)
+	}
+	if !(two.Confidence > disputed.Confidence) {
+		t.Errorf("a unanimous pair (%v) should outrank a disputed 3/5 (%v)", two.Confidence, disputed.Confidence)
 	}
 }
 

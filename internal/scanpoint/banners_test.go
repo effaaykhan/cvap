@@ -127,3 +127,68 @@ func classify(matches []enginewire.Match, banner string, port uint32) (classifie
 	}
 	return classified{}, false
 }
+
+// TestMetasploitableVersionCoverageMeasured runs Metasploitable 2's actual
+// safe-mode banners through the built-in matcher and records, per service,
+// whether a services.VERSION is produced — the number release resolution
+// actually gets (ADR-064). It reconciles the session-26 "6-7/11 identified"
+// figure: that counted services IDENTIFIED (any method), which includes
+// versionless soft-matches (telnet, VNC, IRC) and product-only (Postfix). Release
+// resolution needs a VERSION, and this measures how many carry one. Also a
+// regression lock: the four version-yielders must keep yielding.
+func TestMetasploitableVersionCoverageMeasured(t *testing.T) {
+	matches := BuiltinBannerMatches()
+	// The safe-mode passive banners Metasploitable emits on connect. HTTP, SMB,
+	// PostgreSQL and RPCbind send NOTHING unsolicited (they wait for the client),
+	// so in safe mode they are method:none — represented by an empty banner.
+	cases := []struct {
+		svc, banner string
+		port        uint32
+	}{
+		{"ftp/vsftpd", "220 (vsFTPd 2.3.4)\r\n", 21},
+		{"ssh", "SSH-2.0-OpenSSH_4.7p1 Debian-8ubuntu1\r\n", 22},
+		{"telnet", "\xff\xfd\x18\xff\xfd\x20\xff\xfd\x23", 23},
+		{"smtp/postfix", "220 metasploitable.localdomain ESMTP Postfix (Ubuntu)\r\n", 25},
+		{"http/apache", "", 80}, // no passive banner: probe-gated (intrusive only)
+		{"smb/samba", "", 139},  // no passive banner + no Samba matcher anywhere
+		{"mysql", "\x36\x00\x00\x00\x0a5.0.51a-3ubuntu5\x00\x2b", 3306},
+		{"postgresql", "", 5432}, // no passive banner
+		{"vnc", "RFB 003.003\n", 5900},
+		{"irc/unrealircd", ":irc.Metasploitable.LAN NOTICE AUTH :*** Looking up your hostname...\r\n", 6667},
+		{"ftp/proftpd", "220 ProFTPD 1.3.1 Server (Debian)\r\n", 2121},
+	}
+	withVersion := map[string]bool{}
+	for _, c := range cases {
+		if c.banner == "" {
+			t.Logf("%-16s port %-5d -> NO passive banner (method:none in safe mode)", c.svc, c.port)
+			continue
+		}
+		got, ok := classify(matches, c.banner, c.port)
+		switch {
+		case !ok:
+			t.Logf("%-16s port %-5d -> matched NOTHING", c.svc, c.port)
+		case got.version != "":
+			withVersion[c.svc] = true
+			t.Logf("%-16s port %-5d -> VERSION  %s %s", c.svc, c.port, got.product, got.version)
+		case got.product != "":
+			t.Logf("%-16s port %-5d -> product-only (no version)  %s", c.svc, c.port, got.product)
+		default:
+			t.Logf("%-16s port %-5d -> soft/service-only (%s)", c.svc, c.port, got.service)
+		}
+	}
+	t.Logf("SERVICES YIELDING A VERSION (safe mode): %d — %v", len(withVersion), keysOf(withVersion))
+	// Regression lock: these four must keep yielding a version.
+	for _, svc := range []string{"ftp/vsftpd", "ssh", "mysql", "ftp/proftpd"} {
+		if !withVersion[svc] {
+			t.Errorf("%s no longer yields a version — a corpus matcher regressed", svc)
+		}
+	}
+}
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

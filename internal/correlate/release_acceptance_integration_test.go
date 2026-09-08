@@ -23,7 +23,16 @@ import (
 // The observed versions are Metasploitable's (Ubuntu 8.04 "hardy"): OpenSSH
 // 4.7p1, MySQL 5.0.51a-3ubuntu5, Apache 2.2.8 band-match hardy and agree; Samba
 // 3.0.20 (older than any band) and vsftpd 2.3.4 (the backdoored build) match no
-// release and abstain; ProFTPD has no advisory analogue and abstains. The keyspace
+// release and abstain; ProFTPD has no advisory analogue and abstains.
+//
+// This is a RESOLVER-LOGIC test with a controlled observed set — it exercises the
+// vote / abstain / dissent paths. It is NOT a claim about what the corpus
+// identifies in safe mode: that is measured separately in scanpoint's
+// TestMetasploitableVersionCoverageMeasured, which finds only four
+// version-yielding services (Apache and Samba are not among them in safe mode).
+// So a real safe-mode scan resolves hardy on TWO votes (openssh, mysql), still
+// past the threshold; this test uses three to also cover the agreeing-plurality
+// path. The gap is B28 (service ID), recorded honestly in ADR-065. The keyspace
 // is seeded from the REAL fixed versions measured in session 30 (idempotent, so it
 // coexists with the full real keyspace a dev DB already holds); the resolution is
 // identical either way because the bands are the same. Skips without the import
@@ -138,8 +147,8 @@ func TestReleaseResolvesEndToEndOnMetasploitable(t *testing.T) {
 	if release == nil || *release != "hardy" {
 		t.Fatalf("distro_release = %v, want hardy (3 agreeing band votes)", release)
 	}
-	if relConf == nil || *relConf < 0.99 {
-		t.Errorf("release_confidence = %v, want ~1.0 (3 of 3 clean votes agree)", relConf)
+	if relConf == nil || *relConf < 0.89 || *relConf > 0.91 {
+		t.Errorf("release_confidence = %v, want ~0.90 (3 agreeing, unanimous — ADR-064)", relConf)
 	}
 
 	// --- The provenance shows who voted, agreed and abstained, and WHY ---

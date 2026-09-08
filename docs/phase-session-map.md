@@ -265,6 +265,21 @@ plan predicted exactly this).
     was concluded" table — which services voted, agreed, and **abstained (with the
     reason: no analogue vs band mismatch)**, because absence-is-not-evidence must be
     visible. A resolved release now carries its evidence the way the family does.
+  - **Confidence tiered, not flat (ADR-065):** 2 agreeing → 0.80 (medium), 3 → 0.90,
+    ≥4 → 0.95 (high), scaled down by dissent, so a unanimous pair outranks a disputed
+    plurality and the finding pipeline can weight a two-vote release below a four-vote one.
+  - **★ Coverage measured and stated honestly (ADR-065, `TestMetasploitableVersionCoverageMeasured`):**
+    running Metasploitable's 11 safe-mode banners through the real matcher yields a
+    VERSION for only **4** (vsftpd, openssh, mysql, proftpd) — of which **2 band-vote
+    hardy** (openssh, mysql) in safe mode; Apache 2.2.8 is a 3rd vote only under
+    intrusive HTTP probing. This reconciles S26's "6–7/11": S26 counted services
+    *identified* (incl. versionless telnet/Postfix/VNC); *version-yielding* is 4/11.
+    **Not a regression** (the matchers are all present — the test locks it), a
+    **counting difference** — S26 overstated coverage for version-dependent work.
+    Release resolution reaches exactly as far as service identification: the six
+    services whose version data the corpus can't extract (Samba, Apache, PostgreSQL,
+    UnrealIRCd, Postfix, distccd) are **backlog B28** — a B22 service-ID gap that
+    bounds P3.3's real-host reach, NOT a resolver limitation.
 
 ---
 

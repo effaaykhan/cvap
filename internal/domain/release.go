@@ -154,10 +154,7 @@ func ResolveRelease(votes []ReleaseVote) ReleaseResolution {
 	if resolved {
 		r := leader
 		res.Release = &r
-		// Confidence is the share of clean votes that agree: 3/3 = 1.0, 3/4 =
-		// 0.75. It reports how corroborated the answer is, not how good the band
-		// match was (that is exact, or the service abstained).
-		res.Confidence = float32(leaderCount) / float32(totalClean)
+		res.Confidence = releaseConfidence(leaderCount, totalClean)
 	}
 
 	for _, v := range votes {
@@ -187,6 +184,30 @@ func ResolveRelease(votes []ReleaseVote) ReleaseResolution {
 		res.Provenance = append(res.Provenance, src)
 	}
 	return res
+}
+
+// releaseConfidence encodes BOTH corroboration count and unanimity, so the
+// finding pipeline can distinguish a two-vote resolution from a four-vote one —
+// both resolve, but four agreeing is a stronger claim (ADR-064). The count sets a
+// base (2 → 0.80, 3 → 0.90, ≥4 → 0.95), and dissent scales it down by the share
+// of clean votes that agree. So a unanimous 2/2 (0.80) outranks a 3/4 with one
+// dissenter (0.675) and a 3/5 (0.54) — a clean pair beats a disputed plurality,
+// which is the ordering the threshold decision rests on. The bases map onto the
+// UI's own bands: two votes reads as "medium", three-plus as "high".
+func releaseConfidence(leaderCount, totalClean int) float32 {
+	var base float32
+	switch {
+	case leaderCount >= 4:
+		base = 0.95
+	case leaderCount == 3:
+		base = 0.90
+	default: // exactly the threshold, 2
+		base = 0.80
+	}
+	if totalClean == 0 {
+		return 0
+	}
+	return base * float32(leaderCount) / float32(totalClean)
 }
 
 func contains(xs []string, x string) bool {
