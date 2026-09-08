@@ -1,6 +1,6 @@
 ---
 name: recurring-findings
-description: Recurring security defect classes found in CVAP reviews (34 classes), and the repo-specific constraints that shape acceptable fixes
+description: Recurring security defect classes found in CVAP reviews (36 classes), and the repo-specific constraints that shape acceptable fixes
 metadata:
   type: project
 ---
@@ -412,6 +412,30 @@ process holding dispatch, ingest and lease renewal.
 **How to apply:** for every outbound fetch, name which of (dial, TLS, headers, body-time,
 body-SIZE) is bounded, and check the ones the library owns by reading its source, not the
 client config. A `*http.Client` cannot express a body-size cap.
+
+**35. An "extract/move" whose deletion of the old copy never happened, leaving a stale file
+that references the symbols the move removed — so the tree does not compile.** Session 22's
+`96d1fdc` extracted the argon2id hasher into `internal/control/credential` and removed
+`argonParams`/`argonMemory`/the constants from `internal/control/api/handlers_auth.go`, but
+`internal/control/api/phc.go` (which USES `argonParams`/`argonMemory` in `decodePHC`) was never
+deleted. The commit message AND the review task both assert "api/phc.go is deleted"; `git
+ls-tree HEAD` shows the blob still present, and `go build ./...` fails from that commit through
+HEAD with `undefined: argonParams` (11 errors), taking `internal/control/api` and everything
+importing it — `cvap-core`, `cvap-cli` — down with it. The commit's claim that "the login
+integration suite proves it" is therefore false: that suite is in package api and cannot
+compile. Deleting the stale file (`git rm internal/control/api/phc.go`; nothing outside it
+references `decodePHC`/`errBadPHC`/`b64`) restores `go build ./...` to exit 0 — verified.
+**Why:** the diff of an extraction reads as clean — it removes functions and adds a package —
+and you only see the defect if you notice it did NOT also delete the sibling file AND that the
+sibling used the removed symbols. Reading cannot catch it; a build can, in one second.
+**How to apply:** for ANY commit described as a move/extract/rename, run `go build ./...` (and
+`go vet`) at HEAD before anything else. Do not trust the commit message's or the task's claim
+that a file was deleted — `git ls-tree HEAD <path>` is authoritative. A red tree is the first
+thing to establish, because every other property is moot if it does not compile.
+
+**36. A module that loudly commits to "refusals, not truncations" and then silently truncates one field.** `knowledge/usn_ingest.py` (session 28) opens with a comment block arguing that every bound is a REFUSAL because a truncated advisory set is a silent false negative — and enforces that for notices (`MAX_NOTICES`, raises) and per-advisory packages (`MAX_PKGS_PER_ADVISORY`, raises) — but the CVE list is `[_bounded(c,64) for c in (...)][:512]`, a silent slice. An advisory with >512 CVEs drops the tail of its advisory→vuln_def mapping with no error, the exact silent-false-negative shape the module's own docstring exists to prevent. Impact is low here (fetch caps `limit` at 20 notices/call and a single USN rarely lists >512 CVEs; the fixed-package match keys on package/version, not CVE, so the finding still fires — only its CVE annotations are incomplete), which is why it is a Note not a defect. The pattern is the point: a stated doctrine defeated in one spot reads as compliant because the surrounding code obeys it.
+**Why:** the refusal helpers (`_bounded`, `_read_capped`, the `MAX_*` raises) make the file look uniformly fail-closed, so the one `[:N]` slice hides in plain sight.
+**How to apply:** when a module states a fail-closed doctrine, grep it for every bound — `[:`, `[...:...]`, `min(`, `head`, `truncate` — and check each is a raise, not a clip. Class 23/31 from the truncation side.
 
 **Confirmed-good patterns worth NOT re-deriving.** Two properties this review measured and
 found correct, both of which earlier sessions got wrong: (a) the OIDC callback releases its
