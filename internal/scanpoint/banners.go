@@ -235,5 +235,31 @@ func BuiltinBannerMatches() []enginewire.Match {
 			Service: "mysql", Product: "MySQL",
 			Confidence: ConfProductOnly,
 		},
+
+		// ---- VNC -------------------------------------------------------
+		//
+		// A VNC server greets with the RFB protocol version — `RFB 003.008\n`
+		// — before the client says anything, so it is a banner, not a probe,
+		// and safe mode reaches it. Session 24 measured this greeting arriving
+		// on Metasploitable's 5900 with nothing to match it. The captured
+		// number is the RFB PROTOCOL version, not the server's product version,
+		// so it is `info`: protocol certain, product unknown, a softmatch.
+		{
+			Pattern: `^RFB (?P<info>\d{3}\.\d{3})`,
+			Service: "vnc", Soft: true,
+			Confidence: ConfProtocolOnly,
+		},
+
+		// ---- IRC -------------------------------------------------------
+		//
+		// An ircd sends a `NOTICE AUTH` (or `NOTICE *`) line on connect, before
+		// registration — a banner. Port-scoped because a bare `:host NOTICE`
+		// shape is not unique to IRC, and the ports it runs on are well known.
+		{
+			Pattern: `^:\S+ NOTICE (?:AUTH|\*)`,
+			Service: "irc", Soft: true,
+			Ports:      []uint32{6660, 6661, 6662, 6663, 6664, 6665, 6666, 6667, 6668, 6669, 6697, 7000},
+			Confidence: ConfProtocolOnly,
+		},
 	}
 }

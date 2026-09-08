@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -48,6 +49,7 @@ type AssetServiceResponse struct {
 	Product    string    `json:"product,omitempty"`
 	Version    string    `json:"version,omitempty"`
 	Confidence *float64  `json:"version_confidence,omitempty" doc:"Confidence in the version, when it was inferred rather than read authoritatively. Absent means no version or no confidence recorded."`
+	Method     string    `json:"method,omitempty" doc:"How the identification was learned: banner (volunteered on connect), probe (solicited), tls, none. The provenance behind 'Apache 2.2.8 (banner)'."`
 	LastSeen   time.Time `json:"last_seen"`
 }
 
@@ -60,6 +62,18 @@ type AssetResponse struct {
 	Addresses    []AssetAddressResponse `json:"addresses"`
 	Services     []AssetServiceResponse `json:"services"`
 	OpenFindings int                    `json:"open_findings" doc:"Count of open or confirmed findings on this asset."`
+
+	// OS attribution (ADR-061), the three-state model made visible:
+	//   - distro_family absent            -> no attribution
+	//   - distro_family present, release absent -> FAMILY-ONLY (Ubuntu, no feed;
+	//     a credentialed-follow-up candidate, unmatched for advisories)
+	//   - both present                    -> resolved
+	// os_provenance is which services contributed, agreed and were ignored — the
+	// claim's evidence, so a wrong attribution can be understood on screen.
+	DistroFamily  string          `json:"distro_family,omitempty" doc:"Distribution family from banners (ubuntu, debian, windows). Absent means no OS attribution."`
+	DistroRelease *string         `json:"distro_release,omitempty" doc:"Distro release (ubuntu2204) — the advisory-feed key. Absent with a family present is FAMILY-ONLY: known distribution, no release, unmatched for advisories (ADR-014). Banners never carry it; resolving it is knowledge-pipeline work."`
+	OSConfidence  *float64        `json:"os_confidence,omitempty" doc:"Confidence in the attribution. Non-authoritative — derived from banners, never OS detection."`
+	OSProvenance  json.RawMessage `json:"os_provenance,omitempty" doc:"Which services contributed, agreed and were ignored, with the family each suggested."`
 }
 
 func assetSummary(a *store.Asset) AssetSummary {
@@ -153,6 +167,8 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 		Addresses:    make([]AssetAddressResponse, 0, len(d.Addresses)),
 		Services:     make([]AssetServiceResponse, 0, len(d.Services)),
 		OpenFindings: d.OpenFindings,
+		DistroFamily: d.DistroFamily, DistroRelease: d.DistroRelease,
+		OSConfidence: d.OSConfidence, OSProvenance: d.OSProvenance,
 	}
 	for _, a := range d.Addresses {
 		out.Addresses = append(out.Addresses, AssetAddressResponse{IP: a.IP, MAC: a.MAC, ValidFrom: a.ValidFrom})
@@ -160,7 +176,8 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 	for _, sv := range d.Services {
 		out.Services = append(out.Services, AssetServiceResponse{
 			Port: sv.Port, Protocol: sv.Protocol, Service: sv.Service,
-			Product: sv.Product, Version: sv.Version, Confidence: sv.Confidence, LastSeen: sv.LastSeen,
+			Product: sv.Product, Version: sv.Version, Confidence: sv.Confidence,
+			Method: sv.Method, LastSeen: sv.LastSeen,
 		})
 	}
 	writeJSON(w, r, s.log, http.StatusOK, out)

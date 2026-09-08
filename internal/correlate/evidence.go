@@ -41,11 +41,26 @@ type servicePayload struct {
 	SafetyMode string `json:"safety_mode"`
 	Probe      string `json:"probe"`
 
+	// OS is the non-authoritative platform hint the engine lifted from this
+	// service's banner (ADR-061). Read here at last: the engine wrote it, the
+	// wire carried it, and this struct did not model it — so attribution never
+	// happened and the asset's OS stayed null. That was the fourth write-only-
+	// field instance (phase-session-map §5.6), and it blocked P3.3.
+	OS *osHintPayload `json:"os"`
+
 	// Kept as raw JSON and stored as jsonb, because these are the objects week
 	// 6's rules read and re-encoding them through a partial Go struct would
 	// silently drop whatever this build does not model yet.
 	TLS json.RawMessage `json:"tls"`
 	SSH json.RawMessage `json:"ssh"`
+}
+
+// osHintPayload mirrors the engine's osHint object. Non-authoritative by
+// construction (ADR-014): a banner is a string the host chose to send, so the
+// derived attribution carries a confidence and never claims to be OS detection.
+type osHintPayload struct {
+	Hint   string `json:"hint"`
+	Source string `json:"source"`
 }
 
 // addressed is the minimum any observation carries: which address it is about.

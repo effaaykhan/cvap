@@ -96,6 +96,10 @@ GO_SUITES = [
     "internal/engines/fingerprint/payload_test.go",
     "internal/scanpoint/corpus_test.go",
     "internal/domain/identity_test.go",
+    # OS attribution (B21, ADR-061): the service precedence and the "ignored"
+    # provenance role — one mutation reverses precedence, the other stops a
+    # disagreeing hint being recorded as overruled.
+    "internal/domain/attribution_test.go",
     "internal/rules/evaluators_test.go",
     "internal/control/api/api_read_test.go",
     "internal/control/api/handlers_scan_gate_test.go",

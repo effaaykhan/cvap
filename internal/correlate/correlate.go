@@ -35,6 +35,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -339,6 +340,13 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 			return err
 		}
 
+		// OS attribution from the services just derived (B21, ADR-061): read the
+		// per-service hints, apply the precedence, write family + provenance to
+		// the asset. In the same transaction as the services it is derived from.
+		if err := c.deriveAttribution(ctx, conn, assetID, h); err != nil {
+			return err
+		}
+
 		// Findings, in the SAME transaction: the moment the derived model
 		// changed is the moment to re-judge it, and a finding written against an
 		// asset whose resolution rolled back would reference a row that never
@@ -492,4 +500,57 @@ func orDefault(v, d string) string {
 		return d
 	}
 	return v
+}
+
+// deriveAttribution turns the per-service OS hints into one asset-level
+// attribution and writes it (B21, ADR-061). The DECISION — precedence between
+// services, the three-state outcome, provenance — is domain.AttributeOS; this
+// gathers the evidence and applies the verdict, the same pure/impure split as
+// resolveHost itself. A family-only result (release nil) is written and is
+// distinct from no attribution, which leaves the columns null.
+func (c *Correlator) deriveAttribution(ctx context.Context, conn *store.Conn, assetID uuid.UUID, h host) error {
+	var ev []domain.OSEvidence
+	for _, o := range h.obs {
+		if o.Type != "service" {
+			continue
+		}
+		var p servicePayload
+		if err := json.Unmarshal(o.Payload, &p); err != nil {
+			continue
+		}
+		if p.OS == nil || strings.TrimSpace(p.OS.Hint) == "" {
+			continue
+		}
+		var conf float32
+		if o.Confidence != nil {
+			conf = float32(*o.Confidence)
+		}
+		ev = append(ev, domain.OSEvidence{
+			Service:    normaliseOSService(p.Service),
+			Port:       p.Port,
+			Family:     strings.ToLower(strings.TrimSpace(p.OS.Hint)),
+			Confidence: conf,
+		})
+	}
+	a := domain.AttributeOS(ev)
+	if a.DistroFamily == "" {
+		return nil // no attribution: leave the asset's OS columns null
+	}
+	prov, err := json.Marshal(a.Provenance)
+	if err != nil {
+		return err
+	}
+	return (store.Assets{}).SetAttribution(ctx, conn, assetID, a.DistroFamily, a.DistroRelease, a.Confidence, prov)
+}
+
+// normaliseOSService collapses service names that name the same platform source
+// for attribution — SMB answers as microsoft-ds or netbios-ssn — onto the token
+// the precedence table in domain ranks.
+func normaliseOSService(service string) string {
+	switch service {
+	case "microsoft-ds", "netbios-ssn":
+		return "smb"
+	default:
+		return service
+	}
 }

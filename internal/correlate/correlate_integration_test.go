@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/effaaykhan/cvap/internal/correlate"
+	"github.com/effaaykhan/cvap/internal/domain"
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
@@ -413,3 +414,70 @@ func seedJobAndTask(ctx context.Context, c *store.Conn, scanPointID uuid.UUID) (
 }
 
 func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// TestAttributionLandsOnTheAssetFromABannerHint proves B21's fix for the osHint
+// dead-read (phase-session-map §5.6, ADR-061): a service carrying an OS hint
+// attributes the asset to a distro FAMILY with a NULL release, records the
+// provenance, and lets SSH overrule SMB. The domain test proves the decision;
+// this proves the read and the write actually happen end to end — the half that
+// was missing, which is why the asset OS was always null.
+func TestAttributionLandsOnTheAssetFromABannerHint(t *testing.T) {
+	db := testDB(t)
+	s := seed(t, db, "attr")
+	c := correlate.New(db, quietLogger())
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// SSH says Debian (Metasploitable's `Debian-8ubuntu1` shape); SMB says
+	// Windows and must be overruled by precedence, not dropped.
+	ssh := sshService("10.0.0.9", 22, "SHA256:attr-hostkey")
+	ssh["os"] = map[string]any{"hint": "Debian", "source": "service banner"}
+	s.observe(t, db, now, ssh)
+	s.observe(t, db, now, map[string]any{
+		"address": "10.0.0.9", "port": 445, "protocol": "tcp",
+		"service": "microsoft-ds", "softmatch": true, "method": "probe",
+		"os": map[string]any{"hint": "Windows", "source": "service banner"},
+	})
+
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var family string
+	var release *string
+	var conf *float64
+	var prov []byte
+	if err := db.Read(ctx, s.tenant, func(ctx context.Context, cn *store.Conn) error {
+		return cn.QueryRow(ctx, `SELECT coalesce(distro_family,''), distro_release, os_confidence, os_provenance
+		    FROM assets WHERE tenant_id=$1 LIMIT 1`, s.tenant.UUID()).Scan(&family, &release, &conf, &prov)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if family != "debian" {
+		t.Errorf("distro_family = %q, want debian (SSH overrules SMB)", family)
+	}
+	if release != nil {
+		t.Errorf("distro_release = %q, want NULL — a banner is family-only (ADR-061)", *release)
+	}
+	if conf == nil || *conf < 0.9 {
+		t.Errorf("os_confidence = %v, want the SSH banner's ~0.95", conf)
+	}
+
+	var sources []domain.AttributionSource
+	if err := json.Unmarshal(prov, &sources); err != nil {
+		t.Fatalf("provenance is not the expected shape: %v (%s)", err, prov)
+	}
+	var contributedSSH, ignoredSMB bool
+	for _, x := range sources {
+		if x.Role == domain.RoleContributed && x.Service == "ssh" && x.Family == "debian" {
+			contributedSSH = true
+		}
+		if x.Role == domain.RoleIgnored && x.Service == "smb" && x.Family == "windows" {
+			ignoredSMB = true
+		}
+	}
+	if !contributedSSH || !ignoredSMB {
+		t.Errorf("provenance = %+v; want ssh->debian contributed and smb->windows overruled", sources)
+	}
+}

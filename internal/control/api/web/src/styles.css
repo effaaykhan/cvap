@@ -238,3 +238,13 @@ code { background:var(--surface-2); padding:.06rem .35rem; border-radius:4px; fo
   .who .email { display:none; }
   main { padding:1rem .8rem; }
 }
+
+/* OS attribution (ADR-061): the presentation must make each confidence state
+   look like what it is — an overruled source reads as overruled, a low
+   confidence reads as low, so weak data never passes for strong. */
+.provenance .role-ignored { color: var(--faint); }
+.provenance .role-ignored .data { text-decoration: line-through; text-decoration-color: var(--faint); }
+.conf { font-size: .78rem; }
+.conf-high { color: var(--fg); }
+.conf-medium { color: var(--muted); }
+.conf-low { color: var(--faint); }

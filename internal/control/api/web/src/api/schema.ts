@@ -603,6 +603,10 @@ export interface components {
             addresses: components["schemas"]["AssetAddressResponse"][];
             criticality: string;
             device_type: string;
+            /** @description Distribution family from banners (ubuntu, debian, windows). Absent means no OS attribution. */
+            distro_family?: string;
+            /** @description Distro release (ubuntu2204) — the advisory-feed key. Absent with a family present is FAMILY-ONLY: known distribution, no release, unmatched for advisories (ADR-014). Banners never carry it; resolving it is knowledge-pipeline work. */
+            distro_release?: string | null;
             /** @description Operator-set environment tag. Empty is treated as production by the rules (the safe default). */
             environment: string;
             /** Format: date-time */
@@ -616,7 +620,11 @@ export interface components {
             last_seen: string;
             /** @description Count of open or confirmed findings on this asset. */
             open_findings: number;
+            /** @description Confidence in the attribution. Non-authoritative — derived from banners, never OS detection. */
+            os_confidence?: number | null;
             os_family: string;
+            /** @description Which services contributed, agreed and were ignored, with the family each suggested. */
+            os_provenance?: number[];
             os_version?: string;
             owner?: string;
             services: components["schemas"]["AssetServiceResponse"][];
@@ -625,6 +633,8 @@ export interface components {
         AssetServiceResponse: {
             /** Format: date-time */
             last_seen: string;
+            /** @description How the identification was learned: banner (volunteered on connect), probe (solicited), tls, none. The provenance behind 'Apache 2.2.8 (banner)'. */
+            method?: string;
             port: number;
             product?: string;
             protocol: string;

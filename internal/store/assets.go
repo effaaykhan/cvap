@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -234,6 +235,28 @@ func (Assets) SetFragile(ctx context.Context, c *Conn, id uuid.UUID, fragile boo
 	return nil
 }
 
+// SetAttribution writes the OS attribution B21 derived (ADR-061). A nil
+// distroRelease is the FAMILY-ONLY state — a distinct, real outcome — so it is
+// stored as SQL NULL rather than coerced to a family the banner did not carry.
+// provenance is the JSON chain of which services contributed, agreed and were
+// ignored, cast to jsonb ($6::jsonb) so a []byte reaches the column as JSON
+// rather than bytea.
+func (Assets) SetAttribution(ctx context.Context, c *Conn, id uuid.UUID, distroFamily string, distroRelease *string, confidence float32, provenance []byte) error {
+	const q = `UPDATE assets
+	     SET distro_family = nullif($3,''), distro_release = $4,
+	         os_confidence = $5, os_provenance = $6::jsonb
+	   WHERE tenant_id = $1 AND asset_id = $2`
+
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), id, distroFamily, distroRelease, confidence, string(provenance))
+	if err != nil {
+		return mapError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ============================================================================
 // Asset detail (session 18): the base row plus its current addresses and
 // services, for the operator UI's asset view.
@@ -256,6 +279,7 @@ type AssetService struct {
 	Product    string
 	Version    string
 	Confidence *float64 // nil when the version was not inferred with a confidence
+	Method     string   // banner, probe, tls, ... — how the identification was learned
 	LastSeen   time.Time
 }
 
@@ -265,6 +289,15 @@ type AssetDetail struct {
 	Addresses    []AssetAddress
 	Services     []AssetService
 	OpenFindings int
+
+	// OS attribution (ADR-061). DistroFamily "" is no attribution; DistroFamily
+	// set with DistroRelease nil is family-only ("Ubuntu, no feed"); both set is
+	// resolved. OSProvenance is the chain of which services contributed, agreed
+	// and were ignored — a claim's evidence, reachable on the asset page.
+	DistroFamily  string
+	DistroRelease *string
+	OSConfidence  *float64
+	OSProvenance  json.RawMessage
 }
 
 // GetDetail returns the full asset view, or ErrNotFound (also what a
@@ -301,7 +334,7 @@ func (Assets) GetDetail(ctx context.Context, c *Conn, id uuid.UUID) (*AssetDetai
 
 	const svcQ = `
 		SELECT port, protocol, coalesce(service_name,''), coalesce(product,''),
-		       coalesce(version,''), version_confidence, last_seen
+		       coalesce(version,''), version_confidence, coalesce(identification_method,''), last_seen
 		  FROM services
 		 WHERE tenant_id = $1 AND asset_id = $2
 		 ORDER BY port, protocol`
@@ -312,7 +345,7 @@ func (Assets) GetDetail(ctx context.Context, c *Conn, id uuid.UUID) (*AssetDetai
 	for srows.Next() {
 		var s AssetService
 		if err := srows.Scan(&s.Port, &s.Protocol, &s.Service, &s.Product,
-			&s.Version, &s.Confidence, &s.LastSeen); err != nil {
+			&s.Version, &s.Confidence, &s.Method, &s.LastSeen); err != nil {
 			srows.Close()
 			return nil, mapError(err)
 		}
@@ -328,6 +361,14 @@ func (Assets) GetDetail(ctx context.Context, c *Conn, id uuid.UUID) (*AssetDetai
 		SELECT count(*) FROM findings
 		 WHERE tenant_id = $1 AND asset_id = $2 AND status IN ('open','confirmed')`
 	if err := c.QueryRow(ctx, cntQ, c.Tenant().UUID(), id).Scan(&d.OpenFindings); err != nil {
+		return nil, mapError(err)
+	}
+
+	const osQ = `
+		SELECT coalesce(distro_family,''), distro_release, os_confidence, os_provenance
+		  FROM assets WHERE tenant_id = $1 AND asset_id = $2`
+	if err := c.QueryRow(ctx, osQ, c.Tenant().UUID(), id).
+		Scan(&d.DistroFamily, &d.DistroRelease, &d.OSConfidence, &d.OSProvenance); err != nil {
 		return nil, mapError(err)
 	}
 	return d, nil
