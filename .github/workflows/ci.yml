@@ -50,6 +50,19 @@ jobs:
       - name: Test
         run: go test ./... -race
 
+      # The version-comparator oracle differential (ADR-062): compare our dpkg/rpm
+      # comparators against the distributions' OWN libraries. dpkg is native on the
+      # runner; python3-rpm provides librpm. CVAP_REQUIRE_VERCMP_ORACLE=1 turns the
+      # "tool absent" skip into a failure, so here the differential MUST run — the
+      # same shape as CVAP_REQUIRE_LAB. A silent-false-negative comparator is the
+      # one bug this product cannot detect in itself, so its validation is a gate,
+      # not opportunistic.
+      - name: Version comparator oracle (dpkg + librpm differential)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg rpm python3-rpm
+          CVAP_REQUIRE_VERCMP_ORACLE=1 go test ./internal/version/ -run Oracle -count=1 -v
+
   proto:
     name: Wire contract
     runs-on: ubuntu-latest

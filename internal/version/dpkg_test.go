@@ -2,30 +2,10 @@ package version
 
 import "testing"
 
-// mutate:subject internal/version/dpkg.go
-// mutate:test    ./internal/version/ -run TestCompareDpkg
-//
-// mutate:case    the tilde loses its special rank, so a pre-release (1.0~rc1)
-//                sorts ABOVE the release instead of below it
-// mutate:old     case c == '~':
-// mutate:new     case c == '\a':
-//
-// mutate:case    the numeric first-difference is inverted, reversing which of two
-//                equal-length digit runs is larger (1.0.10 vs 1.0.9)
-// mutate:old     firstDiff = int(a[i]) - int(b[j])
-// mutate:new     firstDiff = int(b[j]) - int(a[i])
-//
-// Both are the silent-false-negative shape ADR-014 warns of — a comparator wrong
-// on tildes or numeric order judges a vulnerable package safe. The tilde and
-// numeric cases in the ordering corpus kill them.
-
-// The dpkg comparison corpus: labelled orderings that MUST hold (ADR-059 P3.1,
-// ADR-014). This is the gate — a comparator that only asserts "it runs" or "it is
-// transitive" passes while being wrong on epochs or tildes, and a wrong dpkg
-// comparison is a SILENT false negative (a vulnerable package judged safe), the
-// worst failure a scanner has. So the cases name the orderings, drawn from
-// Debian's own dpkg test suite (t-versions) plus the real backport strings this
-// session measured.
+// A small hand-written sanity set — quick, readable local signal. It is NOT the
+// gate: the gate is the vendored, independent corpora in corpora_test.go (the
+// distributions' own test data) and the oracle differential in oracle_test.go.
+// The mutation declarations live beside the corpus tests they are killed by.
 //
 // Each case is {a, b, want} where want is -1 (a<b), 0 (a==b), 1 (a>b). Every case
 // is also asserted in reverse (b vs a must give -want) and reflexively (a==a),
@@ -75,58 +55,6 @@ var dpkgOrderings = []struct {
 	// ---- leading zeros in a numeric segment are not significant ----
 	{"1.007", "1.7", 0},
 	{"1.0", "1.00", 0},
-}
-
-// debianVectors is transcribed from dpkg's own test suite (t-versions /
-// Dpkg::Version tests) — TRANSCRIBED, not fetched (no network here), and labelled
-// as such the same way the rpm corpus is. Distinct from dpkgOrderings above,
-// which are this project's own cases; these are Debian's, so a divergence between
-// the two would surface a disagreement rather than a shared assumption.
-var debianVectors = []struct {
-	a, b string
-	want int
-}{
-	{"1.0-1", "1.0-2", -1},
-	{"1.0-1", "1.0", 1},
-	{"1.0", "1.0-1", -1},
-	{"1.0~rc1", "1.0", -1},
-	{"1.0~rc1", "1.0~rc2", -1},
-	{"1.0~rc1~git1", "1.0~rc1", -1},
-	{"1:1.0", "2.0", 1}, // epoch dominates a larger upstream
-	{"1:0", "2:0", -1},  // higher epoch wins
-	{"2.0", "2.1", -1},
-	{"1.2.3", "1.2.3", 0},
-	{"1.0", "1.00", 0}, // trailing zero in a numeric segment is not significant
-	{"0", "00", 0},
-	{"1", "2", -1},
-	{"1.0.0", "1.0", 1},
-	{"1a", "1", 1}, // a letter after the number sorts above the bare number
-	{"1a", "1b", -1},
-	{"1.0+nmu1", "1.0", 1},
-	{"1.0", "1.0+b1", -1},
-	{"3.0-1", "3.0-1", 0},
-	{"1:2.3-1", "1:2.3-2", -1},
-}
-
-func TestCompareDpkgAgainstDebianCorpus(t *testing.T) {
-	pass, fail := 0, 0
-	for _, c := range debianVectors {
-		ok := true
-		if got := CompareDpkg(c.a, c.b); got != c.want {
-			t.Errorf("CompareDpkg(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
-			ok = false
-		}
-		if got := CompareDpkg(c.b, c.a); got != -c.want {
-			t.Errorf("CompareDpkg(%q, %q) = %d, want %d (reverse)", c.b, c.a, got, -c.want)
-			ok = false
-		}
-		if ok {
-			pass++
-		} else {
-			fail++
-		}
-	}
-	t.Logf("Debian dpkg corpus: %d/%d cases pass", pass, pass+fail)
 }
 
 // TestBackportIsNewerThanUpstream is the ADR-014 case, with the real strings this

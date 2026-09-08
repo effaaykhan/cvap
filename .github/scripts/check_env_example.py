@@ -48,6 +48,11 @@ ALLOWED_UNDOCUMENTED: dict[str, str] = {
     # Set by the test harness and CI, never by a developer's .env. Documenting
     # it would imply the app reads it, which it does not.
     "CVAP_TEST_DATABASE_URL": "set by CI and the test harness, not by .env",
+    # Set by CI (and a developer running the oracle deliberately) to make the
+    # version-comparator differential against dpkg/librpm fatal when the tool is
+    # absent — same shape as CVAP_REQUIRE_LAB. Read only by a _test.go, never by
+    # the app, so documenting it in env.example would imply the app reads it.
+    "CVAP_REQUIRE_VERCMP_ORACLE": "set by CI/the test harness to require the vercmp oracle, not by .env",
     # Standard libpq and Docker variables the tooling passes through.
     "PGPASSWORD": "libpq, passed explicitly by tooling",
     "PGOPTIONS": "libpq, passed explicitly by tooling",

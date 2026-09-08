@@ -103,8 +103,7 @@ GO_SUITES = [
     # P3.1 version comparators (ADR-059 P3.1, ADR-014). dpkg semantics — the
     # tilde ordering and numeric comparison, the two subtlest bits, each mutated;
     # a wrong dpkg compare is a silent false negative.
-    "internal/version/dpkg_test.go",
-    "internal/version/rpm_test.go",
+    "internal/version/corpora_test.go",
     "internal/rules/evaluators_test.go",
     "internal/control/api/api_read_test.go",
     "internal/control/api/handlers_scan_gate_test.go",

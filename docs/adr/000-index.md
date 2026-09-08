@@ -70,3 +70,4 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 059 | Phase 3 sequences comparators → advisories → KEV/EPSS → NVD, behind a real-network validation; OS attribution gates matching | Accepted (§P3.3 superseded by ADR-060) |
 | 060 | P3.3's OS-attribution entry condition, measured against a real host and failed; P3.3 blocked on B21+B22 (supersedes ADR-059 §P3.3) | Accepted |
 | 061 | Unauthenticated OS attribution — family, nullable release, confidence, provenance; a reviewable service precedence (B21) | Accepted |
+| 062 | Version comparators validated against the distributions' own corpora + a live library oracle differential; Go authoritative over SQL (P3.1) | Accepted |
