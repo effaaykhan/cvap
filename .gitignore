@@ -28,6 +28,12 @@ venv/
 *.key
 *.p12
 /secrets/
+# The WHOLE deploy/secrets/ directory, not deploy/secrets/*.key. Ignoring only
+# key files was correct until a public cert (ca.crt) landed there uncommitted and
+# a `git add -A` would have taken it: a rule that names the extensions it knows
+# about lets the next artifact through. The directory holds nothing that belongs
+# in the repo, so ignore all of it.
+deploy/secrets/
 
 # lab artifacts
 /lab/captures/
