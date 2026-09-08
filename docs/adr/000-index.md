@@ -67,4 +67,5 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 056 | A fault worth testing is one the deployed binary can experience (the §6.4 fault matrix) | Accepted |
 | 057 | Credential zeroisation is immediate and independent of submission (derive-before-zeroise) | Accepted |
 | 058 | The load test enforces a coarse ceiling in CI and the precise SLO locally (no exposure overshoot) | Accepted |
-| 059 | Phase 3 sequences comparators → advisories → KEV/EPSS → NVD, behind a real-network validation; OS attribution gates matching | Accepted |
+| 059 | Phase 3 sequences comparators → advisories → KEV/EPSS → NVD, behind a real-network validation; OS attribution gates matching | Accepted (§P3.3 superseded by ADR-060) |
+| 060 | P3.3's OS-attribution entry condition, measured against a real host and failed; P3.3 blocked on B21+B22 (supersedes ADR-059 §P3.3) | Accepted |

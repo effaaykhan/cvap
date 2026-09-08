@@ -21,7 +21,8 @@ agent memory until now.
 | Phase 0 — contracts & foundation | Week 1 (§4) | 1–4 | complete |
 | Phase 1 — control plane, scan-point protocol | Weeks 2–3 | 5–11 | complete |
 | Phase 2 — discovery, fingerprint, resolution, findings, UI, hardening | Weeks 4–8 | 12–23 | **complete (this session closes it)** |
-| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 24+ | sequenced (ADR-059); S24 = real-network validation, before P3.1 |
+| Phase 2 validation — real-network accuracy | S24 | 24 | done; P3.3 entry condition measured & **failed** (ADR-060) |
+| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25+ | sequenced (ADR-059); **blocked** on B21 (attribution) + B22 (version extraction) before P3.3 (ADR-060); safe-mode design validated (S24) |
 
 Weeks and sessions are not one-to-one. The eight-week plan assumed a team; this
 build is sequential under one operator with Claude Code, so a "week" of the plan
@@ -118,6 +119,30 @@ plan predicted exactly this).
   dev-CA validity; require `--domain` at bootstrap and an audited `tenant
   set-domain`. **Then this close-out — docs and Phase 3 sequencing, no feature
   code.**
+- **S24 — Phase 2 real-network validation** (owned machines, `192.168.93.0/24`,
+  safe mode). First accuracy measurement against hosts not built to be found.
+  **Found, and named rather than smoothed over:**
+  - **Discovery is TCP-connect-only** (ARP/ICMP/SYN deferred, need `CAP_NET_RAW`),
+    so a default-firewalled Windows host reads as *down* and a `/24` sweep blocks in
+    `connect()` on dropped SYNs — the lab's 100% recall is partly an artifact of
+    lossless, firewall-free containers.
+  - **OS attribution fails P3.3's entry condition (ADR-060).** Against Metasploitable
+    (Ubuntu 8.04), asset OS is `null`; the only hint was a wrong-distro `Debian`
+    (from `Debian-8ubuntu1`), no release, unpromoted — despite banners stating Ubuntu
+    three times. Blocked on **B21** (attribution → release + promote) and **B22**
+    (version extraction). `osHint` is §5.6's fourth instance.
+  - **Service ID ~26%** on Metasploitable (6/23 ports): FTP/SSH/SMTP/MySQL hit;
+    **HTTP/Apache, SMB/Samba, VNC, PostgreSQL, NFS, RPC, IRC, X11, AJP, RMI, distcc,
+    r-services** all `method:none` — ~14 corpus gaps, each a Phase-3 input.
+  - **Two lifecycle findings:** scans stay `running` after all jobs finish; dead
+    addresses become assets (252 phantom assets from the `/24` sweep).
+  - **★ Safety held under the most adversarial conditions available.** Scanning ~15
+    deliberately-exploitable Metasploitable services, the scanner sent **zero payload
+    probes and zero authentication attempts** — every observation was `method:
+    banner` (read) or `none`, `safety_mode=safe` throughout. ADR-021's
+    detection-not-exploitation line held against a host built to punish crossing it.
+    This is the strongest evidence to date that the safe-mode design works: a scan of
+    Metasploitable extracted only what the services *volunteered*.
 
 ---
 
@@ -292,6 +317,46 @@ drawn from a registry (rules, probes, corpus entries, migrations), make the
 registry membership drive a manifest the build checks for completeness, and report
 the denominator alongside the rate. A rate whose denominator is not printed is a
 rate whose denominator will drift unnoticed.
+
+### 5.6 A field written, carried, stored, and read by nobody
+
+A field the producer sets, the wire carries, the database stores — and no consumer
+ever reads. It is not dead code (it is written, so a compiler and an unused-var
+linter both see it live) and not a wrong value (the value is fine); it is **data
+with no reader**, which looks identical to working data until something depends on
+it. Four instances in CVAP:
+
+1. **`Kind`** — a job/probe kind set and carried but never branched on.
+2. **The ICMP path** — a discovery code path present and reachable but producing
+   nothing any consumer used.
+3. **`internal_reachable`** — the authoritative exposure column written nowhere and
+   read by a path that answered from `zone_type` instead ([[two-writers-one-fact]],
+   §5.2 — the same defect seen from the write side).
+4. **`osHint` (S24) — the one that blocked a phase.** The fingerprint engine
+   produces an OS hint, it is serialized, stored in the observation payload, and
+   read by no derivation: the asset's `os_family` stays `null` even when the hint
+   exists. Because nobody reads it, P3.3's entry condition — which needs the OS on
+   the asset — fails, and the failure was invisible until measured against a real
+   host (ADR-060).
+
+**Why it is its own pattern:** every layer looks correct in isolation — the field
+is set, tagged, transmitted, persisted — so every single-layer test passes. The
+defect lives in the *absence* of a consumer, which no layer's own test can see.
+
+**How to apply — and the limit of the cheap check.** The reflection test that
+caught `osHint`'s missing JSON tags asserts the *producer* side: a field present in
+the struct is serializable. Extending it to the *consumer* side — "a field present
+in the payload that no code path reads" — **is not tractable as a reflection test**,
+and the reason is worth stating so it is not attempted as one: the read happens in a
+different component, across a serialization boundary, out of a dynamically-typed
+`jsonb` payload. Reflection sees the struct's shape, not who consumes the decoded
+value one process away, and a `jsonb` read is not a struct-field access any static
+pass can attribute. The tractable form is not static but **end-to-end**: for each
+field a producer emits, an integration test that feeds an observation carrying it
+and asserts the derived asset or finding *surfaces* it — the §5.5 presence assertion
+applied to fields rather than to corpus entries. That would have caught `osHint`:
+"a fingerprint OS hint produces a non-null `os_family`" is a one-case test, and it
+fails today.
 
 ---
 
