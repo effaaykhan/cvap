@@ -143,6 +143,43 @@ plan predicted exactly this).
     detection-not-exploitation line held against a host built to punish crossing it.
     This is the strongest evidence to date that the safe-mode design works: a scan of
     Metasploitable extracted only what the services *volunteered*.
+- **S26 — P3.3 prerequisites: B21 (OS attribution) + B22 (safe-mode banner
+  patterns)** (ADR-060/061). The buildable safe-mode half of P3.3's entry
+  conditions. (The operator numbers the S24 validation as session 25; this is
+  session 26 — a +1 offset from an uncounted session.)
+  - **B21 — the osHint dead-read (§5.6) fixed end to end.** `domain.AttributeOS`
+    (three-state model, reviewable precedence, provenance) → correlate reads the
+    hint and writes it to the asset. Measured live on Metasploitable: the `.129`
+    asset now carries `distro_family=debian, distro_release=null (family-only),
+    confidence 0.95`, provenance `[ssh:22 → debian, contributed]`. Before this
+    session it was null. **The family is WRONG (it is Ubuntu):** the SSH package
+    string `Debian-8ubuntu1` matches the Debian pattern and the `8ubuntu1` suffix
+    — plus `(Ubuntu)` in SMTP and `3ubuntu5` in MySQL — is ignored. Not tuned away
+    this session; it is the clean follow-up (B24). Release correctly null — no
+    fabrication.
+  - **B22 — service identification on Metasploitable, recorded with the
+    distinction the corpus gate exists to preserve.** Two numbers, and the second
+    is NOT a claim about an unseen host:
+    - **6/11 blind** — what the pre-session banner set identifies (vsftpd 2.3.4,
+      OpenSSH 4.7p1, telnet, Postfix, ProFTPD 1.3.1, MySQL 5.0.51a).
+    - **7/11 after this session's VNC pattern fired** (RFB greeting → vnc). The
+      "8th", IRC, has a pattern that **did not match** this host's 6667 banner — a
+      pattern *present* is not a pattern *exercised*, and recording it as 8 would
+      erase exactly that difference (§5.5).
+    - The other 4 (DNS, HTTP, SMB, PostgreSQL) are probe-gated — unreachable in
+      safe mode by design, not a corpus gap.
+    - **These are counts against ONE real host, with patterns that match it — a
+      data point, not the generalizable service-ID accuracy the golden-corpus gate
+      measures against labelled hosts.** The two must never be conflated.
+  - **Dashboard shipped this session** (standing requirement): the asset detail
+    view renders the attribution, a **"How the OS was concluded"** provenance table
+    (which services *contributed*, *agreed*, were *overruled* — the agreed/ignored
+    roles exercised when several services carry hints, as the correlate test
+    proves), and service rows read "vsftpd 2.3.4 (banner, high)". A claim's
+    evidence is reachable on screen, the same rule findings follow.
+  - **P3.3 stays blocked (ADR-060):** attribution reaches family-only (and here the
+    wrong family), never a release. B24 (Debian-vs-Ubuntu + use the SMTP/MySQL
+    Ubuntu signals) and B25 (package→release map) are the two follow-ups.
 
 ---
 
