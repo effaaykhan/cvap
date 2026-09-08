@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/effaaykhan/cvap/internal/control/api"
 	"github.com/effaaykhan/cvap/internal/store"
@@ -216,6 +218,63 @@ func TestExposureCountsDistinctFindingsPerZone(t *testing.T) {
 	}
 }
 
+// TestKnowledgeFreshnessReportsComputedState — the endpoint returns the STATE the
+// server computed against each feed's own threshold, not a raw timestamp for the
+// UI to judge. Knowledge tables are global (ADR-030), so the seeded feeds are
+// visible under any tenant; the state is what proves the surface answers the
+// question rather than deferring it to the panel.
+func TestKnowledgeFreshnessReportsComputedState(t *testing.T) {
+	importURL := os.Getenv("KNOWLEDGE_IMPORT_DATABASE_URL")
+	if importURL == "" {
+		t.Skip("KNOWLEDGE_IMPORT_DATABASE_URL not set; skipping freshness surface test (needs the cvap_knowledge_import role)")
+	}
+	f := newFixture(t, `{"finding.read": true}`)
+	cookies, csrf := f.login(t)
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, importURL)
+	if err != nil {
+		t.Fatalf("connect as import role: %v", err)
+	}
+	defer pool.Close()
+
+	current := "api-current-" + uuid.NewString()[:8]
+	stale := "api-stale-" + uuid.NewString()[:8]
+	for feed, fetched := range map[string]string{
+		current: "now() - interval '1 hour'",
+		stale:   "now() - interval '60 days'",
+	} {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO knowledge_feed_status (feed, source_url, last_fetched_at, advisory_count, staleness_threshold)
+			 VALUES ($1, 'https://example.test/'||$1, `+fetched+`, 3, interval '7 days')`, feed); err != nil {
+			t.Fatalf("seed feed %s: %v", feed, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM knowledge_feed_status WHERE feed = ANY($1)`,
+			[]string{current, stale})
+	})
+
+	w := f.do(t, http.MethodGet, "/v1/knowledge/freshness", nil, cookies, csrf)
+	if w.Code != http.StatusOK {
+		t.Fatalf("freshness: %d %s", w.Code, w.Body.String())
+	}
+	var resp api.KnowledgeFreshnessResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]string{}
+	for _, feed := range resp.Feeds {
+		states[feed.Feed] = feed.State
+	}
+	if states[current] != "current" {
+		t.Errorf("feed %s: state = %q, want current", current, states[current])
+	}
+	if states[stale] != "stale" {
+		t.Errorf("feed %s: state = %q, want stale (fetched 60 days ago against a 7-day threshold)", stale, states[stale])
+	}
+}
+
 // TestReadEndpointsRequireTheirPermission — a session with no read permission is
 // refused on every read route, server-side. The UI reflects RBAC; this is the
 // check that actually holds.
@@ -230,6 +289,7 @@ func TestReadEndpointsRequireTheirPermission(t *testing.T) {
 		"/v1/findings",
 		"/v1/findings/" + sf.findingID.String(),
 		"/v1/exposure",
+		"/v1/knowledge/freshness",
 		"/v1/findings.csv",
 		"/v1/assets.csv",
 	} {

@@ -181,6 +181,56 @@ plan predicted exactly this).
     wrong family), never a release. B24 (Debian-vs-Ubuntu + use the SMTP/MySQL
     Ubuntu signals) and B25 (package→release map) are the two follow-ups.
 
+### Phase 3 — matching
+
+- **S27 — P3.1 version comparators** (ADR-062). `internal/version`: `CompareDpkg`
+  (dpkg `verrevcmp` — epoch, `~` ordering, numeric-vs-lexical) and `CompareRPM`
+  (rpm `rpmvercmp` — tilde, caret, numeric-outranks-alpha), plus `AffectedRange`
+  and the operator forms. **Validated against the distributions' OWN corpora**
+  (vendored `rpmvercmp.at` and `Dpkg_Version.t`, with `PROVENANCE.md`) so a pass
+  is the comparator agreeing with dpkg/rpm's own test data, not with ours; and a
+  **live library oracle differential** (`CVAP_REQUIRE_VERCMP_ORACLE`) against
+  `dpkg --compare-versions` and librpm. Go is authoritative over SQL (SQL text
+  order disagrees on the tilde). A zero-case parse **fails** (§5.5). **Found (all
+  gate-before-push):** an errorlint `As` conversion, a staticcheck `QF1001`, a
+  two-`mutate:test` bug that ran every mutation against the last test only (fixed
+  to one `-run TestDpkgCorpus|TestRPMCorpus`), and `internal/correlate` +
+  `internal/version` silently absent from `DB_TEST_PKGS`.
+- **S28 (this session) — P3.2 vendor advisory ingestion, the matching authority**
+  (ADR-014, ADR-019, ADR-030, ADR-063). **USN only, deliberately** — RHSA fails
+  differently (OVAL/CSAF, per-stream, NEVRA) and building both would compromise the
+  first parser's fetch/pack/import boundary; rpm stays proved-in-corpus but not
+  proved-in-situ (**B26**, RHSA + a real rpm host as unblocker).
+  - **The pipeline** (`knowledge/usn_ingest.py`): `fetch` (online → an advisory
+    PACK with provenance: feed, URL, fetched-at, ETag) and `import` (offline,
+    idempotent, ADR-019 air-gap path) as **separable** steps. Hostile input is
+    **refused, not truncated** — `MAX_FEED_BYTES=64MB`, bounded fields — because a
+    partial import is a silent false negative, the exact failure P3.1 was ordered
+    first to avoid. Import is injection-safe: CSV + `\copy` into TEMP staging, never
+    string-built SQL from feed content.
+  - **The write role** (`cvap_knowledge_import`, migration 0034, ADR-063):
+    ADR-030's read-only argument stated from the writing side — the role that can
+    write detection content is the highest-value identity, so it is scoped to
+    exactly the five knowledge tables and, asserted in the migration, never
+    BYPASSRLS/SUPERUSER. `TestAppRoleCannotWriteKnowledge` asserts the negative
+    (cvap_app refused an advisory INSERT).
+  - **★ Acceptance — a real advisory decides a real host, in situ.** USN-1467-1
+    (CVE-2012-2122, MySQL auth-bypass), hardy `mysql-dfsg-5.0` fixed
+    `5.0.96-0ubuntu3`, ingested from the live USN feed, stored `comparator='dpkg'`.
+    `TestAdvisoryMatchInSitu` reads it as cvap_app and — with the comparator the
+    ROW names, not one the code assumes — judges Metasploitable's **measured**
+    `5.0.51a-3ubuntu5` **vulnerable=true**, while the exact fixed revision and a
+    newer one are cleared (the ADR-014 backport case). SQL narrows `(release,
+    package)`; Go decides the version relation (ADR-062).
+  - **Dashboard shipped this session** (standing requirement): a knowledge-freshness
+    panel where **"stale" is a state the API computes**, not a timestamp the operator
+    eyeballs — the threshold lives in `knowledge_feed_status.staleness_threshold`
+    (in the data), the store's `FeedFreshnessAll` returns `current`/`stale`/`never`,
+    and the panel renders the word. Same argument as the exposure count.
+  - **Hardy coverage resolved a session-29 concern favorably:** USN covers Ubuntu
+    8.04 (537 notices), so Metasploitable — the only real host in scope — can be
+    matched end-to-end. A real rpm host is still needed for B26.
+
 ---
 
 ## 3. Artifact inventory (as of S23)

@@ -11,7 +11,7 @@
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
         env-check app-role store-test e2e dev-ca gosec mutate \
         contract-guard-test fmt-check tidy-check govulncheck db-gates db-reachable \
-        safety-sabotage adr-index ci-parity \
+        safety-sabotage adr-index ci-parity knowledge-usn \
         ui ui-deps ui-types ui-verify ui-typecheck ui-test ui-build embedui-build
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
@@ -507,7 +507,9 @@ DB_TEST_PKGS = ./internal/store/... ./internal/control/... ./internal/dispatch/.
 
 store-test: ## Run the database-backed suites against the dev database as the application role
 	@test -n "$(APP_DATABASE_URL)" || { echo "APP_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
-	CVAP_TEST_DATABASE_URL="$(APP_DATABASE_URL)" go test $(DB_TEST_PKGS) -count=1 $(GOTEST_FLAGS)
+	CVAP_TEST_DATABASE_URL="$(APP_DATABASE_URL)" \
+	KNOWLEDGE_IMPORT_DATABASE_URL="$(KNOWLEDGE_IMPORT_DATABASE_URL)" \
+	go test $(DB_TEST_PKGS) -count=1 $(GOTEST_FLAGS)
 
 loadtest: ## 10k-asset load test against the §5 SLOs. Coarse ceiling always; precise SLO only with CVAP_RUN_LOADTEST=1
 	@test -n "$(APP_DATABASE_URL)" || { echo "APP_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
@@ -597,6 +599,22 @@ safety-sabotage: ## Prove each safety case can fail INDEPENDENTLY
 
 corpus-check: ## Golden corpus: label checks always; scan-and-diff metrics when the lab is up
 	python3 .github/scripts/corpus_check.py
+
+# Vendor advisory ingestion (P3.2, ADR-014/019/063). Two separable steps so the
+# import can run air-gapped: fetch (online) writes an advisory PACK with
+# provenance; import (offline, idempotent) upserts it into the knowledge tables as
+# cvap_knowledge_import. This target runs both against the dev DB for a single
+# release; on a schedule it is a cron calling `fetch` where there is a network and
+# `import` where the database is, carrying the pack between them. RELEASE defaults
+# to the only real host in scope (Metasploitable, Ubuntu 8.04 "hardy").
+KNOWLEDGE_PACK ?= /tmp/cvap-usn-$(KNOWLEDGE_RELEASE).json
+KNOWLEDGE_RELEASE ?= hardy
+knowledge-usn: ## Ingest Ubuntu USN advisories: make knowledge-usn KNOWLEDGE_RELEASE=jammy [PACKAGE=openssl LIMIT=20]
+	@test -n "$(KNOWLEDGE_IMPORT_DATABASE_URL)" || { echo "KNOWLEDGE_IMPORT_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
+	python3 knowledge/usn_ingest.py fetch --release "$(KNOWLEDGE_RELEASE)" \
+		$(if $(PACKAGE),--package "$(PACKAGE)") --limit $(if $(LIMIT),$(LIMIT),20) --out "$(KNOWLEDGE_PACK)"
+	KNOWLEDGE_IMPORT_DATABASE_URL="$(KNOWLEDGE_IMPORT_DATABASE_URL)" \
+		python3 knowledge/usn_ingest.py import --pack "$(KNOWLEDGE_PACK)"
 
 frontmatter: ## Validate .claude agent and skill frontmatter
 	python3 .github/scripts/check_frontmatter.py

@@ -55,3 +55,42 @@ BEGIN
     RAISE NOTICE 'cvap_app_login ready: inherits cvap_app, holds neither BYPASSRLS nor SUPERUSER';
 END
 $$;
+
+-- ---------------------------------------------------------------------------
+-- cvap_knowledge_import_login: the DEV/CI login member of cvap_knowledge_import
+-- (migration 0034, ADR-063), which the advisory ingestion importer connects as.
+-- Separate from cvap_app_login on purpose: cvap_app must never gain write access
+-- to knowledge tables (ADR-030), so the importer is a distinct identity, and its
+-- BYPASSRLS/SUPERUSER are checked in their own right (attributes are not
+-- inherited through membership).
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cvap_knowledge_import_login') THEN
+        CREATE ROLE cvap_knowledge_import_login LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE
+            PASSWORD 'cvap_dev_only_import_password';
+    ELSE
+        ALTER ROLE cvap_knowledge_import_login LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE
+            PASSWORD 'cvap_dev_only_import_password';
+    END IF;
+END
+$$;
+
+GRANT cvap_knowledge_import TO cvap_knowledge_import_login;
+GRANT CONNECT ON DATABASE cvap TO cvap_knowledge_import_login;
+GRANT USAGE ON SCHEMA public TO cvap_knowledge_import_login;
+
+DO $$
+DECLARE r record;
+BEGIN
+    SELECT rolbypassrls, rolsuper, rolinherit INTO r
+      FROM pg_roles WHERE rolname = 'cvap_knowledge_import_login';
+    IF r.rolbypassrls OR r.rolsuper THEN
+        RAISE EXCEPTION 'cvap_knowledge_import_login holds BYPASSRLS or SUPERUSER (ADR-063).';
+    END IF;
+    IF NOT r.rolinherit THEN
+        RAISE EXCEPTION 'cvap_knowledge_import_login does not inherit, so it gets none of cvap_knowledge_import''s grants.';
+    END IF;
+    RAISE NOTICE 'cvap_knowledge_import_login ready: inherits cvap_knowledge_import, writes only knowledge tables';
+END
+$$;

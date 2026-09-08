@@ -140,7 +140,10 @@ def referenced() -> dict[str, set[str]]:
         # Variables make defines itself.
         builtin = {"MAKEFILE_LIST", "MAKEFLAGS", "MAKECMDGOALS", "CURDIR", "MAKE", "SHELL"}
         # Passed on the command line (make migrate-new NAME=x), not from .env.
-        cli_args = {"NAME", "PROTO_BASELINE"}
+        # LIMIT/PACKAGE are optional overrides for `make knowledge-usn` (the USN
+        # ingestion); RELEASE-shaped inputs there carry ?= defaults so are already
+        # in `assigned`.
+        cli_args = {"NAME", "PROTO_BASELINE", "LIMIT", "PACKAGE"}
         for m in re.finditer(rf"\$\(({VAR})\)", text):
             name = m.group(1)
             if name in assigned or name in builtin or name in cli_args:

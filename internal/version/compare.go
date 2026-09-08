@@ -10,6 +10,25 @@ const (
 	SchemeRPM                // RHEL, Fedora, SUSE, Amazon, and derivatives
 )
 
+// SchemeByName maps the comparator name a stored advisory row carries
+// (advisory_fixed_packages.comparator, the version_comparator enum) to the
+// Scheme the matcher must use. The name travels with the data because the feed
+// that wrote the row is the only thing that knows which family the version is —
+// a dpkg version compared with rpm rules is silently wrong (ADR-014, ADR-062).
+// The bool is false for an unknown name: the matcher must refuse to guess a
+// comparator rather than default to one, because a wrong default is a wrong
+// verdict that looks right.
+func SchemeByName(name string) (Scheme, bool) {
+	switch name {
+	case "dpkg":
+		return SchemeDpkg, true
+	case "rpm":
+		return SchemeRPM, true
+	default:
+		return 0, false
+	}
+}
+
 // Compare dispatches to the scheme's comparator and returns -1, 0 or +1.
 func Compare(s Scheme, a, b string) int {
 	if s == SchemeRPM {

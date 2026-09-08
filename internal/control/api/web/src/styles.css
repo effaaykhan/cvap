@@ -129,6 +129,18 @@ tr.frow-info     td:first-child::before { width:2px; background:var(--sev-info);
 .sev-medium   { color:var(--sev-medium); }
 .sev-low      { color:var(--sev-low); }
 .sev-info     { color:var(--sev-info); }
+/* Knowledge-feed freshness: the server's computed state, as a tinted chip. The
+   colour is the verdict — current is fine, stale/never is a missed-findings risk. */
+.freshness {
+  font-family:var(--mono); font-size:.72rem; letter-spacing:.04em;
+  text-transform:uppercase; font-weight:600;
+  padding:.15rem .45rem; border-radius:5px;
+  border:1px solid color-mix(in srgb, currentColor 45%, transparent);
+  background:color-mix(in srgb, currentColor 14%, transparent);
+}
+.freshness-current { color:var(--ok); }
+.freshness-stale   { color:var(--danger); font-weight:700; }
+.freshness-never   { color:var(--muted); }
 /* The detail-page severity, larger, as a tinted chip beside the title. */
 .detail h1 .sev {
   font-size:.72rem; padding:.2rem .5rem; border-radius:5px;

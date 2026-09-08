@@ -173,6 +173,11 @@ jobs:
       # would pass every assertion while proving nothing, which is why
       # store.Open refuses such a role outright.
       APP_DATABASE_URL: postgres://cvap_app_login:cvap_dev_only_app_password@127.0.0.1:5432/cvap?sslmode=disable
+      # The KNOWLEDGE-IMPORT role (ADR-063): the only identity that may WRITE the
+      # knowledge tables. Set here, not only in .env, or the advisory-match
+      # acceptance test skips silently in CI — the exact gate-that-passes-nothing
+      # hazard. cvap_knowledge_import_login is provisioned by `make app-role`.
+      KNOWLEDGE_IMPORT_DATABASE_URL: postgres://cvap_knowledge_import_login:cvap_dev_only_import_password@127.0.0.1:5432/cvap?sslmode=disable
 
     steps:
       - uses: actions/checkout@v4

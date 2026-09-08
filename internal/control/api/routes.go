@@ -348,6 +348,18 @@ func (s *Server) routes() {
 	})
 
 	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/knowledge/freshness",
+		Summary: "Knowledge feed freshness",
+		Description: "Ingested vendor-advisory feeds and whether each is current or stale " +
+			"(ADR-014, ADR-063). `state` is computed server-side against each feed's own " +
+			"staleness threshold, stored in the data — a stale feed means advisory matching " +
+			"is under-reporting, so the state is surfaced, not inferred from the timestamp.",
+		Access: AccessPermission, Permission: PermFindingRead,
+		Response: KnowledgeFreshnessResponse{},
+		Handler:  s.knowledgeFreshness,
+	})
+
+	r.Register(Route{
 		Method: http.MethodGet, Path: "/v1/findings.csv",
 		Summary: "Export findings as CSV",
 		Description: "The findings list (same filters) as CSV, for the reporting §2 permits. " +

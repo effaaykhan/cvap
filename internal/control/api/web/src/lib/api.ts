@@ -16,6 +16,8 @@ export type AssetList = Schemas["AssetListResponse"];
 export type Asset = Schemas["AssetResponse"];
 export type AssetSummary = Schemas["AssetSummary"];
 export type ExposureByZone = Schemas["ExposureByZoneResponse"];
+export type KnowledgeFreshness = Schemas["KnowledgeFreshnessResponse"];
+export type KnowledgeFeed = Schemas["KnowledgeFeedResponse"];
 export type Scan = Schemas["ScanResponse"];
 export type ScanList = Schemas["ScanListResponse"];
 
@@ -85,6 +87,7 @@ export const api = {
   listFindings: (q: string) => request<FindingList>("GET", `/v1/findings${q}`),
   getFinding: (id: string) => request<Finding>("GET", `/v1/findings/${id}`),
   exposure: () => request<ExposureByZone>("GET", "/v1/exposure"),
+  knowledgeFreshness: () => request<KnowledgeFreshness>("GET", "/v1/knowledge/freshness"),
 
   listAssets: (q: string) => request<AssetList>("GET", `/v1/assets${q}`),
   getAsset: (id: string) => request<Asset>("GET", `/v1/assets/${id}`),

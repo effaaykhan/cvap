@@ -324,6 +324,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/knowledge/freshness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Knowledge feed freshness
+         * @description Ingested vendor-advisory feeds and whether each is current or stale (ADR-014, ADR-063). `state` is computed server-side against each feed's own staleness threshold, stored in the data — a stale feed means advisory matching is under-reporting, so the state is surfaced, not inferred from the timestamp.
+         */
+        get: operations["getV1KnowledgeFreshness"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/openapi.json": {
         parameters: {
             query?: never;
@@ -801,6 +821,19 @@ export interface components {
             scan_id?: string | null;
             scope: string;
             zone_id?: string | null;
+        };
+        KnowledgeFeedResponse: {
+            advisory_count: number;
+            feed: string;
+            /** Format: date-time */
+            last_fetched_at?: string | null;
+            source_etag?: string;
+            source_url: string;
+            staleness_threshold_seconds: number;
+            state: string;
+        };
+        KnowledgeFreshnessResponse: {
+            feeds: components["schemas"]["KnowledgeFeedResponse"][];
         };
         LoginRequest: {
             email: string;
@@ -1809,6 +1842,62 @@ export interface operations {
                 };
             };
             /** @description Refused because the session's role does not hold kill.resolve, or the X-CVAP-CSRF header is missing or does not match the session, or the request did not come from this site. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getV1KnowledgeFreshness: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KnowledgeFreshnessResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold finding.read. */
             403: {
                 headers: {
                     [name: string]: unknown;

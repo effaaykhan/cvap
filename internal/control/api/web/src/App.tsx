@@ -11,6 +11,7 @@ import { AssetDetail } from "./screens/AssetDetail";
 import { Scans } from "./screens/Scans";
 import { ScanDetail } from "./screens/ScanDetail";
 import { Exposure } from "./screens/Exposure";
+import { Knowledge } from "./screens/Knowledge";
 import { Settings } from "./screens/Settings";
 
 function readTheme(): "dark" | "light" {
@@ -48,6 +49,7 @@ export function App() {
     ["/assets", "Assets", has(session, "asset.read")],
     ["/scans", "Scans", has(session, "scan.read")],
     ["/exposure", "Exposure", has(session, "finding.read")],
+    ["/knowledge", "Knowledge", has(session, "finding.read")],
     // No permission gate: changing your own password is available to any
     // signed-in operator.
     ["/settings", "Settings", true],
@@ -88,6 +90,7 @@ export function App() {
           <Route path="/scans" element={<Scans />} />
           <Route path="/scans/:id" element={<ScanDetail />} />
           <Route path="/exposure" element={<Exposure />} />
+          <Route path="/knowledge" element={<Knowledge />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/findings" replace />} />
         </Routes>
