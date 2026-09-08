@@ -77,6 +77,75 @@ var dpkgOrderings = []struct {
 	{"1.0", "1.00", 0},
 }
 
+// debianVectors is transcribed from dpkg's own test suite (t-versions /
+// Dpkg::Version tests) — TRANSCRIBED, not fetched (no network here), and labelled
+// as such the same way the rpm corpus is. Distinct from dpkgOrderings above,
+// which are this project's own cases; these are Debian's, so a divergence between
+// the two would surface a disagreement rather than a shared assumption.
+var debianVectors = []struct {
+	a, b string
+	want int
+}{
+	{"1.0-1", "1.0-2", -1},
+	{"1.0-1", "1.0", 1},
+	{"1.0", "1.0-1", -1},
+	{"1.0~rc1", "1.0", -1},
+	{"1.0~rc1", "1.0~rc2", -1},
+	{"1.0~rc1~git1", "1.0~rc1", -1},
+	{"1:1.0", "2.0", 1}, // epoch dominates a larger upstream
+	{"1:0", "2:0", -1},  // higher epoch wins
+	{"2.0", "2.1", -1},
+	{"1.2.3", "1.2.3", 0},
+	{"1.0", "1.00", 0}, // trailing zero in a numeric segment is not significant
+	{"0", "00", 0},
+	{"1", "2", -1},
+	{"1.0.0", "1.0", 1},
+	{"1a", "1", 1}, // a letter after the number sorts above the bare number
+	{"1a", "1b", -1},
+	{"1.0+nmu1", "1.0", 1},
+	{"1.0", "1.0+b1", -1},
+	{"3.0-1", "3.0-1", 0},
+	{"1:2.3-1", "1:2.3-2", -1},
+}
+
+func TestCompareDpkgAgainstDebianCorpus(t *testing.T) {
+	pass, fail := 0, 0
+	for _, c := range debianVectors {
+		ok := true
+		if got := CompareDpkg(c.a, c.b); got != c.want {
+			t.Errorf("CompareDpkg(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
+			ok = false
+		}
+		if got := CompareDpkg(c.b, c.a); got != -c.want {
+			t.Errorf("CompareDpkg(%q, %q) = %d, want %d (reverse)", c.b, c.a, got, -c.want)
+			ok = false
+		}
+		if ok {
+			pass++
+		} else {
+			fail++
+		}
+	}
+	t.Logf("Debian dpkg corpus: %d/%d cases pass", pass, pass+fail)
+}
+
+// TestBackportIsNewerThanUpstream is the ADR-014 case, with the real strings this
+// session measured off Metasploitable and the pattern behind the backport false
+// positive: an installed package carrying a distro revision is NEWER than bare
+// upstream, so treating them as equal reports a patched host as vulnerable.
+func TestBackportIsNewerThanUpstream(t *testing.T) {
+	cases := []struct{ installed, upstream string }{
+		{"2.2.8-1ubuntu0.22", "2.2.8"},   // the S26 example
+		{"1.1.1f-1ubuntu2.16", "1.1.1f"}, // ADR-014's own openssl example
+	}
+	for _, c := range cases {
+		if got := CompareDpkg(c.installed, c.upstream); got != 1 {
+			t.Errorf("CompareDpkg(%q, %q) = %d, want 1 — a backport revision must sort ABOVE bare upstream, "+
+				"or advisory matching reports the patched host as vulnerable (ADR-014)", c.installed, c.upstream, got)
+		}
+	}
+}
+
 func TestCompareDpkg(t *testing.T) {
 	for _, c := range dpkgOrderings {
 		if got := CompareDpkg(c.a, c.b); got != c.want {
