@@ -1,13 +1,18 @@
 # CVAP development scan scope.
 # The lab-scope-guard PreToolUse hook blocks any scanning tool aimed outside this list.
 # One CIDR or address per line. Nothing routable to the public internet belongs here.
+#
+# Real-network validation ranges (owned hosts on a network the operator controls,
+# e.g. 192.168.93.0/24 in session 24) are added HERE deliberately for the session
+# that needs them and removed again at that session's end. They are not committed
+# to the default dev scope: a real-network range that lingers is scope the guard
+# silently permits scanning long after the reason for it is gone.
 
 127.0.0.0/8         # loopback
 ::1/128
 10.10.0.0/16        # lab segment A  (compose network)
 10.20.0.0/16        # lab segment B  (across the lab firewall, for multi-vantage tests)
 192.168.56.0/24     # host-only VMs
-
 # Reserved for documentation, never routed. Useful for fixtures.
 192.0.2.0/24
 198.51.100.0/24
