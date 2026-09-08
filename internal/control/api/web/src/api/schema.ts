@@ -647,6 +647,10 @@ export interface components {
             os_provenance?: number[];
             os_version?: string;
             owner?: string;
+            /** @description Confidence in the resolved release — the share of agreeing band votes (ADR-064). */
+            release_confidence?: number | null;
+            /** @description Which services voted for a release, agreed, or abstained (with the reason: no advisory analogue, or the version matched no release band). */
+            release_provenance?: number[];
             services: components["schemas"]["AssetServiceResponse"][];
             vendor?: string;
         };

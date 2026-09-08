@@ -11,7 +11,7 @@
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
         env-check app-role store-test e2e dev-ca gosec mutate \
         contract-guard-test fmt-check tidy-check govulncheck db-gates db-reachable \
-        safety-sabotage adr-index ci-parity knowledge-usn \
+        safety-sabotage adr-index ci-parity knowledge-usn knowledge-product-map \
         ui ui-deps ui-types ui-verify ui-typecheck ui-test ui-build embedui-build
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
@@ -615,6 +615,11 @@ knowledge-usn: ## Ingest Ubuntu USN advisories: make knowledge-usn KNOWLEDGE_REL
 		$(if $(PACKAGE),--package "$(PACKAGE)") --limit $(if $(LIMIT),$(LIMIT),20) --out "$(KNOWLEDGE_PACK)"
 	KNOWLEDGE_IMPORT_DATABASE_URL="$(KNOWLEDGE_IMPORT_DATABASE_URL)" \
 		python3 knowledge/usn_ingest.py import --pack "$(KNOWLEDGE_PACK)"
+
+knowledge-product-map: ## Load the product->package map for release resolution (P3.3, ADR-064)
+	@test -n "$(KNOWLEDGE_IMPORT_DATABASE_URL)" || { echo "KNOWLEDGE_IMPORT_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
+	KNOWLEDGE_IMPORT_DATABASE_URL="$(KNOWLEDGE_IMPORT_DATABASE_URL)" \
+		python3 knowledge/import_product_map.py --file knowledge/product_packages.json
 
 frontmatter: ## Validate .claude agent and skill frontmatter
 	python3 .github/scripts/check_frontmatter.py

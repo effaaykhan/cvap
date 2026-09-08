@@ -1,0 +1,19 @@
+{
+  "_comment": "Product -> Ubuntu source package(s) for release resolution (ADR-064). Content, not code (ADR-048): the observed service Product string (from the fingerprint) maps to the Ubuntu source package name(s) the advisory keyspace is keyed on. Band matching keys on the upstream band, so one product may list packages that were renamed across releases (mysql-dfsg-5.0 -> mysql-5.1 -> ...); listing them all lets any era match. Add a row here, not a Go change, when a service or a rename appears. Product keys MUST match the fingerprint's emitted Product string.",
+  "map": {
+    "OpenSSH": ["openssh"],
+    "MySQL": ["mysql-dfsg-5.0", "mysql-5.1", "mysql-5.5", "mysql-5.6", "mysql-5.7", "mysql-8.0"],
+    "MariaDB": ["mariadb-5.5", "mariadb-10.0", "mariadb-10.1", "mariadb-10.3", "mariadb-10.6"],
+    "Apache": ["apache2"],
+    "nginx": ["nginx"],
+    "Samba": ["samba"],
+    "vsftpd": ["vsftpd"],
+    "ProFTPD": ["proftpd-dfsg", "proftpd"],
+    "Pure-FTPd": ["pure-ftpd"],
+    "Postfix": ["postfix"],
+    "Exim": ["exim4"],
+    "Sendmail": ["sendmail"],
+    "Dovecot pop3d": ["dovecot"],
+    "Dovecot imapd": ["dovecot"]
+  }
+}

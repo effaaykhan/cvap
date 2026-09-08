@@ -74,6 +74,14 @@ type AssetResponse struct {
 	DistroRelease *string         `json:"distro_release,omitempty" doc:"Distro release (ubuntu2204) — the advisory-feed key. Absent with a family present is FAMILY-ONLY: known distribution, no release, unmatched for advisories (ADR-014). Banners never carry it; resolving it is knowledge-pipeline work."`
 	OSConfidence  *float64        `json:"os_confidence,omitempty" doc:"Confidence in the attribution. Non-authoritative — derived from banners, never OS detection."`
 	OSProvenance  json.RawMessage `json:"os_provenance,omitempty" doc:"Which services contributed, agreed and were ignored, with the family each suggested."`
+
+	// Release resolution (ADR-064): distro_release above is the outcome; these are
+	// its own confidence and evidence. release_provenance lists which services
+	// voted, agreed and ABSTAINED (with why) — so a resolved release, or a
+	// family-only that did not resolve, can be checked on screen the way the family
+	// can. Present even when the release did not resolve.
+	ReleaseConfidence *float64        `json:"release_confidence,omitempty" doc:"Confidence in the resolved release — the share of agreeing band votes (ADR-064)."`
+	ReleaseProvenance json.RawMessage `json:"release_provenance,omitempty" doc:"Which services voted for a release, agreed, or abstained (with the reason: no advisory analogue, or the version matched no release band)."`
 }
 
 func assetSummary(a *store.Asset) AssetSummary {
@@ -169,6 +177,7 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 		OpenFindings: d.OpenFindings,
 		DistroFamily: d.DistroFamily, DistroRelease: d.DistroRelease,
 		OSConfidence: d.OSConfidence, OSProvenance: d.OSProvenance,
+		ReleaseConfidence: d.ReleaseConfidence, ReleaseProvenance: d.ReleaseProvenance,
 	}
 	for _, a := range d.Addresses {
 		out.Addresses = append(out.Addresses, AssetAddressResponse{IP: a.IP, MAC: a.MAC, ValidFrom: a.ValidFrom})

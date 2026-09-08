@@ -230,6 +230,41 @@ plan predicted exactly this).
   - **Hardy coverage resolved a session-29 concern favorably:** USN covers Ubuntu
     8.04 (537 notices), so Metasploitable — the only real host in scope — can be
     matched end-to-end. A real rpm host is still needed for B26.
+- **S29–S30 — P3.3 release resolution, measured before built.** S29: two dev-DB
+  queries killed the *suffix* bridge (survives for MySQL only; the bare suffix is
+  not release-discriminating) and found the 18-package keyspace too thin to test
+  the band — sign-off withheld. S30: widened the hardy import to the full 537 USNs
+  (18→190 packages, 22→589 rows) and tested the *band* directly — **it
+  discriminates**: hardy's `openssh 4.7p1`/`apache2 2.2.8`/`mysql 5.0.51a` are
+  each unique in the keyspace, so the band pins the release with no suffix and no
+  rename map. Metasploitable confirmed a valid acceptance host (3 services agree,
+  2 swapped builds abstain). The measurement, not an argument, chose the approach.
+- **S31 (this session) — P3.3 BUILD: release resolution via upstream band
+  (ADR-064).** Option (a)-via-band. Three pieces mirroring B21's split:
+  `store.Advisories.ReleasesForProduct` (SQL narrows to a product's packages),
+  `domain.ResolveRelease` (pure band voting, threshold, provenance), correlate
+  `deriveRelease` (gather votes, promote, under a known family only). The band is
+  defined once in Go (`domain.UpstreamBand`) — no SQL band extraction, no
+  two-writers drift.
+  - **The safety property is the whole argument:** every failure mode is
+    UNRESOLVED, never wrong — a collision yields no clean vote, an absent release
+    or a swapped build abstains. Unresolved is ADR-061's nullable release =
+    family-only. A wrong release would poison every finding; this cannot produce one.
+  - **Threshold ≥2 agreeing clean votes, unique leader** (ADR-064): one is a
+    single point of failure, two independent services corroborate, ties never
+    resolve. Confidence = share of agreeing votes.
+  - **The product→package map is content** (`product_packages`, migration 0035,
+    `knowledge/product_packages.json`), imported as cvap_knowledge_import — the
+    sixth knowledge table, ADR-048's corpus argument, not a Go literal.
+  - **★ Acceptance, end to end on the real keyspace:** Metasploitable →
+    `family=ubuntu, release=hardy` (3 contributed, 3 abstained, confidence 1.00),
+    then the full chain — release `hardy` → P3.2 `FixesFor` → USN-1467-1 fixed
+    `5.0.96-0ubuntu3` vs measured `5.0.51a-3ubuntu5` → **vulnerable (CVE-2012-2122)**.
+    First time family, release, comparator and advisory data meet on one host.
+  - **Dashboard shipped** (standing requirement): the asset page's "How the release
+    was concluded" table — which services voted, agreed, and **abstained (with the
+    reason: no analogue vs band mismatch)**, because absence-is-not-evidence must be
+    visible. A resolved release now carries its evidence the way the family does.
 
 ---
 

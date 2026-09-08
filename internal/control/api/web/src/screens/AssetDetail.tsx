@@ -11,6 +11,20 @@ type AttributionSource = {
   role: "contributed" | "agreed" | "ignored";
 };
 
+// ReleaseSource mirrors the release provenance rows (ADR-064). Adds a fourth role
+// AttributeOS has not: "abstained" — a service that could not vote (no advisory
+// analogue, or its version matched no release band), carried with its reason so
+// "absence is not evidence" is visible rather than a silent gap.
+type ReleaseSource = {
+  service: string;
+  port: number;
+  product: string;
+  band?: string;
+  role: "contributed" | "agreed" | "ignored" | "abstained";
+  reason?: string;
+  candidates?: string[];
+};
+
 export function AssetDetail() {
   const { id = "" } = useParams();
   const { data: a, isLoading, error } = useQuery({
@@ -21,6 +35,7 @@ export function AssetDetail() {
   if (error || !a) return <p className="error">Could not load this asset.</p>;
 
   const provenance = (a.os_provenance as AttributionSource[] | undefined) ?? [];
+  const releaseProvenance = (a.release_provenance as ReleaseSource[] | undefined) ?? [];
 
   return (
     <section className="detail">
@@ -55,6 +70,31 @@ export function AssetDetail() {
               <> A family with no release cannot be matched to a vendor advisory feed; it marks the host
               as a candidate for credentialed follow-up, not as unattributed.</>
             )}
+          </p>
+        </>
+      ) : null}
+
+      {releaseProvenance.length ? (
+        <>
+          <h2>How the release was concluded</h2>
+          <table className="provenance"><thead><tr><th>Service</th><th>Observed band</th><th>Points at</th><th>Role</th></tr></thead>
+            <tbody>{releaseProvenance.map((p, i) => (
+              <tr key={i} className={`role-${p.role}`}>
+                <td className="data">{p.product} {p.service}/{p.port}</td>
+                <td className="data">{p.band || "—"}</td>
+                <td className="data">{p.candidates?.length ? p.candidates.join(", ") : (p.reason || "—")}</td>
+                <td>{releaseRoleLabel(p.role)}</td>
+              </tr>
+            ))}</tbody></table>
+          <p className="note">
+            The release is inferred by matching each service's upstream version band against the
+            vendor-advisory keyspace (ADR-064): a band unique to one release is a vote for it.
+            Every failure is <em>unresolved</em>, never wrong — a service whose version matches no
+            release band, or whose product has no advisory data, <strong>abstains</strong> (shown
+            above with its reason) rather than voting against.
+            {a.distro_release
+              ? <> {" "}Resolved when at least two services agree; here they did.</>
+              : <> {" "}Not enough agreeing votes to resolve a release, so the host stays family-only — matchable only once more evidence agrees.</>}
           </p>
         </>
       ) : null}
@@ -132,6 +172,15 @@ function roleLabel(role: AttributionSource["role"]): string {
     case "contributed": return "concluded from";
     case "agreed": return "agreed";
     case "ignored": return "overruled";
+  }
+}
+
+function releaseRoleLabel(role: ReleaseSource["role"]): string {
+  switch (role) {
+    case "contributed": return "voted";
+    case "agreed": return "agreed (ambiguous)";
+    case "ignored": return "dissented";
+    case "abstained": return "abstained";
   }
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/effaaykhan/cvap/internal/control/api"
+	"github.com/effaaykhan/cvap/internal/domain"
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
@@ -272,6 +273,66 @@ func TestKnowledgeFreshnessReportsComputedState(t *testing.T) {
 	}
 	if states[stale] != "stale" {
 		t.Errorf("feed %s: state = %q, want stale (fetched 60 days ago against a 7-day threshold)", stale, states[stale])
+	}
+}
+
+// TestAssetDetailCarriesReleaseProvenance — the dashboard surface for P3.3
+// (ADR-064): a resolved release reaches the asset page WITH its evidence (which
+// services voted and which abstained), so an operator can check the claim. Seeds
+// the asset state directly (the resolver itself is proven end to end in
+// internal/correlate); this asserts the read path carries release_provenance.
+func TestAssetDetailCarriesReleaseProvenance(t *testing.T) {
+	f := newFixture(t, `{"asset.read": true}`)
+	cookies, csrf := f.login(t)
+	ctx := context.Background()
+
+	var assetID uuid.UUID
+	prov := []byte(`[{"service":"ssh","port":22,"product":"OpenSSH","band":"4.7p1","role":"contributed","candidates":["hardy"]},` +
+		`{"service":"smb","port":445,"product":"Samba","band":"3.0.20","role":"abstained","reason":"observed version matches no release's band"}]`)
+	if err := f.db.Write(ctx, f.tenant, func(ctx context.Context, c *store.Conn) error {
+		a, err := (store.Assets{}).Create(ctx, c, store.Asset{Hostname: "meta.corp", Environment: "production"})
+		if err != nil {
+			return err
+		}
+		assetID = a.ID
+		if err := (store.Assets{}).SetAttribution(ctx, c, a.ID, "ubuntu", nil, 0.95, []byte(`[]`)); err != nil {
+			return err
+		}
+		rel := "hardy"
+		return (store.Assets{}).SetRelease(ctx, c, a.ID, &rel, 1.0, prov)
+	}); err != nil {
+		t.Fatalf("seed asset: %v", err)
+	}
+
+	w := f.do(t, http.MethodGet, "/v1/assets/"+assetID.String(), nil, cookies, csrf)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get asset: %d %s", w.Code, w.Body.String())
+	}
+	var resp api.AssetResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.DistroRelease == nil || *resp.DistroRelease != "hardy" {
+		t.Fatalf("distro_release = %v, want hardy", resp.DistroRelease)
+	}
+	if len(resp.ReleaseProvenance) == 0 {
+		t.Fatalf("release_provenance absent from the asset detail — the release has no visible evidence")
+	}
+	var sources []domain.ReleaseSource
+	if err := json.Unmarshal(resp.ReleaseProvenance, &sources); err != nil {
+		t.Fatalf("release_provenance not the expected shape: %v (%s)", err, resp.ReleaseProvenance)
+	}
+	var sawContributed, sawAbstained bool
+	for _, s := range sources {
+		if s.Role == domain.ReleaseContributed {
+			sawContributed = true
+		}
+		if s.Role == domain.ReleaseAbstained && s.Reason != "" {
+			sawAbstained = true
+		}
+	}
+	if !sawContributed || !sawAbstained {
+		t.Errorf("release provenance must surface both a contributor and an abstention-with-reason: %+v", sources)
 	}
 }
 

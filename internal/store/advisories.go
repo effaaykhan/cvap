@@ -54,6 +54,49 @@ func (Advisories) FixesFor(ctx context.Context, c *Conn, release, pkg string) ([
 	return out, mapError(rows.Err())
 }
 
+// ReleaseFixedVersion is one advisory fixed version for a package on a release —
+// the raw material for release-band voting (P3.3, ADR-064). The band is NOT
+// extracted here: SQL narrows to the product's packages, and domain.UpstreamBand
+// does the banding for both this and the observed version, so there is one band
+// authority and it is Go (ADR-062, and the two-writers-one-fact hazard).
+type ReleaseFixedVersion struct {
+	Release      string
+	Package      string
+	FixedVersion string
+}
+
+// ReleasesForProduct returns every advisory fixed version, across all releases,
+// for the packages an observed service Product maps to (product_packages, the
+// content map of ADR-064). This is the design's "ReleasesForPackage" read: the
+// caller bands each FixedVersion with domain.UpstreamBand and matches it against
+// the observed band to compute which releases a service votes for. Empty result
+// means the product has no advisory analogue in the keyspace at all (unmapped, or
+// mapped to packages with no advisories) — the caller reads that as an abstention,
+// never a vote against. Global-table read from inside a tenant Read, the case
+// ADR-030 anticipated (like FixesFor).
+func (Advisories) ReleasesForProduct(ctx context.Context, c *Conn, product string) ([]ReleaseFixedVersion, error) {
+	const q = `
+		SELECT afp.distro_release, afp.package_name, afp.fixed_version
+		  FROM product_packages pp
+		  JOIN advisory_fixed_packages afp ON afp.package_name = pp.package_name
+		 WHERE pp.product = $1
+		 ORDER BY afp.distro_release, afp.package_name, afp.fixed_version`
+	rows, err := c.Query(ctx, q, product)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	var out []ReleaseFixedVersion
+	for rows.Next() {
+		var v ReleaseFixedVersion
+		if err := rows.Scan(&v.Release, &v.Package, &v.FixedVersion); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, v)
+	}
+	return out, mapError(rows.Err())
+}
+
 // FeedState is a knowledge feed's freshness, computed — not raw. "stale" is a
 // STATE the API hands the panel, not a timestamp comparison the operator eyeballs
 // (the exposure-count lesson: put the answer in the data). The threshold lives in

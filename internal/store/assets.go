@@ -257,6 +257,32 @@ func (Assets) SetAttribution(ctx context.Context, c *Conn, id uuid.UUID, distroF
 	return nil
 }
 
+// SetRelease records the release resolution on the asset (P3.3, ADR-064):
+// distro_release (nil when UNRESOLVED — family-only stays the state, ADR-061),
+// its confidence, and its provenance chain. Separate from SetAttribution because
+// release is resolved in a second step, from the advisory keyspace, after the
+// family is known — and its evidence (which services voted, agreed, abstained) is
+// distinct from the family's, so it lands in its own column. The provenance is
+// stored EVEN WHEN UNRESOLVED, so an operator can see why it did not resolve
+// (which services abstained and why) rather than facing a silent family-only.
+// Guarded by distro_family IS NOT NULL: resolution runs only under a known family.
+func (Assets) SetRelease(ctx context.Context, c *Conn, id uuid.UUID, release *string, confidence float32, provenance []byte) error {
+	const q = `UPDATE assets
+	     SET distro_release = $3, release_confidence = $4, release_provenance = $5::jsonb
+	   WHERE tenant_id = $1 AND asset_id = $2 AND distro_family IS NOT NULL`
+
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), id, release, confidence, string(provenance))
+	if err != nil {
+		return mapError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		// No family on the asset: release resolution runs only under a known
+		// family, so this is a caller ordering bug, not a missing row.
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ============================================================================
 // Asset detail (session 18): the base row plus its current addresses and
 // services, for the operator UI's asset view.
@@ -298,6 +324,14 @@ type AssetDetail struct {
 	DistroRelease *string
 	OSConfidence  *float64
 	OSProvenance  json.RawMessage
+
+	// Release resolution (ADR-064). DistroRelease above is the outcome (nil =
+	// unresolved/family-only); these are its OWN confidence and evidence chain —
+	// which services voted, agreed, and abstained (with why), distinct from the
+	// family provenance. Present even when unresolved, so the asset page can show
+	// why a release did not resolve rather than a silent family-only.
+	ReleaseConfidence *float64
+	ReleaseProvenance json.RawMessage
 }
 
 // GetDetail returns the full asset view, or ErrNotFound (also what a
@@ -365,10 +399,12 @@ func (Assets) GetDetail(ctx context.Context, c *Conn, id uuid.UUID) (*AssetDetai
 	}
 
 	const osQ = `
-		SELECT coalesce(distro_family,''), distro_release, os_confidence, os_provenance
+		SELECT coalesce(distro_family,''), distro_release, os_confidence, os_provenance,
+		       release_confidence, release_provenance
 		  FROM assets WHERE tenant_id = $1 AND asset_id = $2`
 	if err := c.QueryRow(ctx, osQ, c.Tenant().UUID(), id).
-		Scan(&d.DistroFamily, &d.DistroRelease, &d.OSConfidence, &d.OSProvenance); err != nil {
+		Scan(&d.DistroFamily, &d.DistroRelease, &d.OSConfidence, &d.OSProvenance,
+			&d.ReleaseConfidence, &d.ReleaseProvenance); err != nil {
 		return nil, mapError(err)
 	}
 	return d, nil

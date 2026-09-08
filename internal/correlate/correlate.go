@@ -34,7 +34,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -343,8 +345,18 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		// OS attribution from the services just derived (B21, ADR-061): read the
 		// per-service hints, apply the precedence, write family + provenance to
 		// the asset. In the same transaction as the services it is derived from.
-		if err := c.deriveAttribution(ctx, conn, assetID, h); err != nil {
+		family, err := c.deriveAttribution(ctx, conn, assetID, h)
+		if err != nil {
 			return err
+		}
+
+		// Release resolution (P3.3, ADR-064) runs only under a known family:
+		// release is far less ambiguous once the family is fixed, and a family-only
+		// host is the honest state to leave when nothing resolves. Same transaction.
+		if family != "" {
+			if err := c.deriveRelease(ctx, conn, assetID, h); err != nil {
+				return err
+			}
 		}
 
 		// Findings, in the SAME transaction: the moment the derived model
@@ -508,7 +520,7 @@ func orDefault(v, d string) string {
 // gathers the evidence and applies the verdict, the same pure/impure split as
 // resolveHost itself. A family-only result (release nil) is written and is
 // distinct from no attribution, which leaves the columns null.
-func (c *Correlator) deriveAttribution(ctx context.Context, conn *store.Conn, assetID uuid.UUID, h host) error {
+func (c *Correlator) deriveAttribution(ctx context.Context, conn *store.Conn, assetID uuid.UUID, h host) (string, error) {
 	var ev []domain.OSEvidence
 	for _, o := range h.obs {
 		if o.Type != "service" {
@@ -534,13 +546,94 @@ func (c *Correlator) deriveAttribution(ctx context.Context, conn *store.Conn, as
 	}
 	a := domain.AttributeOS(ev)
 	if a.DistroFamily == "" {
-		return nil // no attribution: leave the asset's OS columns null
+		return "", nil // no attribution: leave the asset's OS columns null
 	}
 	prov, err := json.Marshal(a.Provenance)
 	if err != nil {
+		return "", err
+	}
+	if err := (store.Assets{}).SetAttribution(ctx, conn, assetID, a.DistroFamily, a.DistroRelease, a.Confidence, prov); err != nil {
+		return "", err
+	}
+	return a.DistroFamily, nil
+}
+
+// deriveRelease resolves the distro RELEASE from the observed service versions
+// (P3.3, ADR-064), the second half of attribution. The DECISION — band voting,
+// the threshold, provenance roles — is domain.ResolveRelease; this gathers the
+// votes and applies the verdict, the same pure/impure split as deriveAttribution.
+//
+// For each identified service it reads the advisory keyspace rows for that
+// product (through the product->package map), bands both the observed version and
+// the keyspace fixed versions with the ONE band authority (domain.UpstreamBand),
+// and casts a vote: the releases whose band equals the observed band. Absence is
+// not a vote against, in both places — a product with no keyspace analogue and an
+// observed version that matches no band both ABSTAIN (ADR-064). The provenance is
+// written even when unresolved, so the abstentions are visible.
+func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetID uuid.UUID, h host) error {
+	var votes []domain.ReleaseVote
+	// One vote per listening endpoint (port/protocol), the same unit the services
+	// table dedups on: a service seen across several observations (a rescan) must
+	// cast ONE vote, or a duplicated observation would inflate the tally and cross
+	// the threshold on its own. First observation per endpoint wins.
+	seen := map[string]bool{}
+	for _, o := range h.obs {
+		if o.Type != "service" {
+			continue
+		}
+		var p servicePayload
+		if err := json.Unmarshal(o.Payload, &p); err != nil {
+			continue
+		}
+		if p.Product == "" {
+			continue // service not identified to a product: not a release candidate at all
+		}
+		endpoint := fmt.Sprintf("%d/%s", p.Port, orDefault(p.Protocol, "tcp"))
+		if seen[endpoint] {
+			continue
+		}
+		seen[endpoint] = true
+		// A product WITH no version still becomes a vote — with an empty band it
+		// abstains ("no version identified"), so a service that was seen but could
+		// not contribute is VISIBLE in the provenance rather than silently dropped
+		// (ADR-064: absence must be visible).
+		rows, err := (store.Advisories{}).ReleasesForProduct(ctx, conn, p.Product)
+		if err != nil {
+			return err
+		}
+		band := domain.UpstreamBand(p.Version)
+		candSet := map[string]struct{}{}
+		if band != "" {
+			for _, r := range rows {
+				if domain.UpstreamBand(r.FixedVersion) == band {
+					candSet[r.Release] = struct{}{}
+				}
+			}
+		}
+		candidates := make([]string, 0, len(candSet))
+		for r := range candSet {
+			candidates = append(candidates, r)
+		}
+		sort.Strings(candidates)
+		votes = append(votes, domain.ReleaseVote{
+			Service:     normaliseOSService(p.Service),
+			Port:        p.Port,
+			Product:     p.Product,
+			Band:        band,
+			Candidates:  candidates,
+			HasAnalogue: len(rows) > 0,
+		})
+	}
+	if len(votes) == 0 {
+		return nil // no service carried a product+version: nothing to resolve or record
+	}
+
+	res := domain.ResolveRelease(votes)
+	prov, err := json.Marshal(res.Provenance)
+	if err != nil {
 		return err
 	}
-	return (store.Assets{}).SetAttribution(ctx, conn, assetID, a.DistroFamily, a.DistroRelease, a.Confidence, prov)
+	return (store.Assets{}).SetRelease(ctx, conn, assetID, res.Release, res.Confidence, prov)
 }
 
 // normaliseOSService collapses service names that name the same platform source

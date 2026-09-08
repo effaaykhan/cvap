@@ -256,6 +256,9 @@ code { background:var(--surface-2); padding:.06rem .35rem; border-radius:4px; fo
    confidence reads as low, so weak data never passes for strong. */
 .provenance .role-ignored { color: var(--faint); }
 .provenance .role-ignored .data { text-decoration: line-through; text-decoration-color: var(--faint); }
+/* Abstained (ADR-064): a service that could not vote. Dimmed and italic, but NOT
+   struck through — it did not dissent, it had nothing to say. */
+.provenance .role-abstained { color: var(--faint); font-style: italic; }
 .conf { font-size: .78rem; }
 .conf-high { color: var(--fg); }
 .conf-medium { color: var(--muted); }
