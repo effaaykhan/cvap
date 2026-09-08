@@ -183,6 +183,19 @@ func TestMetasploitableVersionCoverageMeasured(t *testing.T) {
 			t.Errorf("%s no longer yields a version — a corpus matcher regressed", svc)
 		}
 	}
+
+	// The fifth version-yielder is INTRUSIVE, not passive: HTTP sends no
+	// unsolicited banner, but the http-head PROBE reads the Server header, and the
+	// httpMatches rule lifts Apache's version. So on Metasploitable the corpus can
+	// version-identify 5 of 11 services — four in safe mode, plus Apache under
+	// intrusive probing. Measured here so "5 of 11" is measured, not asserted.
+	apache, ok := classify(httpMatches(),
+		"HTTP/1.1 200 OK\r\nServer: Apache/2.2.8 (Ubuntu) DAV/2\r\n\r\n", 80)
+	if !ok || apache.version != "2.2.8" {
+		t.Errorf("intrusive HTTP probe should lift Apache 2.2.8, got %+v (ok=%t)", apache, ok)
+	}
+	t.Logf("SERVICES YIELDING A VERSION (incl. intrusive HTTP): %d of 11 — the safe four plus Apache httpd %s (product %q)",
+		len(withVersion)+1, apache.version, apache.product)
 }
 
 func keysOf(m map[string]bool) []string {

@@ -4,7 +4,7 @@
     "OpenSSH": ["openssh"],
     "MySQL": ["mysql-dfsg-5.0", "mysql-5.1", "mysql-5.5", "mysql-5.6", "mysql-5.7", "mysql-8.0"],
     "MariaDB": ["mariadb-5.5", "mariadb-10.0", "mariadb-10.1", "mariadb-10.3", "mariadb-10.6"],
-    "Apache": ["apache2"],
+    "Apache httpd": ["apache2"],
     "nginx": ["nginx"],
     "Samba": ["samba"],
     "vsftpd": ["vsftpd"],

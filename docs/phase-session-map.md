@@ -171,6 +171,17 @@ plan predicted exactly this).
     - **These are counts against ONE real host, with patterns that match it — a
       data point, not the generalizable service-ID accuracy the golden-corpus gate
       measures against labelled hosts.** The two must never be conflated.
+    - **⟳ Corrected in S31 (measured, `TestMetasploitableVersionCoverageMeasured`):**
+      these numbers count services *identified* (a service name, product, or soft
+      match). For version-dependent work — advisory matching and P3.3 release
+      resolution — what matters is services yielding a **VERSION**, and that is
+      **5 of 11** (four in safe mode: vsftpd, openssh, mysql, proftpd; plus Apache
+      httpd under intrusive HTTP), not the 6–7 identified. The "6–7 identified"
+      figure is right for what it measured but overstates version coverage, and has
+      been carried loosely as if it were the matchable count (some references,
+      including in review, rounded it toward "8" — the "8th" this very entry already
+      rejected). The corrected, version-yielding number is 5/11; the six services
+      whose version the corpus cannot extract are backlog B28.
   - **Dashboard shipped this session** (standing requirement): the asset detail
     view renders the attribution, a **"How the OS was concluded"** provenance table
     (which services *contributed*, *agreed*, were *overruled* — the agreed/ignored
@@ -268,18 +279,21 @@ plan predicted exactly this).
   - **Confidence tiered, not flat (ADR-065):** 2 agreeing → 0.80 (medium), 3 → 0.90,
     ≥4 → 0.95 (high), scaled down by dissent, so a unanimous pair outranks a disputed
     plurality and the finding pipeline can weight a two-vote release below a four-vote one.
-  - **★ Coverage measured and stated honestly (ADR-065, `TestMetasploitableVersionCoverageMeasured`):**
-    running Metasploitable's 11 safe-mode banners through the real matcher yields a
-    VERSION for only **4** (vsftpd, openssh, mysql, proftpd) — of which **2 band-vote
-    hardy** (openssh, mysql) in safe mode; Apache 2.2.8 is a 3rd vote only under
-    intrusive HTTP probing. This reconciles S26's "6–7/11": S26 counted services
-    *identified* (incl. versionless telnet/Postfix/VNC); *version-yielding* is 4/11.
-    **Not a regression** (the matchers are all present — the test locks it), a
-    **counting difference** — S26 overstated coverage for version-dependent work.
-    Release resolution reaches exactly as far as service identification: the six
-    services whose version data the corpus can't extract (Samba, Apache, PostgreSQL,
-    UnrealIRCd, Postfix, distccd) are **backlog B28** — a B22 service-ID gap that
-    bounds P3.3's real-host reach, NOT a resolver limitation.
+  - **★ Coverage measured, and the S26 figure corrected (ADR-065,
+    `TestMetasploitableVersionCoverageMeasured`):** running Metasploitable's 11
+    banners through the real matcher yields a VERSION for **5 of 11** — four in safe
+    mode (vsftpd, openssh, mysql, proftpd) plus Apache httpd 2.2.8 under intrusive
+    HTTP probing — of which **2 band-vote hardy in safe mode** (openssh, mysql), 3
+    with the intrusive Apache. **S26 correction:** the S26 entry above published
+    "6/11 → 7/11", which counted services *identified* (including versionless
+    telnet/Postfix/VNC); the number that matters for version-dependent work
+    (matching, release resolution) is **5/11**, and it has been carried loosely
+    since. This is a **counting difference, not a regression** — the four safe-mode
+    matchers are all present and the test locks them. Release resolution reaches
+    exactly as far as service identification: the six services whose version data
+    the corpus can't extract (Samba, Apache, PostgreSQL, UnrealIRCd, Postfix,
+    distccd) are **backlog B28** — a B22 service-ID gap that bounds P3.3's real-host
+    reach, NOT a resolver limitation.
 
 ---
 

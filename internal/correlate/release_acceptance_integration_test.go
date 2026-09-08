@@ -27,12 +27,13 @@ import (
 //
 // This is a RESOLVER-LOGIC test with a controlled observed set — it exercises the
 // vote / abstain / dissent paths. It is NOT a claim about what the corpus
-// identifies in safe mode: that is measured separately in scanpoint's
-// TestMetasploitableVersionCoverageMeasured, which finds only four
-// version-yielding services (Apache and Samba are not among them in safe mode).
-// So a real safe-mode scan resolves hardy on TWO votes (openssh, mysql), still
-// past the threshold; this test uses three to also cover the agreeing-plurality
-// path. The gap is B28 (service ID), recorded honestly in ADR-065. The keyspace
+// identifies: that is measured in scanpoint's TestMetasploitableVersionCoverage-
+// Measured — four version-yielding services in SAFE mode (vsftpd, openssh, mysql,
+// proftpd), plus Apache httpd 2.2.8 under INTRUSIVE HTTP probing = 5 of 11. So a
+// safe-mode scan resolves hardy on TWO votes (openssh, mysql), still past the
+// threshold; with the intrusive Apache it is three. Product strings are the ones
+// the corpus actually emits ("Apache httpd", not "Apache"). The gap is B28
+// (service ID), recorded honestly in ADR-065. The keyspace
 // is seeded from the REAL fixed versions measured in session 30 (idempotent, so it
 // coexists with the full real keyspace a dev DB already holds); the resolution is
 // identical either way because the bands are the same. Skips without the import
@@ -84,7 +85,7 @@ func seedReleaseKeyspace(t *testing.T) {
 		// The product map: ProFTPD maps to a package with NO advisory rows, so it
 		// abstains as no-analogue — distinct from the band-mismatch abstentions.
 		`INSERT INTO product_packages (product, package_name) VALUES
-		   ('OpenSSH','openssh'),('MySQL','mysql-dfsg-5.0'),('Apache','apache2'),
+		   ('OpenSSH','openssh'),('MySQL','mysql-dfsg-5.0'),('Apache httpd','apache2'),
 		   ('Samba','samba'),('vsftpd','vsftpd'),('ProFTPD','proftpd-dfsg')
 		 ON CONFLICT DO NOTHING`,
 	}
@@ -121,7 +122,7 @@ func TestReleaseResolvesEndToEndOnMetasploitable(t *testing.T) {
 	// The SAME endpoint seen a second time (a rescan): it must cast ONE vote, not
 	// two — otherwise a duplicated observation crosses the threshold on its own.
 	s.observe(t, db, now.Add(time.Second), svc(3306, "mysql", "MySQL", "5.0.51a-3ubuntu5"))
-	s.observe(t, db, now, svc(80, "http", "Apache", "2.2.8"))          // band 2.2.8   -> hardy
+	s.observe(t, db, now, svc(80, "http", "Apache httpd", "2.2.8"))    // band 2.2.8   -> hardy
 	s.observe(t, db, now, svc(445, "microsoft-ds", "Samba", "3.0.20")) // band matches nothing -> abstain
 	s.observe(t, db, now, svc(21, "ftp", "vsftpd", "2.3.4"))           // backdoored build -> abstain
 	s.observe(t, db, now, svc(2121, "ftp", "ProFTPD", "1.3.1"))        // no analogue -> abstain
@@ -164,7 +165,7 @@ func TestReleaseResolvesEndToEndOnMetasploitable(t *testing.T) {
 		reason[s.Product] = s.Reason
 		voteCount[s.Role]++
 	}
-	for _, p := range []string{"OpenSSH", "MySQL", "Apache"} {
+	for _, p := range []string{"OpenSSH", "MySQL", "Apache httpd"} {
 		if role[p] != domain.ReleaseContributed {
 			t.Errorf("%s should be 'contributed', got %q", p, role[p])
 		}

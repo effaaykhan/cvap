@@ -318,6 +318,13 @@ func TestAssetDetailCarriesReleaseProvenance(t *testing.T) {
 	if len(resp.ReleaseProvenance) == 0 {
 		t.Fatalf("release_provenance absent from the asset detail — the release has no visible evidence")
 	}
+	// release_confidence must surface too: it is stored and served, and the UI
+	// now renders it (ADR-065's tiering makes it load-bearing). Asserting it
+	// reaches the response guards against the write-carry-store-drop shape (§5.6)
+	// — a field written and stored but read by no consumer.
+	if resp.ReleaseConfidence == nil {
+		t.Errorf("release_confidence absent from the asset detail — stored and served but never surfaced (§5.6)")
+	}
 	var sources []domain.ReleaseSource
 	if err := json.Unmarshal(resp.ReleaseProvenance, &sources); err != nil {
 		t.Fatalf("release_provenance not the expected shape: %v (%s)", err, resp.ReleaseProvenance)

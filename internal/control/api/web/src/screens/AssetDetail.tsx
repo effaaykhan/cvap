@@ -77,6 +77,11 @@ export function AssetDetail() {
       {releaseProvenance.length ? (
         <>
           <h2>How the release was concluded</h2>
+          <p className="note">
+            {a.distro_release
+              ? <>Resolved release: <span className="data">{a.distro_release}</span>{releaseConfidence(a.release_confidence ?? undefined)} — the confidence is how corroborated the answer is: more agreeing services, and no dissent, is a stronger claim (ADR-065).</>
+              : <>No release resolved — the votes below did not agree enough (family-only).</>}
+          </p>
           <table className="provenance"><thead><tr><th>Service</th><th>Observed band</th><th>Points at</th><th>Role</th></tr></thead>
             <tbody>{releaseProvenance.map((p, i) => (
               <tr key={i} className={`role-${p.role}`}>
@@ -173,6 +178,17 @@ function roleLabel(role: AttributionSource["role"]): string {
     case "agreed": return "agreed";
     case "ignored": return "overruled";
   }
+}
+
+// releaseConfidence renders the resolved release's confidence as a band + value,
+// the same treatment os_confidence gets. Without this the number is stored,
+// served and never shown — the write-carry-store-drop shape (§5.6), which the
+// ADR-065 tiering makes load-bearing: a two-vote resolution must read as weaker
+// than a four-vote one, and that only helps if it is on screen.
+function releaseConfidence(confidence?: number) {
+  if (confidence == null) return null;
+  const b = band(confidence);
+  return <span className={`conf conf-${b}`}> · {b} ({confidence.toFixed(2)})</span>;
 }
 
 function releaseRoleLabel(role: ReleaseSource["role"]): string {
