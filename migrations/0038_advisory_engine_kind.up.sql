@@ -1,0 +1,12 @@
+-- 0038: the 'advisory' engine kind (ADR-070, P3.3 last link).
+--
+-- Advisory findings need a rule_id (ADR-004, always) and it must NOT be a
+-- rules-engine rule (ADR-050: the rules engine is closed evaluators, and advisory
+-- version matching is not one of them). So a distinct engine kind, seeded with its
+-- one rule in 0039.
+--
+-- This is its OWN migration, separate from the rule seed, because Postgres forbids
+-- USING a new enum value in the transaction that ADDED it, and golang-migrate runs
+-- each migration file in one transaction. Adding the value here (committed by this
+-- migration's transaction) lets 0039 use it. IF NOT EXISTS keeps a re-up safe.
+ALTER TYPE engine_kind ADD VALUE IF NOT EXISTS 'advisory';

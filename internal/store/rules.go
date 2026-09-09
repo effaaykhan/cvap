@@ -84,3 +84,20 @@ func (Rules) ActiveCoreRules(ctx context.Context, c *Conn) ([]RuleRow, error) {
 	}
 	return out, mapError(rows.Err())
 }
+
+// AdvisoryMatchRuleID returns the id of the single seeded advisory-version-match
+// rule (migration 0039, ADR-070) — the rule every advisory finding hangs on to
+// satisfy rule_id-always (ADR-009, non-negotiable #4), with the CVE carried in vuln_def_id.
+// It is NOT an ActiveCoreRules row: that query filters engine='rules', and this
+// rule is engine='advisory' so the rules engine never evaluates it. ErrNotFound
+// if the seed is missing — the matcher must not invent a rule_id.
+func (Rules) AdvisoryMatchRuleID(ctx context.Context, c *Conn) (uuid.UUID, error) {
+	const q = `SELECT rule_id FROM rules
+	            WHERE engine = 'advisory' AND name = 'advisory-version-match'
+	            ORDER BY version DESC LIMIT 1`
+	var id uuid.UUID
+	if err := c.QueryRow(ctx, q).Scan(&id); err != nil {
+		return uuid.Nil, mapError(err)
+	}
+	return id, nil
+}

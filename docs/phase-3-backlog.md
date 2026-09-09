@@ -40,21 +40,38 @@ The ordered front, most-blocking first:
 1. **B29 — keyspace coverage window (silent under-reporting): BUILT (S33, ADR-067).** The one
    item positioned ahead of the phase, now done: a release past its window reports cannot-know,
    not clean. P3.4 triages a finding set whose completeness is stated, not silently assumed.
-2. **P3.4 — KEV/EPSS prioritisation: BUILT (S34, ADR-069).** The finding list orders by
-   priority, not severity: KEV > exposure > criticality > EPSS > CVSS, KEV bit-packed to dominate
-   the inversion (a KEV CVE outranks a higher-CVSS non-KEV one — demonstrated on Metasploitable,
-   CVE-2012-1823 over CVE-2007-2447). `kev`/`epss` feeds ingested (`make knowledge-kev`/`-epss`),
-   bounds raised deliberately (`MAX_EPSS_ROWS=1,000,000`, 128 MB gunzip guard). Absence is
-   no-signal, never a low value (fifth application). **Remaining P3.3 wiring:** advisory→finding
-   production (B28/B30-bounded) is not built — the model orders CVE-bearing findings and is ready
-   the moment the match→finding link lands; until then the acceptance seeds them (ADR-069).
-3. **P3.3 follow-ups, alongside or after P3.4:** **B24** (Debian-vs-Ubuntu family correctness)
+2. **P3.4 — KEV/EPSS prioritisation model + ingestion: BUILT (S34, ADR-069).** The finding list
+   orders by priority, not severity: KEV > exposure > criticality > EPSS > CVSS, KEV bit-packed to
+   dominate the inversion. `kev`/`epss` feeds ingested (`make knowledge-kev`/`-epss`), bounds raised
+   deliberately (`MAX_EPSS_ROWS=1,000,000`, 128 MB gunzip guard). Absence is no-signal, never a low
+   value (fifth application). **Ordering acceptance is S35**, deliberately split from the matcher
+   (below): the inversion claim is about ordering *real* findings, so it is not built on a matcher
+   from the same session. CVE-2012-2122 is NOT in KEV, so the KEV inversion uses CVE-2012-1823 over
+   CVE-2007-2447 — carried into S35.
+3. **Advisory→finding path — P3.3's last link: BUILT (S34b, ADR-070).** The step that turns the
+   S31 verdict into a finding. Root cause of the NULL `vuln_def_id` was a **path that never ran**:
+   `evaluateFindings` produced only rule-engine findings, the matcher decision lived in a test, and
+   `store.Finding`/`Upsert` had no `vuln_def_id`. Now `evaluateAdvisories` runs in the correlation
+   transaction (gather in store, decide in Go, ADR-062), raising a finding per matched CVE — dedup
+   `(asset, package, cve)`, `source='network'` (banner-inferred, medium confidence), one seeded
+   `advisory-version-match` rule (`engine='advisory'`, migrations 0038/0039) with the CVE in
+   `vuln_def_id`. Acceptance: the sweep produces CVE-2012-2122 on Metasploitable's `mysql-dfsg-5.0`
+   (62 advisory findings on the full keyspace). This makes ADR-068's `vulnerable` reachable in
+   production for the first time. Reach bounded by B28/B30, stated in the ADR.
+4. **B31 — advisory-finding remediation lifecycle (NEW, S34b).** Advisory findings (ADR-070) have
+   no close-on-remediation path yet: `closeRemediated` keys on re-observed *endpoints* (port/proto),
+   and an advisory finding is keyed on the *package*, so a patched package leaves its finding open.
+   The fix is the package analogue of the endpoint lifecycle — on a rescan where the package's
+   version is now at or above the fix, mark the finding remediated with a transition row. Not a
+   blocker for "findings exist" (S34b's scope) but required before the finding set is trustworthy
+   over time. Owner: `correlate`. Unblocker: none — a bounded follow-up.
+5. **P3.3 follow-ups, alongside or after P3.4:** **B24** (Debian-vs-Ubuntu family correctness)
    and **B28** (service-version matchers — folds into #14's corpus manifest) widen reach; **B25**
    is done (S31). **B27** (redraw the ERD / supersede ADR-029) is a docs task, any time — now at
    eighteen ERD-undrawn tables (`kev`/`epss` added S34).
-4. **B26 — rpm proved in situ: ⛔ operator action** (a real RHEL/Rocky/Alma/CentOS host in
+6. **B26 — rpm proved in situ: ⛔ operator action** (a real RHEL/Rocky/Alma/CentOS host in
    scope), not schedulable as a code session.
-5. **Enterprise console (#12): after P3.4**, per ADR-059.
+7. **Enterprise console (#12): after P3.4**, per ADR-059.
 
 Everything below keeps its original section for provenance; the positions above are current.
 

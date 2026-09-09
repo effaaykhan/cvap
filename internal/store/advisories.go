@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Advisory matching reads (P3.2, ADR-014). The knowledge tables are global
@@ -51,6 +53,71 @@ func (Advisories) FixesFor(ctx context.Context, c *Conn, release, pkg string) ([
 			return nil, mapError(err)
 		}
 		out = append(out, f)
+	}
+	return out, mapError(rows.Err())
+}
+
+// PackagesForProduct returns the Ubuntu source packages an advisory keyspace uses
+// for a fingerprint product string ("MySQL" -> mysql-dfsg-5.0, mysql-5.5, ...),
+// the candidate set the matcher runs FixesFor over (ADR-064/070). A product maps
+// to several packages across release lines; the release narrows which actually
+// carry advisories, so a package a release never shipped simply returns no fix —
+// absence of a fix, not evidence of safety (B30). Global-table read from inside a
+// tenant Read (ADR-030), like FixesFor.
+func (Advisories) PackagesForProduct(ctx context.Context, c *Conn, product string) ([]string, error) {
+	const q = `SELECT package_name FROM product_packages WHERE product = $1 ORDER BY package_name`
+	rows, err := c.Query(ctx, q, product)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, p)
+	}
+	return out, mapError(rows.Err())
+}
+
+// AdvisoryVuln is one CVE an advisory fixes: the vuln_def_id that becomes an
+// advisory finding's link, the human-readable CVE id (ADR-009/070), and the CVE's
+// CVSS base if scored — the finding's severity is taken from its band, and nil
+// (unscored) falls back to the rule default rather than reading as 0 (ADR-069's
+// absence rule carried into the finding's own severity).
+type AdvisoryVuln struct {
+	VulnDefID uuid.UUID
+	CVE       string
+	CVSSBase  *float64
+}
+
+// AdvisoryVulnDefs returns every CVE an advisory maps to (advisory_vuln_map). One
+// advisory (one USN) commonly fixes several CVEs, so a single vulnerable match
+// raises one finding per CVE — the (asset, package, cve) dedup (ADR-070). Called
+// only after the version comparison has judged the fix vulnerable, so the fan-out
+// is over confirmed matches, not the whole keyspace.
+func (Advisories) AdvisoryVulnDefs(ctx context.Context, c *Conn, advisoryRef string) ([]AdvisoryVuln, error) {
+	const q = `
+		SELECT vd.vuln_def_id, vd.cve_id, vd.cvss_base
+		  FROM vendor_advisories va
+		  JOIN advisory_vuln_map avm USING (advisory_id)
+		  JOIN vulnerability_defs vd ON vd.vuln_def_id = avm.vuln_def_id
+		 WHERE va.advisory_ref = $1
+		 ORDER BY vd.cve_id`
+	rows, err := c.Query(ctx, q, advisoryRef)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	var out []AdvisoryVuln
+	for rows.Next() {
+		var v AdvisoryVuln
+		if err := rows.Scan(&v.VulnDefID, &v.CVE, &v.CVSSBase); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, v)
 	}
 	return out, mapError(rows.Err())
 }

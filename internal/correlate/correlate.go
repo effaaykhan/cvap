@@ -84,6 +84,13 @@ type Correlator struct {
 	// global (ADR-009) and do not change within a sweep; a rule pack import
 	// between sweeps is picked up at the next one.
 	rules []rules.Rule
+
+	// advisoryRuleID is the seeded advisory-version-match rule (ADR-070), loaded
+	// once per sweep beside the rules. Advisory findings hang on it to satisfy
+	// rule_id-always (ADR-009, non-negotiable #4); the CVE is the vuln_def_id. uuid.Nil disables the
+	// advisory path for the sweep — the seed is missing, and inventing a rule_id
+	// is worse than raising no advisory finding.
+	advisoryRuleID uuid.UUID
 }
 
 func New(db *store.DB, log *slog.Logger) *Correlator {
@@ -176,13 +183,32 @@ type host struct {
 // loadRules reads and validates the active core rules.
 func (c *Correlator) loadRules(ctx context.Context, anyTenant store.TenantID) error {
 	var rows []store.RuleRow
+	var advisoryRuleID uuid.UUID
 	if err := c.db.Read(ctx, anyTenant, func(ctx context.Context, conn *store.Conn) error {
 		var err error
-		rows, err = (store.Rules{}).ActiveCoreRules(ctx, conn)
-		return err
+		if rows, err = (store.Rules{}).ActiveCoreRules(ctx, conn); err != nil {
+			return err
+		}
+		// The advisory-match rule (ADR-070). A missing seed is not fatal to the
+		// sweep — the rule findings still run — so a not-found leaves the id Nil
+		// and disables only the advisory path. Log it loudly: silently producing
+		// zero advisory findings forever is exactly the silent-pass this project
+		// treats as worse than a failure (migration 0039 should always be applied).
+		id, err := (store.Rules{}).AdvisoryMatchRuleID(ctx, conn)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				advisoryRuleID = uuid.Nil
+				c.log.WarnContext(ctx, "advisory-version-match rule not seeded; advisory findings disabled this sweep (migration 0039 missing?)")
+				return nil
+			}
+			return err
+		}
+		advisoryRuleID = id
+		return nil
 	}); err != nil {
 		return err
 	}
+	c.advisoryRuleID = advisoryRuleID
 	in := make([]rules.Rule, 0, len(rows))
 	for _, r := range rows {
 		in = append(in, rules.Rule{
@@ -353,8 +379,9 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		// Release resolution (P3.3, ADR-064) runs only under a known family:
 		// release is far less ambiguous once the family is fixed, and a family-only
 		// host is the honest state to leave when nothing resolves. Same transaction.
+		var release string
 		if family != "" {
-			if err := c.deriveRelease(ctx, conn, assetID, h); err != nil {
+			if release, err = c.deriveRelease(ctx, conn, assetID, h); err != nil {
 				return err
 			}
 		}
@@ -369,6 +396,16 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		}
 		if err := c.evaluateFindings(ctx, conn, assetID, env, h, zoneType, now); err != nil {
 			return err
+		}
+
+		// Advisory findings (ADR-070): the last link of P3.3 — a resolved release
+		// plus a service's banner version, matched against the advisory keyspace,
+		// becomes a finding carrying its CVE. Same transaction, after the release is
+		// written. Skipped when the release did not resolve or the seed is absent.
+		if release != "" && c.advisoryRuleID != uuid.Nil {
+			if err := c.evaluateAdvisories(ctx, conn, assetID, release, h, now); err != nil {
+				return err
+			}
 		}
 
 		for _, o := range h.obs {
@@ -570,7 +607,9 @@ func (c *Correlator) deriveAttribution(ctx context.Context, conn *store.Conn, as
 // not a vote against, in both places — a product with no keyspace analogue and an
 // observed version that matches no band both ABSTAIN (ADR-064). The provenance is
 // written even when unresolved, so the abstentions are visible.
-func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetID uuid.UUID, h host) error {
+// Returns the resolved release ("" if unresolved), so the caller can match
+// advisories against it in the same transaction (ADR-070) without a re-read.
+func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetID uuid.UUID, h host) (string, error) {
 	var votes []domain.ReleaseVote
 	// One vote per listening endpoint (port/protocol), the same unit the services
 	// table dedups on: a service seen across several observations (a rescan) must
@@ -599,7 +638,7 @@ func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetI
 		// (ADR-064: absence must be visible).
 		rows, err := (store.Advisories{}).ReleasesForProduct(ctx, conn, p.Product)
 		if err != nil {
-			return err
+			return "", err
 		}
 		band := domain.UpstreamBand(p.Version)
 		candSet := map[string]struct{}{}
@@ -625,15 +664,23 @@ func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetI
 		})
 	}
 	if len(votes) == 0 {
-		return nil // no service carried a product+version: nothing to resolve or record
+		return "", nil // no service carried a product+version: nothing to resolve or record
 	}
 
 	res := domain.ResolveRelease(votes)
 	prov, err := json.Marshal(res.Provenance)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return (store.Assets{}).SetRelease(ctx, conn, assetID, res.Release, res.Confidence, prov)
+	if err := (store.Assets{}).SetRelease(ctx, conn, assetID, res.Release, res.Confidence, prov); err != nil {
+		return "", err
+	}
+	// res.Release is nil when band voting did not resolve (ADR-064); "" then, which
+	// the caller reads as "no release to match advisories against".
+	if res.Release == nil {
+		return "", nil
+	}
+	return *res.Release, nil
 }
 
 // normaliseOSService collapses service names that name the same platform source

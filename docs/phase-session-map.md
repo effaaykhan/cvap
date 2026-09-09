@@ -22,7 +22,7 @@ agent memory until now.
 | Phase 1 — control plane, scan-point protocol | Weeks 2–3 | 5–11 | complete |
 | Phase 2 — discovery, fingerprint, resolution, findings, UI, hardening | Weeks 4–8 | 12–23 | complete (closed S23) |
 | Phase 2 validation — real-network accuracy | S24 | 24 | done; P3.3 entry condition measured & **failed** (ADR-060), then met by S26–S31 |
-| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–34+ | **P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ · B29 coverage window (S33) ✅ · P3.4 KEV/EPSS prioritisation (S34) ✅ — the matching chain closes and the finding set orders by priority.** B21/B22 entry conditions (ADR-060) met; advisory→finding production (B28/B30) is the remaining P3.3 wiring |
+| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–34+ | **P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ · B29 coverage window (S33) ✅ · P3.4 KEV/EPSS model + ingestion (S34) ✅ · advisory→finding path (S34b, ADR-070) ✅ — the chain closes and produces real CVE-linked findings.** P3.4 ordering acceptance on those findings is S35; reach bounded by B28/B30 |
 
 Weeks and sessions are not one-to-one. The eight-week plan assumed a team; this
 build is sequential under one operator with Claude Code, so a "week" of the plan
@@ -401,19 +401,50 @@ before P3.4 trusts the finding set.
     carries a Priority section (KEV/EPSS/CVSS with honest null semantics — "unlisted",
     "unscored", "unknown"). The knowledge panel already picks up both feeds' freshness
     via `FeedFreshnessAll` (no API change). List cursor is now `(priority_score, id)`.
-  - **★ Acceptance, demonstrated not asserted** (`TestFindingSetOrdersByPriorityNotSeverity`):
-    on one asset, four findings at equal severity. **CVE-2012-2122 (Metasploitable's
-    MySQL) is NOT in KEV** — checked, and it does not show the inversion. So the KEV
-    case is **CVE-2012-1823** (PHP-CGI, in KEV, CVSS 7.5) and it ranks **above
-    CVE-2007-2447** (Samba usermap RCE, not in KEV, **CVSS 10.0**) — both real on
-    Metasploitable, the higher-CVSS one losing to the KEV one. Two more CVEs prove the
-    absence rule: a CVSS-only CVE ranks above a genuinely no-signal one.
   - **`kev`/`epss` are the 8th/9th knowledge tables, 17th/18th ERD-undrawn** — recorded
     in ADR-069 and this file's lists, folded into B27.
-  - **Advisory→finding production is still not wired** (a P3.3 remainder bounded by
-    B28/B30): the model orders findings that carry a `vuln_def_id`, and until the
-    match→finding link lands the CVE-bearing findings are seeded for the acceptance.
-    Nothing in the model assumes seeded data — it is ready the moment the link lands.
+  - **The P3.4 ordering acceptance is DEFERRED to S35, deliberately.** The first cut
+    demonstrated the inversion on a seeded fixture (`TestFindingSetOrdersByPriorityNot-
+    Severity`); on review that was two new things at once — a matcher and an ordering
+    claim about the matcher's output, written the same session. The fixture was
+    removed and the ordering acceptance re-grounded on **real** advisory findings, next
+    session. The finding that CVE-2012-2122 is NOT in KEV (so the KEV inversion needs a
+    different pair — CVE-2012-1823 over CVE-2007-2447) still stands and carries forward.
+
+- **S34b (this session) — the advisory→finding PATH, P3.3's last link (ADR-070).**
+  Root-caused why every finding's `vuln_def_id` was NULL: not a dropped write, a
+  **path that never ran**. `evaluateFindings` produced only rule-engine findings;
+  the advisory matcher's decision (`FixesFor` → comparator → `Vulnerable`) lived only
+  in a test; `store.Finding`/`Upsert` had no `vuln_def_id` field at all. So the whole
+  ADR-067/068 state machine could only ever emit clean/cannot-know — **`vulnerable` was
+  unreachable in production**, the B29 coverage work sitting on a state nothing could
+  reach.
+  - **Built the path** (ADR-070): `evaluateAdvisories` runs in the correlation
+    transaction after release resolution — gather (`PackagesForProduct`, `FixesFor`,
+    `AdvisoryVulnDefs`) in the store, decide the version relation in Go (ADR-062),
+    raise a finding per matched CVE. `store.Finding` gained `VulnDefID`+`Source`;
+    `Upsert` writes them.
+  - **Four model decisions, each settled in the ADR:** dedup `(asset, package, cve)`
+    — the credentialed-row shape, not the port, so one package behind two ports is one
+    finding; `source='network'` because source names how the evidence was *obtained* (a
+    banner), while the package-shaped dedup + medium confidence say the claim is about a
+    package (Phase 4 credentialed supersedes on the shared key); **one** seeded
+    `advisory-version-match` rule (new `engine='advisory'`, migration 0038/0039) with
+    the CVE in `vuln_def_id` (ADR-009's split), not one rule per advisory; reach bounded
+    by B28 (which services carry a version) and B30 (advised ≠ shipped), stated so the
+    first findings are not read as complete coverage.
+  - **★ Acceptance, real not seeded** (`TestAdvisoryFindingProducedOnMetasploitable`):
+    the correlation sweep — nothing in the test does the match — produces a finding
+    for **CVE-2012-2122** on `mysql-dfsg-5.0` (installed `5.0.51a-3ubuntu5` < fixed
+    `5.0.96-0ubuntu3`, dpkg), source `network`, dedup `advisory|{asset}|mysql-dfsg-5.0|
+    CVE-2012-2122`, evidence carrying the advisory, versions and comparator. On the dev
+    DB's full USN keyspace the same host raises **62** advisory findings; on a seed-only
+    CI DB, one. The session stops here: real advisory findings exist, ready for S35 to
+    order.
+  - **Follow-up recorded:** advisory findings have no remediation lifecycle yet (the
+    rule-finding `closeRemediated` is endpoint-keyed and does not apply to a
+    package-keyed finding) — a patched package leaves its finding open until that lands.
+    Noted in the backlog, not silently left.
 
 ---
 

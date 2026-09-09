@@ -20,6 +20,14 @@ type Finding struct {
 	Severity   string
 	Confidence float64
 	Summary    string
+
+	// Source is the finding_source enum; empty defaults to "network" (the rule
+	// and banner-advisory paths both observe over the network). VulnDefID is the
+	// optional CVE link (ADR-009): uuid.Nil means none, which is the common case —
+	// nothing branches on its presence. An advisory finding sets both, carrying
+	// the CVE it matched (ADR-070).
+	Source    string
+	VulnDefID uuid.UUID
 }
 
 // FindingEvidence is what a human verifies the finding by, copied from the
@@ -69,23 +77,36 @@ func (Findings) Upsert(ctx context.Context, c *Conn, f Finding, seenAt time.Time
 		}
 	}
 
+	source := f.Source
+	if source == "" {
+		source = "network"
+	}
+	var vulnDef any
+	if f.VulnDefID != uuid.Nil {
+		vulnDef = f.VulnDefID
+	}
+
+	// vuln_def_id is written now (ADR-070): the advisory path carries the CVE it
+	// matched, and ON CONFLICT keeps it fresh so a reopened advisory finding does
+	// not lose its link. A rule finding passes uuid.Nil and stays unlinked.
 	const ins = `
 		INSERT INTO findings (
 		    tenant_id, asset_id, rule_id, source, dedup_key, instance_locator,
-		    severity, confidence, status, first_seen, last_seen)
-		VALUES ($1, $2, $3, 'network', $4, nullif($5,''), $6, $7, 'open', $8, $8)
+		    severity, confidence, status, first_seen, last_seen, vuln_def_id)
+		VALUES ($1, $2, $3, $4::finding_source, $5, nullif($6,''), $7, $8, 'open', $9, $9, $10)
 		ON CONFLICT (tenant_id, dedup_key) DO UPDATE SET
-		    severity   = excluded.severity,
-		    confidence = excluded.confidence,
-		    last_seen  = excluded.last_seen,
+		    severity    = excluded.severity,
+		    confidence  = excluded.confidence,
+		    last_seen   = excluded.last_seen,
+		    vuln_def_id = excluded.vuln_def_id,
 		    status = CASE
 		        WHEN findings.status IN ('remediated', 'closed') THEN 'open'
 		        ELSE findings.status
 		    END
 		RETURNING finding_id`
 
-	if e := c.QueryRow(ctx, ins, c.Tenant().UUID(), f.AssetID, f.RuleID, f.DedupKey,
-		f.Locator, f.Severity, f.Confidence, seenAt).Scan(&id); e != nil {
+	if e := c.QueryRow(ctx, ins, c.Tenant().UUID(), f.AssetID, f.RuleID, source, f.DedupKey,
+		f.Locator, f.Severity, f.Confidence, seenAt, vulnDef).Scan(&id); e != nil {
 		return uuid.Nil, false, mapError(e)
 	}
 
