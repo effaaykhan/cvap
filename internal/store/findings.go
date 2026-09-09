@@ -396,6 +396,13 @@ func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, beforeSc
 	// tuned. risk = COALESCE(epss, cvss/10): an unscored-EPSS finding is ranked by
 	// the CVSS we know, NOT dropped to zero (absence is not a low value, ADR-069);
 	// only a finding with neither falls to 0 there and is flagged 'unscored'.
+	//
+	// The exposure term is CATEGORICAL, not continuous (ADR-074): it weighs whether
+	// the finding sits in an external/dmz zone (a boolean from zone_type), NOT a
+	// reachability probability. It is a zone classification an operator declared,
+	// the ceiling ADR-074 states — a real per-asset reachability determination (an
+	// external scan point observing the asset) is backlog B32, not this term. The
+	// model says what it weighs rather than implying a precision the input lacks.
 	const q = `
 		SELECT * FROM (
 		  SELECT f.finding_id, r.name, r.category, f.severity::text, f.status::text,
