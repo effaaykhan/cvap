@@ -446,6 +446,27 @@ before P3.4 trusts the finding set.
     package-keyed finding) — a patched package leaves its finding open until that lands.
     Noted in the backlog, not silently left.
 
+- **S34c (this session) — advisory-finding confidence composed, not constant (ADR-072).**
+  The path shipped with a constant confidence (0.5); a constant is as wrong as 1.00
+  because it hides which input is weak. An advisory finding rests on four inputs and
+  only one — the dpkg/rpm comparator — is exact; the other three are inferences:
+  release resolution (ADR-065 tiers), version extraction from a banner (ADR-014
+  medium), and the product→package map (content, ADR-064/071).
+  - **Confidence is the MINIMUM of the three inferences** (the comparator contributes
+    1.0 and never binds). Min, not product: a product of four plausible values
+    collapses misleadingly low and cannot be inverted; min says "as trustworthy as the
+    weakest input" and a 0.60 finding means every input was ≥0.60 with the weakest
+    exactly there. The finding's evidence carries the breakdown, so the weakest input
+    is visible, not reconstructed.
+  - **Acceptance updated:** the Metasploitable finding is now **0.60** (banner-bound:
+    release 0.80, banner 0.60, map 0.90), not the old 0.5 — an inferred claim that
+    visibly does not borrow the certainty of the exact comparator beneath it.
+  - **Ordering signal recorded in the backlog** (not only in the items): three
+    independent gaps — B30 (completeness), B31 + ADR-071 (lifecycle/identity), ADR-072
+    (version confidence) — now converge on credentialed assessment. Three distinct
+    gaps sharing one fix is structural, and it belongs where the sequencing is decided.
+    Phase 4 is **not** pulled forward yet; the accumulation is made visible for when it is.
+
 ---
 
 ## 3. Artifact inventory (as of S31)

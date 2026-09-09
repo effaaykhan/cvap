@@ -27,7 +27,7 @@ import (
 // Absence is not evidence, throughout: a service with no version is not matched at
 // all (B28 — absence of a version, not of risk), and a package a release never
 // carried returns no fix (B30 — no advisory among advised packages, not safety).
-func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, assetID uuid.UUID, release string, h host, now time.Time) error {
+func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, assetID uuid.UUID, release string, releaseConf float64, h host, now time.Time) error {
 	type match struct {
 		pkg         string
 		vuln        store.AdvisoryVuln
@@ -36,6 +36,7 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 		comparator  string
 		product     string
 		installed   string
+		versionConf float64 // best (max) version-extraction confidence among contributing observations
 		zones       []uuid.UUID
 		obsID       uuid.UUID
 		observedAt  time.Time
@@ -96,26 +97,39 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 					m.zones = appendZone(m.zones, so.ZoneID)
 					m.obsID = so.ObservationID
 					m.observedAt = so.ObservedAt
+					// Best evidence wins: if the same package was seen by two methods
+					// (a volunteered banner and an active probe), take the higher.
+					if vc := versionConfidence(so.Method); vc > m.versionConf {
+						m.versionConf = vc
+					}
 				}
 			}
 		}
 	}
 
 	for key, m := range matches {
+		// The finding's confidence is the MINIMUM of its inference inputs, not a
+		// constant and not their product (ADR-072). The comparator is exact (ADR-062)
+		// and contributes 1.0, so it never binds; the three inferences — release
+		// resolution (ADR-065), version extraction from a banner (ADR-014), and the
+		// product->package map (content, ADR-064/071) — each cap the finding, and the
+		// weakest is the honest bound. min, not product: a product of four plausible
+		// values collapses to a misleadingly low number, whereas min says "only as
+		// trustworthy as the weakest input" and is interpretable — a 0.80 finding
+		// means every input was >= 0.80 and the weakest was exactly that.
+		conf := minConf(releaseConf, m.versionConf, packageMapConfidence)
 		id, _, err := (store.Findings{}).Upsert(ctx, conn, store.Finding{
 			AssetID:  assetID,
 			RuleID:   c.advisoryRuleID,
 			DedupKey: key,
 			// The finding is about the package, so the locator is the package name,
 			// not a port — matching the package-shaped dedup (ADR-070).
-			Locator:  m.pkg,
-			Severity: severityFromCVSS(m.vuln.CVSSBase),
-			// Banner-inferred: the version came from an unauthenticated banner, so
-			// the confidence is medium (ADR-014), matching the rule's base_confidence.
-			Confidence: 0.5,
+			Locator:    m.pkg,
+			Severity:   severityFromCVSS(m.vuln.CVSSBase),
+			Confidence: conf,
 			// The evidence was collected over the network (source names collection,
-			// ADR-070); the package-shaped dedup and medium confidence carry the
-			// "about a package, seen over the network" reading.
+			// ADR-070); the package-shaped dedup and composed confidence carry the
+			// "about a package, seen over the network, inferred not read" reading.
 			Source:    "network",
 			VulnDefID: m.vuln.VulnDefID,
 		}, now)
@@ -127,7 +141,9 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 		}
 		// Everything an analyst needs to confirm the match by hand without
 		// re-scanning (write-detection-rule evidence rule): the advisory, the CVE,
-		// the package, and the two versions the comparator judged.
+		// the package, the two versions the comparator judged — and the confidence
+		// breakdown, so a 0.80 finding shows WHICH input was weakest (ADR-072), not
+		// just the number.
 		if err := (store.Findings{}).ReplaceEvidence(ctx, conn, id, []store.FindingEvidence{{
 			ObservationID: m.obsID,
 			Type:          "response",
@@ -139,6 +155,14 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 				"installed_version": m.installed,
 				"fixed_version":     m.fixed,
 				"comparator":        m.comparator,
+				"confidence_inputs": map[string]any{
+					"release_resolution": releaseConf,
+					"version_extraction": m.versionConf,
+					"package_map":        packageMapConfidence,
+					"comparator":         "exact (1.0)",
+					"composed":           conf,
+					"rule":               "min of the three inferences (ADR-072)",
+				},
 			},
 			CapturedAt: m.observedAt,
 		}}); err != nil {
@@ -146,6 +170,43 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 		}
 	}
 	return nil
+}
+
+// packageMapConfidence is the trust in the product->package mapping (ADR-064/071):
+// curated content, but a fingerprint product string is matched to a source package
+// by a human-maintained table, so it is an inference, not a certainty. It caps an
+// advisory finding at 0.90 — even a perfectly resolved release and a clean version
+// read cannot make the finding more certain than the package guess behind it.
+const packageMapConfidence = 0.90
+
+// versionConfidence is how much to trust the installed version the finding rests on,
+// by how it was obtained. A volunteered banner is medium at best (ADR-014); an active
+// probe that elicited the version is better; an unknown method is treated conservatively.
+// This is the version-EXTRACTION confidence, distinct from the observation's own
+// confidence (that we saw the banner) — the question here is whether the banner's
+// version matches what is installed.
+func versionConfidence(method string) float64 {
+	switch method {
+	case "banner":
+		return 0.60
+	case "probe":
+		return 0.75
+	default:
+		return 0.50
+	}
+}
+
+// minConf returns the smallest of the confidences — the weakest-link composition
+// (ADR-072). Ignores non-positive inputs so an absent signal does not zero the
+// finding; a genuine input is always > 0.
+func minConf(vals ...float64) float64 {
+	m := 1.0
+	for _, v := range vals {
+		if v > 0 && v < m {
+			m = v
+		}
+	}
+	return m
 }
 
 // severityFromCVSS maps a CVE's CVSS base to the finding severity band. An

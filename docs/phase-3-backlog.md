@@ -82,6 +82,27 @@ The ordered front, most-blocking first:
    scope), not schedulable as a code session.
 7. **Enterprise console (#12): after P3.4**, per ADR-059.
 
+**Sequencing signal — three independent gaps now point at credentialed assessment (Phase 4).**
+This is recorded here, at the ordering level, not only inside the items, because it is where the
+sequencing gets decided. The three are not one problem seen thrice; they are distinct gaps that
+happen to share a fix:
+
+- **B30** — the keyspace holds *advised* packages, not *shipped* ones, so a no-match on a
+  never-advised package reads clean for the wrong reason (completeness).
+- **B31** — advisory findings have no remediation lifecycle, and the one they need is complicated by
+  the map-derived identity (ADR-071) (lifecycle + identity).
+- **ADR-072 / version confidence** — the installed version is a banner inference, which caps every
+  advisory finding's confidence at medium (trust).
+
+A credentialed read of the package manager answers all three at once: it gives the *installed* set
+(B30 dissolves), the authoritative package name and version (B31's identity problem and ADR-071's
+re-key fragility dissolve), and a near-exact version so ADR-072's min stops binding on version
+(confidence rises). **Three independent gaps converging on one fix is a structural signal, not a
+coincidence** — the kind that should move a phase's ordering. It is recorded, not acted on: Phase 4
+is **not** pulled forward yet, and P3.4 (ordering the findings that now exist) comes next as planned.
+But the next time a fourth gap lands here, the decision to resequence should be made deliberately
+against this accumulation, not rediscovered.
+
 Everything below keeps its original section for provenance; the positions above are current.
 
 ### Before Phase 3 — finish the floor before building on it

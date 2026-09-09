@@ -380,8 +380,9 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		// release is far less ambiguous once the family is fixed, and a family-only
 		// host is the honest state to leave when nothing resolves. Same transaction.
 		var release string
+		var releaseConf float32
 		if family != "" {
-			if release, err = c.deriveRelease(ctx, conn, assetID, h); err != nil {
+			if release, releaseConf, err = c.deriveRelease(ctx, conn, assetID, h); err != nil {
 				return err
 			}
 		}
@@ -403,7 +404,7 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		// becomes a finding carrying its CVE. Same transaction, after the release is
 		// written. Skipped when the release did not resolve or the seed is absent.
 		if release != "" && c.advisoryRuleID != uuid.Nil {
-			if err := c.evaluateAdvisories(ctx, conn, assetID, release, h, now); err != nil {
+			if err := c.evaluateAdvisories(ctx, conn, assetID, release, float64(releaseConf), h, now); err != nil {
 				return err
 			}
 		}
@@ -607,9 +608,10 @@ func (c *Correlator) deriveAttribution(ctx context.Context, conn *store.Conn, as
 // not a vote against, in both places — a product with no keyspace analogue and an
 // observed version that matches no band both ABSTAIN (ADR-064). The provenance is
 // written even when unresolved, so the abstentions are visible.
-// Returns the resolved release ("" if unresolved), so the caller can match
-// advisories against it in the same transaction (ADR-070) without a re-read.
-func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetID uuid.UUID, h host) (string, error) {
+// Returns the resolved release ("" if unresolved) and its confidence (ADR-065),
+// so the caller can match advisories against it in the same transaction (ADR-070)
+// without a re-read, and compose the finding's confidence from it (ADR-072).
+func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetID uuid.UUID, h host) (string, float32, error) {
 	var votes []domain.ReleaseVote
 	// One vote per listening endpoint (port/protocol), the same unit the services
 	// table dedups on: a service seen across several observations (a rescan) must
@@ -638,7 +640,7 @@ func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetI
 		// (ADR-064: absence must be visible).
 		rows, err := (store.Advisories{}).ReleasesForProduct(ctx, conn, p.Product)
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		band := domain.UpstreamBand(p.Version)
 		candSet := map[string]struct{}{}
@@ -664,23 +666,23 @@ func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetI
 		})
 	}
 	if len(votes) == 0 {
-		return "", nil // no service carried a product+version: nothing to resolve or record
+		return "", 0, nil // no service carried a product+version: nothing to resolve or record
 	}
 
 	res := domain.ResolveRelease(votes)
 	prov, err := json.Marshal(res.Provenance)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if err := (store.Assets{}).SetRelease(ctx, conn, assetID, res.Release, res.Confidence, prov); err != nil {
-		return "", err
+		return "", 0, err
 	}
 	// res.Release is nil when band voting did not resolve (ADR-064); "" then, which
 	// the caller reads as "no release to match advisories against".
 	if res.Release == nil {
-		return "", nil
+		return "", 0, nil
 	}
-	return *res.Release, nil
+	return *res.Release, res.Confidence, nil
 }
 
 // normaliseOSService collapses service names that name the same platform source

@@ -53,14 +53,15 @@ func TestAdvisoryFindingProducedOnMetasploitable(t *testing.T) {
 	// its CVE. Advisory findings are exactly those with a vuln_def_id (rule findings
 	// carry none), so this isolates them without guessing.
 	type row struct {
-		cve       string
-		source    string
-		dedup     string
-		locator   string
-		severity  string
-		assetID   string
-		evidence  map[string]any
-		vulnCount int
+		cve        string
+		source     string
+		dedup      string
+		locator    string
+		severity   string
+		assetID    string
+		confidence float64
+		evidence   map[string]any
+		vulnCount  int
 	}
 	var got row
 	if err := db.Read(ctx, s.tenant, func(ctx context.Context, cn *store.Conn) error {
@@ -78,13 +79,13 @@ func TestAdvisoryFindingProducedOnMetasploitable(t *testing.T) {
 		var ev []byte
 		if err := cn.QueryRow(ctx, `
 			SELECT vd.cve_id, f.source::text, f.dedup_key, coalesce(f.instance_locator,''),
-			       f.severity::text, f.asset_id::text, e.data
+			       f.severity::text, f.asset_id::text, f.confidence, e.data
 			  FROM findings f
 			  JOIN vulnerability_defs vd ON vd.vuln_def_id = f.vuln_def_id
 			  LEFT JOIN evidence e ON e.tenant_id = f.tenant_id AND e.finding_id = f.finding_id
 			 WHERE f.tenant_id=$1 AND vd.cve_id = 'CVE-2012-2122'
 			 LIMIT 1`, s.tenant.UUID()).Scan(
-			&got.cve, &got.source, &got.dedup, &got.locator, &got.severity, &got.assetID, &ev); err != nil {
+			&got.cve, &got.source, &got.dedup, &got.locator, &got.severity, &got.assetID, &got.confidence, &ev); err != nil {
 			return err
 		}
 		return json.Unmarshal(ev, &got.evidence)
@@ -120,11 +121,30 @@ func TestAdvisoryFindingProducedOnMetasploitable(t *testing.T) {
 	default:
 		t.Errorf("severity = %q, not a valid band", got.severity)
 	}
-	// The evidence lets an analyst confirm the match by hand without re-scanning.
-	for _, k := range []string{"advisory", "cve", "package", "installed_version", "fixed_version", "comparator"} {
+	// Confidence is COMPOSED, not a constant (ADR-072): the minimum of release
+	// resolution (2 unanimous votes -> 0.80), version extraction (a banner -> 0.60),
+	// and the package map (0.90). The weakest is the banner, so the finding is 0.60 —
+	// not the old fixed 0.5, and not 1.00. This is the whole point: an inferred claim
+	// must not look as certain as an exact one.
+	if got.confidence < 0.595 || got.confidence > 0.605 {
+		t.Errorf("confidence = %.3f, want ~0.60 (min of release 0.80, banner 0.60, map 0.90)", got.confidence)
+	}
+	// The evidence lets an analyst confirm the match by hand without re-scanning,
+	// AND shows which input was weakest (ADR-072).
+	for _, k := range []string{"advisory", "cve", "package", "installed_version", "fixed_version", "comparator", "confidence_inputs"} {
 		if got.evidence[k] == nil || got.evidence[k] == "" {
 			t.Errorf("evidence missing %q: %+v", k, got.evidence)
 		}
+	}
+	// The breakdown names version_extraction as the weakest input here.
+	if ci, ok := got.evidence["confidence_inputs"].(map[string]any); ok {
+		ve, _ := ci["version_extraction"].(float64)
+		composed, _ := ci["composed"].(float64)
+		if ve > composed+0.001 {
+			t.Errorf("confidence_inputs should show version_extraction (%.2f) as the binding minimum (composed %.2f)", ve, composed)
+		}
+	} else {
+		t.Errorf("evidence confidence_inputs not a breakdown object: %+v", got.evidence["confidence_inputs"])
 	}
 	if got.evidence["installed_version"] != "5.0.51a-3ubuntu5" || got.evidence["fixed_version"] != "5.0.96-0ubuntu3" {
 		t.Errorf("evidence versions wrong: installed=%v fixed=%v",
