@@ -40,14 +40,17 @@ The ordered front, most-blocking first:
 1. **B29 — keyspace coverage window (silent under-reporting): BUILT (S33, ADR-067).** The one
    item positioned ahead of the phase, now done: a release past its window reports cannot-know,
    not clean. P3.4 triages a finding set whose completeness is stated, not silently assumed.
-2. **P3.4 — KEV/EPSS prioritisation model + ingestion: BUILT (S34, ADR-069).** The finding list
-   orders by priority, not severity: KEV > exposure > criticality > EPSS > CVSS, KEV bit-packed to
-   dominate the inversion. `kev`/`epss` feeds ingested (`make knowledge-kev`/`-epss`), bounds raised
-   deliberately (`MAX_EPSS_ROWS=1,000,000`, 128 MB gunzip guard). Absence is no-signal, never a low
-   value (fifth application). **Ordering acceptance is S35**, deliberately split from the matcher
-   (below): the inversion claim is about ordering *real* findings, so it is not built on a matcher
-   from the same session. CVE-2012-2122 is NOT in KEV, so the KEV inversion uses CVE-2012-1823 over
-   CVE-2007-2447 — carried into S35.
+2. **P3.4 — KEV/EPSS prioritisation: COMPLETE (S34 model + ingestion, S36 acceptance; ADR-069).**
+   The finding list orders by priority, not severity: KEV > exposure > criticality > EPSS > CVSS,
+   KEV bit-packed to dominate the inversion. `kev`/`epss` feeds ingested (`make knowledge-kev`/
+   `-epss`), bounds raised deliberately (`MAX_EPSS_ROWS=1,000,000`, 128 MB gunzip guard). Absence is
+   no-signal, never a low value (the sixth absence-is-not-evidence application, once ADR-070's
+   no-version/advised≠shipped are counted; ADR-069 said "fifth" and is frozen). **Ordering acceptance
+   landed S36 on REAL pipeline findings** (not a fixture — it waited for ADR-070's advisory findings
+   to exist): `TestFindingSetOrdersByPriorityOnMetasploitable` produces both CVEs via the sweep and
+   `Findings.List` ranks **CVE-2012-1823 (KEV, CVSS 7.5) above CVE-2007-2447 (non-KEV, CVSS 10.0)** —
+   the inversion. CVE-2012-2122 was checked and is NOT in KEV, so it is not the demonstrator.
+   Exposure (`internet_reachable`, #6) is the model's weak term and ADR-069 says so.
 3. **Advisory→finding path — P3.3's last link: BUILT (S34b, ADR-070).** The step that turns the
    S31 verdict into a finding. Root cause of the NULL `vuln_def_id` was a **path that never ran**:
    `evaluateFindings` produced only rule-engine findings, the matcher decision lived in a test, and

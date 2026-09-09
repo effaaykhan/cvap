@@ -22,7 +22,7 @@ agent memory until now.
 | Phase 1 — control plane, scan-point protocol | Weeks 2–3 | 5–11 | complete |
 | Phase 2 — discovery, fingerprint, resolution, findings, UI, hardening | Weeks 4–8 | 12–23 | complete (closed S23) |
 | Phase 2 validation — real-network accuracy | S24 | 24 | done; P3.3 entry condition measured & **failed** (ADR-060), then met by S26–S31 |
-| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–34+ | **P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ · B29 coverage window (S33) ✅ · P3.4 KEV/EPSS model + ingestion (S34) ✅ · advisory→finding path (S34b, ADR-070) ✅ — the chain closes and produces real CVE-linked findings.** P3.4 ordering acceptance on those findings is S35; reach bounded by B28/B30 |
+| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–36 | **P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ · B29 coverage window (S33) ✅ · P3.4 KEV/EPSS model + ingestion (S34) ✅ · advisory→finding path (S34b, ADR-070) ✅ · confidence by weakest link (S34c/d, ADR-072/073) ✅ · P3.4 ordering acceptance on real findings (S36) ✅ — the chain closes, produces real CVE-linked findings, and orders them by priority.** Reach bounded by B28/B30; enterprise console (#12) is next |
 
 Weeks and sessions are not one-to-one. The eight-week plan assumed a team; this
 build is sequential under one operator with Claude Code, so a "week" of the plan
@@ -480,6 +480,38 @@ before P3.4 trusts the finding set.
   response-shape version extraction is the first sub-1.0 input that will exercise it.
   The Metasploitable acceptance now asserts **0.80** (release-bound), and the backlog
   ordering-signal bullet is corrected — version is not a cap today, it becomes one at B28.
+
+- **S36 (this session) — P3.4's ordering acceptance, on REAL findings (ADR-069).**
+  The KEV/EPSS ingestion, the priority model, the bounds, the grants, and the UI all
+  shipped in S34 (ADR-069, `87b2d6e`); this session did NOT rebuild them — it verified
+  each requirement against the committed code and landed the acceptance that was
+  deliberately deferred until real advisory findings existed (they do, since ADR-070).
+  - **Verified against the code, not asserted:** ordering `KEV·1e9 > exposure·1e8 >
+    criticality·1e7 > coalesce(epss,cvss/10)·1e3 > severity` (findings.go); absence
+    handled by `coalesce(epss, cvss/10)` so an unscored EPSS falls back to the CVSS we
+    know, never 0 — the "missing value quietly becomes a zero" trap avoided; bounds
+    `MAX_EPSS_ROWS=1,000,000` + 128 MB gunzip guard, refuse-not-truncate; freshness KEV
+    7 days / EPSS 2 days; grants SELECT-only `cvap_app`, writes `cvap_knowledge_import`;
+    UI KEV badge + priority-sorted list + EPSS column.
+  - **The CVE-2012-2122 check, answered from the feed not from memory:** it is NOT in
+    KEV (in_kev=f, EPSS 0.965, no CVSS), so it cannot show the inversion. The pair that
+    does, both real on Metasploitable and both KEV/EPSS-verified: **CVE-2012-1823**
+    (PHP-CGI, in KEV, EPSS 0.99998, CVSS **7.5**) and **CVE-2007-2447** (Samba usermap,
+    not KEV, EPSS 0.71, CVSS **10.0**).
+  - **★ Acceptance, on pipeline findings not a fixture**
+    (`TestFindingSetOrdersByPriorityOnMetasploitable`): the sweep produces advisory
+    findings for both CVEs (via ADR-070), and `Findings.List`'s own priority order ranks
+    **CVE-2012-1823 at #0** (score 1,001,000,003) **above CVE-2007-2447 at #5** (score
+    710,004) — the KEV CVE outranking the higher-CVSS non-KEV one, KEV's 1e9 boundary
+    the structural driver. The finding set orders by priority, not severity.
+  - **Exposure is the model's weak term, stated (requirement 4):** `internet_reachable`
+    is zone-derived and unwritten (#6), so the 1e8 exposure term rarely discriminates and
+    the order degrades in practice to KEV > criticality > EPSS/CVSS — the same honesty
+    ADR-071/073 applied to confidence, recorded in ADR-069.
+  - **Absence is not evidence — recount:** ADR-069 (frozen) called KEV/EPSS the *fifth*
+    application; with ADR-070's "no version = no match, not safe" (B28) and "advised ≠
+    shipped" (B30) landing between, KEV/EPSS is more precisely the **sixth**. The ADR is
+    not edited (freeze); the recount is recorded here.
 
 ---
 
