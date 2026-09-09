@@ -34,12 +34,26 @@ func seedCoverage(t *testing.T) {
 		t.Fatalf("connect as import role: %v", err)
 	}
 	defer pool.Close()
-	if _, err := pool.Exec(ctx,
+	for _, s := range []string{
 		`INSERT INTO release_coverage (feed, distro_release, release_date, support_expires, esm_expires, coverage_source, last_fetched_at)
 		 VALUES ('ubuntu-usn','hardy','2008-04-24','2008-04-24','2008-04-24','feed-degenerate', now()),
 		        ('ubuntu-usn','jammy','2022-04-21','2027-04-30','2032-04-30','feed', now())
-		 ON CONFLICT (feed, distro_release) DO NOTHING`); err != nil {
-		t.Fatalf("seed coverage: %v", err)
+		 ON CONFLICT (feed, distro_release) DO NOTHING`,
+		// A hardy advisory WITH an issued_at, so CoverageAll's newest-advisory
+		// display value is populated on a fresh CI database. Not relying on the
+		// dev DB's real import (whose advisories carry dates) — a seed must stand
+		// on its own, or it passes locally and fails on a clean CI checkout.
+		`INSERT INTO vendor_advisories (advisory_ref, vendor, issued_at)
+		 VALUES ('TEST-HARDY-COV','ubuntu','2012-05-01T00:00:00Z')
+		 ON CONFLICT (advisory_ref) DO UPDATE SET issued_at = excluded.issued_at`,
+		`INSERT INTO advisory_fixed_packages (advisory_id, distro_release, package_name, fixed_version, comparator)
+		 SELECT advisory_id, 'hardy', 'coverage-probe-pkg', '1.0', 'dpkg'::version_comparator
+		   FROM vendor_advisories WHERE advisory_ref='TEST-HARDY-COV'
+		 ON CONFLICT (advisory_id, distro_release, package_name) DO NOTHING`,
+	} {
+		if _, err := pool.Exec(ctx, s); err != nil {
+			t.Fatalf("seed coverage: %v", err)
+		}
 	}
 }
 
@@ -95,10 +109,9 @@ func TestCoverageAllListsIngestedReleases(t *testing.T) {
 	ctx := context.Background()
 	tenant := newTenant(t, db, "covall-"+uuid.NewString()[:8])
 
-	// A hardy advisory must exist for hardy to appear in CoverageAll (it starts
-	// from releases the keyspace holds advisories for). The advisory-match suite
-	// seeds USN-1467-1; ensure at least one hardy row via the import role.
-	seedUSNAdvisory(t)
+	// seedCoverage seeds a hardy advisory WITH an issued_at, so hardy appears in
+	// CoverageAll (which starts from releases the keyspace holds advisories for)
+	// and its newest-advisory display value is populated on a fresh DB.
 
 	var all []store.ReleaseCoverage
 	if err := db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
