@@ -417,9 +417,10 @@ func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, beforeSc
 		         e.score AS epss, e.percentile AS epss_pct, vd.cvss_base AS cvss,
 		         ( (CASE WHEN k.cve_id IS NOT NULL THEN 1 ELSE 0 END)::bigint * 1000000000
 		         + (CASE WHEN EXISTS (SELECT 1 FROM finding_exposure fx
-		                               JOIN scan_zones z ON z.tenant_id = fx.tenant_id AND z.zone_id = fx.zone_id
 		                               WHERE fx.tenant_id = f.tenant_id AND fx.finding_id = f.finding_id
-		                                 AND z.zone_type IN ('external','dmz')) THEN 1 ELSE 0 END)::bigint * 100000000
+		                                 AND fx.zone_id IN (SELECT z.zone_id FROM scan_zones z
+		                                                     WHERE z.tenant_id = $1 AND z.zone_type IN ('external','dmz')))
+		                 THEN 1 ELSE 0 END)::bigint * 100000000
 		         + (CASE a.criticality WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)::bigint * 10000000
 		         + coalesce(round(coalesce(e.score, vd.cvss_base/10.0) * 1000), 0)::bigint * 1000
 		         + (CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)::bigint
