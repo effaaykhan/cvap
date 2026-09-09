@@ -22,7 +22,7 @@ agent memory until now.
 | Phase 1 — control plane, scan-point protocol | Weeks 2–3 | 5–11 | complete |
 | Phase 2 — discovery, fingerprint, resolution, findings, UI, hardening | Weeks 4–8 | 12–23 | complete (closed S23) |
 | Phase 2 validation — real-network accuracy | S24 | 24 | done; P3.3 entry condition measured & **failed** (ADR-060), then met by S26–S31 |
-| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–36 | **P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ · B29 coverage window (S33) ✅ · P3.4 KEV/EPSS model + ingestion (S34) ✅ · advisory→finding path (S34b, ADR-070) ✅ · confidence by weakest link (S34c/d, ADR-072/073) ✅ · P3.4 ordering acceptance on real findings (S36) ✅ — the chain closes, produces real CVE-linked findings, and orders them by priority.** Reach bounded by B28/B30; enterprise console (#12) is next |
+| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–36 | **COMPLETE (S36).** P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ · B29 coverage window (S33) ✅ · P3.4 KEV/EPSS model + ingestion (S34) ✅ · advisory→finding path (S34b, ADR-070) ✅ · confidence by weakest link (S34c/d, ADR-072/073) ✅ · P3.4 ordering acceptance on real findings (S36) ✅ · #6 exposure resolved (S36, ADR-074) ✅ — the chain closes, produces real CVE-linked findings, and orders them by priority. Reach bounded by B28/B30; the enterprise console (#12) and the credentialed-assessment sequencing decision are the next conversations |
 
 Weeks and sessions are not one-to-one. The eight-week plan assumed a team; this
 build is sequential under one operator with Claude Code, so a "week" of the plan
@@ -515,12 +515,23 @@ before P3.4 trusts the finding set.
 
 ---
 
-## 3. Artifact inventory (as of S31)
+## 3. Artifact inventory (as of S36)
 
-**ADRs.** 001–068 accepted (`docs/adr/`, index at `000-index.md`). Corrections are
+**S32–S36 delta (Phase 3.4 + closing).** New since the S31 snapshot: ADRs 069
+(KEV/EPSS prioritisation), 070 (advisory→finding path), 071 (dedup map fragility),
+072 (confidence = min of inputs), 073 (confidence 1.0 pass-throughs), 074 (exposure
+from zone_type, #6 resolved). Migrations 0037 (`kev`/`epss`), 0038/0039 (advisory
+engine kind + rule), 0040 (drop `internet_reachable`). `knowledge/risk_ingest.py`
+(`make knowledge-kev`/`-epss`). `internal/correlate/advisories.go` (advisory matcher).
+The finding list is priority-ordered with a KEV badge + EPSS column. Backlog grew by
+B29 (done S33), B30, B31 — the three now converging on credentialed assessment (§4's
+sequencing note). The rest of this section is the S31 snapshot and is not re-verified
+here; the deltas above are the current additions.
+
+**ADRs.** 001–074 accepted (`docs/adr/`, index at `000-index.md`). Corrections are
 recorded as new ADRs, never edits: 028 corrects the pre-release contract; 041
 supersedes 033; 044 corrects 042; 046 corrects 045; the Phase-3 matching chain is
-059→060→061→062→063→064→065→066→067→068, each refining the last, none rewritten. The freeze
+059→060→061→062→063→064→065→066→067→068→069→070→071→072→073→074, each refining the last, none rewritten. The freeze
 rule holds — a committed ADR is superseded, never rewritten.
 
 **Migrations.** 0001–0035. Every tenant-scoped table carries `tenant_id` + RLS
@@ -762,6 +773,42 @@ and asserts the derived asset or finding *surfaces* it — the §5.5 presence as
 applied to fields rather than to corpus entries. That would have caught `osHint`:
 "a fingerprint OS hint produces a non-null `os_family`" is a one-case test, and it
 fails today.
+
+### 5.7 A correct model undone by the query that reads it
+
+The first six patterns are about a *value* being wrong or unread. This one is
+different in shape: the model is **right** and the layer that reads it collapses the
+answer anyway. The decision is sound; the query that surfaces it is not, and the
+output is wrong while every test of the scorer passes.
+
+Two instances, and the second is why this is now its own pattern:
+
+1. **`LIMIT` with no `ORDER BY`** (`internal/store/oidc.go:169`, and the assets CSV
+   cap, `assets.go:471`). The row set is correct; a `LIMIT` over it with no order
+   returns an *arbitrary* subset, so "the newest N" or "the one match" silently
+   becomes "some N" / "some row". The fix was an explicit `ORDER BY` before the
+   `LIMIT` — the decision about which rows was moved into the query that reads them.
+2. **The P3.4 priority model vs its ordering query.** `priority_score` is a correct
+   lexicographic encoding (KEV dominates, ADR-069); but the finding set's order is
+   whatever the `List` query's `ORDER BY priority_score DESC, finding_id DESC` and
+   its keyset cursor produce. A scorer test — "CVE-2012-1823's score > CVE-2007-2447's"
+   — can pass while the *list* is mis-ordered by a wrong `ORDER BY`, a cursor
+   comparison with the wrong sign, or a coalesce that lets a null sort high. The
+   scorer being right does not make the order right.
+
+**Why it is its own pattern:** the scorer and the reader are different code with
+different tests, and the scorer's test is the tempting one to write because the
+scorer is where the interesting logic lives. But the *order* is the product — an
+operator triages the list, not the `priority_score` column — so a test that asserts
+the score and not the order is [[test-that-proves-nothing]] with a plausible alibi.
+
+**How to apply — test the ordering, not the scorer.** The P3.4 acceptance
+(`TestFindingSetOrdersByPriorityOnMetasploitable`) asserts on `List`'s *output rank*
+(CVE-2012-1823 at a lower index than CVE-2007-2447), not on the `priority_score`
+arithmetic — so a mis-ordering `ORDER BY` or a broken cursor fails it, and a correct
+scorer with a broken reader cannot pass. For any decision a query surfaces, the test
+drives the query and asserts the order/selection it returns, never only the value the
+decision computed.
 
 ---
 

@@ -310,9 +310,12 @@ type EvidenceRead struct {
 // the schema (finding_exposure.last_confirmed) exists to make that visible
 // rather than silent — so the read surfaces it.
 type ExposureRead struct {
-	ZoneID            uuid.UUID
-	ZoneName          string
-	ZoneType          string
+	ZoneID   uuid.UUID
+	ZoneName string
+	ZoneType string
+	// InternetReachable is DERIVED from ZoneType (external/dmz), not stored — the
+	// stored column was never written and was dropped (ADR-074). It is a coarse zone
+	// classification, not a per-asset reachability determination.
 	InternetReachable bool
 	AuthRequired      bool
 	LastConfirmed     time.Time
@@ -407,8 +410,9 @@ func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, beforeSc
 		         e.score AS epss, e.percentile AS epss_pct, vd.cvss_base AS cvss,
 		         ( (CASE WHEN k.cve_id IS NOT NULL THEN 1 ELSE 0 END)::bigint * 1000000000
 		         + (CASE WHEN EXISTS (SELECT 1 FROM finding_exposure fx
+		                               JOIN scan_zones z ON z.tenant_id = fx.tenant_id AND z.zone_id = fx.zone_id
 		                               WHERE fx.tenant_id = f.tenant_id AND fx.finding_id = f.finding_id
-		                                 AND fx.internet_reachable) THEN 1 ELSE 0 END)::bigint * 100000000
+		                                 AND z.zone_type IN ('external','dmz')) THEN 1 ELSE 0 END)::bigint * 100000000
 		         + (CASE a.criticality WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)::bigint * 10000000
 		         + coalesce(round(coalesce(e.score, vd.cvss_base/10.0) * 1000), 0)::bigint * 1000
 		         + (CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)::bigint
@@ -557,13 +561,16 @@ func findingEvidence(ctx context.Context, c *Conn, findingID uuid.UUID) ([]Evide
 }
 
 func findingExposures(ctx context.Context, c *Conn, findingID uuid.UUID) ([]ExposureRead, error) {
+	// internet_reachable is DERIVED from the zone's type (external/dmz), not stored
+	// (ADR-074): the column it used to read was never written. It is a coarse zone
+	// classification, not a per-asset reachability probe — the ceiling ADR-074 states.
 	const q = `
 		SELECT fe.zone_id, coalesce(z.name, ''), z.zone_type::text,
-		       fe.internet_reachable, fe.auth_required, fe.last_confirmed
+		       (z.zone_type IN ('external','dmz')) AS internet_reachable, fe.auth_required, fe.last_confirmed
 		  FROM finding_exposure fe
 		  JOIN scan_zones z ON z.tenant_id = fe.tenant_id AND z.zone_id = fe.zone_id
 		 WHERE fe.tenant_id = $1 AND fe.finding_id = $2
-		 ORDER BY fe.internet_reachable DESC, z.name`
+		 ORDER BY (z.zone_type IN ('external','dmz')) DESC, z.name`
 	rows, err := c.Query(ctx, q, c.Tenant().UUID(), findingID)
 	if err != nil {
 		return nil, mapError(err)

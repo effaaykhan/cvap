@@ -220,8 +220,8 @@ BEGIN
                 'fixture:' || p_tag || ':10.0.0.5:22:tcp', 'tcp/22', 'medium', 0.800, 'open')
         RETURNING finding_id INTO v_finding;
 
-    INSERT INTO finding_exposure (tenant_id, finding_id, zone_id, internet_reachable, auth_required)
-        VALUES (p_tenant, v_finding, v_zone, false, true);
+    INSERT INTO finding_exposure (tenant_id, finding_id, zone_id, auth_required)
+        VALUES (p_tenant, v_finding, v_zone, true);
 
     INSERT INTO finding_history (tenant_id, finding_id, from_status, to_status, changed_by, reason)
         VALUES (p_tenant, v_finding, NULL, 'open', v_user, 'fixture: created');

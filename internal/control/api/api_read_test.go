@@ -121,6 +121,23 @@ func TestFindingDetailCarriesEvidenceAndExposures(t *testing.T) {
 	if len(resp.Exposures) != 2 {
 		t.Errorf("exposures = %d, want 2 (one finding, two zones)", len(resp.Exposures))
 	}
+	// internet_reachable is DERIVED from zone_type (ADR-074), not the dropped column.
+	// The finding is exposed from an internal zone (zoneA) and a DMZ zone (zoneB), so
+	// exactly one exposure reads internet-reachable — the derivation, exercised end to
+	// end through the API, not asserted. Before ADR-074 the dropped column read false
+	// for both, so this assertion would have failed on the old inert value.
+	reachable := 0
+	for _, ex := range resp.Exposures {
+		if ex.InternetReachable {
+			reachable++
+			if ex.ZoneType != "dmz" && ex.ZoneType != "external" {
+				t.Errorf("internet_reachable true for zone_type %q, want external/dmz", ex.ZoneType)
+			}
+		}
+	}
+	if reachable != 1 {
+		t.Errorf("internet-reachable exposures = %d, want 1 (the DMZ zone; the internal one is not)", reachable)
+	}
 	// The evidence is the point: it must carry the captured data a human checks.
 	if len(resp.Evidence) != 1 {
 		t.Fatalf("evidence = %d, want 1", len(resp.Evidence))
