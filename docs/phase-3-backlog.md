@@ -28,6 +28,26 @@ parallel and each is routed to the right reviewer.
 
 ## Ordered backlog
 
+### Position as of S31 (checkpoint)
+
+Phase 3 is underway, so the section headers below ("Before / During / After Phase 3") read
+against where we now are: **P3.1 (comparators, S27) ✅ · P3.2 (advisory ingestion, S28) ✅ ·
+P3.3 (release resolution, S31) ✅ — the family → release → comparator → advisory → finding
+chain now closes on real data.** P3.4 (KEV × EPSS × internet-reachable prioritisation) is next.
+The ordered front, most-blocking first:
+
+1. **B29 — keyspace coverage window (silent under-reporting), BEFORE P3.4.** Matching integrity
+   before P3.4 builds triage on it. The one item positioned ahead of the phase.
+2. **P3.4 itself.**
+3. **P3.3 follow-ups, alongside or after P3.4:** **B24** (Debian-vs-Ubuntu family correctness)
+   and **B28** (service-version matchers — folds into #14's corpus manifest) widen reach; **B25**
+   is done (S31). **B27** (redraw the ERD / supersede ADR-029) is a docs task, any time.
+4. **B26 — rpm proved in situ: ⛔ operator action** (a real RHEL/Rocky/Alma/CentOS host in
+   scope), not schedulable as a code session.
+5. **Enterprise console (#12): after P3.4**, per ADR-059.
+
+Everything below keeps its original section for provenance; the positions above are current.
+
 ### Before Phase 3 — finish the floor before building on it
 
 | # | Item | Owner | Unblocker | Dashboard? |
@@ -54,6 +74,7 @@ parallel and each is routed to the right reviewer.
 
 | # | Item | Owner | Unblocker | Dashboard? |
 |---|------|-------|-----------|------------|
+| B29 | **⚠ BEFORE P3.4 — the keyspace coverage window: a host past its feed's end is silently under-reported.** A release's advisory feed covers only until that release's support ends (EOL, or ESM end). A host running a release **past that window** has real exposure the keyspace cannot know about, so backport-aware matching returns *no advisory match* and the host reads as **clean** — a silent false negative, the exact failure P3.1 was sequenced first to prevent. It has not bitten on Metasploitable because hardy had ESM advisories through 2012, so its feed covers the host's exposure; it **will** bite on the first customer host on a release past its window. The fix is the freshness pattern applied to coverage: record each feed/release's **coverage-end** as data (alongside `knowledge_feed_status`'s freshness threshold, ADR-063), and when a host's release is past it, matching must return a **STATE** — "release out of advisory coverage, findings incomplete" — never silent clean. Same argument as the exposure count and feed freshness: put the boundary in the data so the API answers it and the panel renders it. **Position: before P3.4** — P3.4 prioritises the finding set (KEV × EPSS × internet-reachable); prioritising a silently-incomplete set is triage built on sand, so matching integrity comes first, the way P3.1 came before matching. If it slips, it is a *during*-P3.4 item, never after. | `knowledge` / `correlate` → `web` | Feed/release coverage-end recorded as data (a column on `knowledge_feed_status` or a per-release coverage table); the USN feed exposes release support/EOL dates. | **Gap — needs a "coverage incomplete" state on the finding/asset, before P3.4 triage trusts the set** |
 | 7 | **enroll-token API home + UI.** The `/v1/enrollment-tokens` route exists; issuing a token is still a CLI step in the installer. Phase 3 growth (more scan points, rule-pack ops) makes enrollment a console task. Give it a UI home. | `control/api` / `web` | Depends on #5's admin-console surface. | **Gap — no UI** |
 | 8 | **Kill-switch UI + safety-mode indicator.** `/v1/kill` and `/v1/scans/{id}/safety-mode` exist as API; the console cannot show or trigger either. Do alongside the admin surface from #5/#7. | `web` | Depends on #5's admin-console surface. | **Gap — no UI** |
 | 12 | **Enterprise-console rebuild (dedicated session, after P3.4).** The current UI reads as a developer's view of the data model, not a security console. A dedicated session, not incremental patching. Scope and ordering below. Placed after P3.4 per ADR-059 — the data must carry real confidence and priority distinctions first, or the triage view is designed twice. | `web` | P3.4 complete (CVE-matched findings with KEV/EPSS priority + the full weak-data confidence spectrum). | **Rebuild of all** |

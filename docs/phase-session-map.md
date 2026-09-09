@@ -20,14 +20,34 @@ agent memory until now.
 |-------|------------------------|----------|-------|
 | Phase 0 — contracts & foundation | Week 1 (§4) | 1–4 | complete |
 | Phase 1 — control plane, scan-point protocol | Weeks 2–3 | 5–11 | complete |
-| Phase 2 — discovery, fingerprint, resolution, findings, UI, hardening | Weeks 4–8 | 12–23 | **complete (this session closes it)** |
-| Phase 2 validation — real-network accuracy | S24 | 24 | done; P3.3 entry condition measured & **failed** (ADR-060) |
-| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25+ | sequenced (ADR-059); **blocked** on B21 (attribution) + B22 (version extraction) before P3.3 (ADR-060); safe-mode design validated (S24) |
+| Phase 2 — discovery, fingerprint, resolution, findings, UI, hardening | Weeks 4–8 | 12–23 | complete (closed S23) |
+| Phase 2 validation — real-network accuracy | S24 | 24 | done; P3.3 entry condition measured & **failed** (ADR-060), then met by S26–S31 |
+| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–31+ | **P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ — the matching chain closes on real data.** B21/B22 entry conditions (ADR-060) met; P3.4 (KEV × EPSS × internet-reachable) next |
 
 Weeks and sessions are not one-to-one. The eight-week plan assumed a team; this
 build is sequential under one operator with Claude Code, so a "week" of the plan
 spans several sessions and the review load is heavier per feature (§1.3 of the
 plan predicted exactly this).
+
+### What P3.3 changed — the chain closed (S27–S31)
+
+P3.3 did not add a feature to the product; it changed **what the product does**.
+Through S23 the platform found non-CVE, rule-based issues on hosts it inventoried.
+As of S31 it does vulnerability *matching*: a real host's observed service versions
+resolve its distro **family** (B21) and **release** (ADR-064), and the release keys a
+**backport-aware advisory match** (ADR-014) through the **dpkg/rpm comparators**
+(ADR-062) against **ingested vendor advisories** (ADR-063) — producing a real,
+CVE-backed finding. The acceptance is one real machine end to end: Metasploitable
+→ `ubuntu 8.04 / hardy` → USN-1467-1 → **CVE-2012-2122 vulnerable** on its measured
+MySQL. That is the join the whole of Phase 3 was sequenced toward, and it is why
+what remains is bounding and widening the chain (coverage windows B29, service
+identification B28, family correctness B24, rpm-in-situ B26), not building it.
+
+**The chain's reach is honestly bounded, not silently assumed:** it resolves only
+releases the keyspace covers and only services the corpus version-identifies
+(5/11 on Metasploitable, ADR-065/B28), every failure mode is *unresolved/unmatched*
+rather than a wrong answer, and the coverage window itself is a named gap (B29)
+before P3.4 trusts the finding set.
 
 ---
 
@@ -297,16 +317,27 @@ plan predicted exactly this).
 
 ---
 
-## 3. Artifact inventory (as of S23)
+## 3. Artifact inventory (as of S31)
 
-**ADRs.** 001–058 accepted (`docs/adr/`, index at `000-index.md`). Corrections are
+**ADRs.** 001–066 accepted (`docs/adr/`, index at `000-index.md`). Corrections are
 recorded as new ADRs, never edits: 028 corrects the pre-release contract; 041
-supersedes 033; 044 corrects 042; 046 corrects 045. The freeze rule holds — a
-committed ADR is superseded, never rewritten.
+supersedes 033; 044 corrects 042; 046 corrects 045; the Phase-3 matching chain is
+059→060→061→062→063→064→065→066, each refining the last, none rewritten. The freeze
+rule holds — a committed ADR is superseded, never rewritten.
 
-**Migrations.** 0001–0032. Every tenant-scoped table carries `tenant_id` + RLS
+**Migrations.** 0001–0035. Every tenant-scoped table carries `tenant_id` + RLS
 (`USING` and `WITH CHECK`) in its creating migration. `observations` is
-range-partitioned from creation; `evidence` is deliberately not (ADR-016).
+range-partitioned from creation; `evidence` is deliberately not (ADR-016). The
+Phase-3 additions are all **global knowledge** tables (no `tenant_id`, ADR-030):
+0034 (`knowledge_feed_status` + the `cvap_knowledge_import` role, ADR-063) and 0035
+(`product_packages` + the asset release columns, ADR-064).
+
+**Phase-3 matching artifacts (S27–S31).** `internal/version` (dpkg/rpm comparators,
+corpus- and oracle-validated, ADR-062); `knowledge/usn_ingest.py` +
+`import_product_map.py` (offline advisory + product-map ingestion, ADR-019/063);
+`internal/domain/release.go` (pure band-vote resolver, ADR-064/065);
+`store.Advisories` (`FixesFor`, `ReleasesForProduct`, `FeedFreshnessAll`); the asset
+page's release-provenance and knowledge-freshness surfaces.
 
 **CI jobs** (`.github/workflows/ci.yml`, 9 jobs): `build-test`, `proto`, `schema`,
 `lint`, `security`, `licences`, `config`, `web`, `corpus`. `make ci-parity`
@@ -353,6 +384,31 @@ Everything out of scope in §2 (CVE matching, advisories, credentialed, DAST, AP
 SAST, cloud, containers, agents, reporting, k8s, HA) remains out of scope. Phase 3
 begins to take on the first of these — the knowledge pipeline and CVE matching —
 per ADR-059.
+
+### P3.4 entry conditions (S31 checkpoint) — met, with two bounding caveats
+
+P3.4 (KEV × EPSS × internet-reachable prioritisation, ADR-059) requires P3.3 —
+advisory matching — working end to end. It is:
+
+- **ADR-060 B21 (attribution reaches the distro RELEASE and promotes it): MET.**
+  `domain.ResolveRelease` (ADR-064) resolves the release and `SetRelease` promotes
+  it; the acceptance reaches `Ubuntu 8.04 / hardy` on the real host — the exact
+  `Ubuntu 8.04` bar ADR-060 set.
+- **ADR-060 B22 (version extraction reaches the package + version): MET for the
+  corpus-covered services.** The chain runs on `openssh 4.7p1` and `mysql 5.0.51a`
+  in safe mode; `apache2 2.2.8` — ADR-060's named bar — is reached under intrusive
+  HTTP probing. The gap (Samba, safe-mode Apache, +4) is measured and named in
+  **B28**, and it bounds *reach*, not correctness.
+- **The chain closes end to end on a real host** (Metasploitable → CVE-2012-2122),
+  which is the substantive entry condition, not a checkbox.
+
+So P3.4 may begin. Two caveats bound the finding set it will prioritise, both named
+and neither silent: **B29** (a release past its feed's coverage window is silently
+under-reported — positioned **before P3.4**, because prioritising an incomplete set
+is triage built on sand), and **B28** (reach is bounded by service identification).
+The two-vote resolution threshold is reasoned, not yet validated at its boundary
+(**ADR-066**, a review trigger). None of these blocks P3.4's *mechanics*; B29 is the
+one the operator chose to place ahead of it.
 
 ---
 
