@@ -64,7 +64,16 @@ The ordered front, most-blocking first:
    The fix is the package analogue of the endpoint lifecycle — on a rescan where the package's
    version is now at or above the fix, mark the finding remediated with a transition row. Not a
    blocker for "findings exist" (S34b's scope) but required before the finding set is trustworthy
-   over time. Owner: `correlate`. Unblocker: none — a bounded follow-up.
+   over time. **Its design must account for ADR-071:** the dedup key derives its package from the
+   `product_packages` map, so a map change re-keys a finding and the lifecycle cannot close the
+   orphan — either adopt ADR-071's mitigation (store the resolved package on the service) first, or
+   treat the map as an identity input. Owner: `correlate`. Unblocker: none — a bounded follow-up.
+   **This is the THIRD gap whose fuller answer is credentialed assessment** — B30 (advised ≠ shipped)
+   was the second, and ADR-071's re-key fragility is the third: a credentialed read gives the
+   installed package name and version authoritatively, so both the keyspace-completeness gap and the
+   product→package-guess identity gap dissolve. The accumulation — now three independent gaps
+   pointing at the same fix — is the signal that pulling Phase 4 forward is a stronger case each time
+   it recurs (cf. B30's note).
 5. **P3.3 follow-ups, alongside or after P3.4:** **B24** (Debian-vs-Ubuntu family correctness)
    and **B28** (service-version matchers — folds into #14's corpus manifest) widen reach; **B25**
    is done (S31). **B27** (redraw the ERD / supersede ADR-029) is a docs task, any time — now at
