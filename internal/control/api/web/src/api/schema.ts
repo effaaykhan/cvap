@@ -760,17 +760,22 @@ export interface components {
             /** @description When scoped to one asset, that asset's advisory_status (ADR-068). Emptiness of findings is never a clean verdict; this is. */
             asset_advisory_status?: string | null;
             findings: components["schemas"]["FindingSummaryResponse"][];
-            next_before?: string | null;
             next_id?: string | null;
+            next_score?: string | null;
         };
         FindingResponse: {
             asset_hostname?: string;
             asset_id: string;
             category: string;
             confidence: number;
+            /** @description CVSS base score. Absent = unknown, NOT zero. */
+            cvss?: number | null;
             cwe?: string;
             /** @description The identity this finding persists under across scans (ADR-010). Shown so it is auditable why two observations are, or are not, the same finding. */
             dedup_key: string;
+            /** @description FIRST EPSS probability of exploitation in 30 days (0..1). Absent = unscored, NOT low. */
+            epss?: number | null;
+            epss_percentile?: number | null;
             evidence: components["schemas"]["EvidenceResponse"][];
             /** @description Distinct zones this finding is visible from (ADR-008). One finding, N zones — never counted as N findings. */
             exposure_zones: number;
@@ -782,8 +787,16 @@ export interface components {
             id: string;
             /** @description Where on the asset, e.g. 443/tcp. */
             instance_locator?: string;
+            /** @description In CISA KEV — confirmed exploited in the wild. false means unlisted, NOT known-unexploited. */
+            kev: boolean;
+            /** @description Date CISA added the CVE to KEV. */
+            kev_date_added?: string | null;
+            /** @description KEV entry flagged as used in ransomware campaigns. */
+            kev_ransomware?: boolean;
             /** Format: date-time */
             last_seen: string;
+            /** @description Why this finding sits where it does: KEV-listed | EPSS <x> | CVSS <x> | unscored (ADR-069). */
+            priority_basis: string;
             remediation?: string;
             /** Format: date-time */
             resolved_at?: string | null;
@@ -799,6 +812,11 @@ export interface components {
             asset_id: string;
             category: string;
             confidence: number;
+            /** @description CVSS base score. Absent = unknown, NOT zero. */
+            cvss?: number | null;
+            /** @description FIRST EPSS probability of exploitation in 30 days (0..1). Absent = unscored, NOT low. */
+            epss?: number | null;
+            epss_percentile?: number | null;
             /** @description Distinct zones this finding is visible from (ADR-008). One finding, N zones — never counted as N findings. */
             exposure_zones: number;
             /** Format: date-time */
@@ -806,8 +824,16 @@ export interface components {
             id: string;
             /** @description Where on the asset, e.g. 443/tcp. */
             instance_locator?: string;
+            /** @description In CISA KEV — confirmed exploited in the wild. false means unlisted, NOT known-unexploited. */
+            kev: boolean;
+            /** @description Date CISA added the CVE to KEV. */
+            kev_date_added?: string | null;
+            /** @description KEV entry flagged as used in ransomware campaigns. */
+            kev_ransomware?: boolean;
             /** Format: date-time */
             last_seen: string;
+            /** @description Why this finding sits where it does: KEV-listed | EPSS <x> | CVSS <x> | unscored (ADR-069). */
+            priority_basis: string;
             /** @description The rule that raised the finding (ADR-009: every finding has one). */
             rule: string;
             severity: string;

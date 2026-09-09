@@ -263,3 +263,22 @@ code { background:var(--surface-2); padding:.06rem .35rem; border-radius:4px; fo
 .conf-high { color: var(--fg); }
 .conf-medium { color: var(--muted); }
 .conf-low { color: var(--faint); }
+
+/* ---- priority (ADR-069): KEV badge + basis on the finding list & detail ---- */
+/* KEV is the dominant signal — confirmed exploited in the wild — so it reads as
+   a filled danger chip, the loudest thing in the row. The word carries the
+   meaning; colour only reinforces it (same AA rule as .sev). */
+.kev-badge {
+  display:inline-block; font-family:var(--mono); font-size:.68rem; font-weight:700;
+  letter-spacing:.08em; padding:.05rem .34rem; border-radius:4px;
+  color:var(--on-accent); background:var(--danger);
+}
+/* Ransomware-linked KEV entries are the worst of the worst — outlined so they
+   stand apart from a plain KEV chip even in monochrome. */
+.kev-ransomware { box-shadow:0 0 0 2px var(--sev-critical); }
+.priority-cell { display:inline-flex; gap:.4rem; align-items:baseline; }
+.priority-basis { font-family:var(--mono); font-size:.74rem; }
+.table-caption {
+  caption-side:top; text-align:left; color:var(--muted);
+  font-size:.76rem; margin-bottom:.4rem;
+}

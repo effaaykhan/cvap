@@ -233,6 +233,20 @@ type FindingSummary struct {
 	ExposureZones int
 	FirstSeen     time.Time
 	LastSeen      time.Time
+
+	// Priority signals (P3.4, ADR-069). KEV/EPSS/CVSS are nullable-shaped: KEV is a
+	// membership bool (false = unlisted, never "unexploited"); EPSS and CVSS are
+	// pointers (nil = unscored/unknown, never 0). PriorityScore is the bit-packed
+	// lexicographic order (KEV > exposure > criticality > EPSS/CVSS > severity);
+	// PriorityBasis names the dominant reason for a legible order.
+	KEV            bool
+	KEVRansomware  bool
+	KEVDateAdded   *time.Time
+	EPSS           *float64
+	EPSSPercentile *float64
+	CVSS           *float64
+	PriorityScore  int64
+	PriorityBasis  string
 }
 
 // FindingListFilter narrows the list. Empty fields do not filter.
@@ -243,11 +257,14 @@ type FindingListFilter struct {
 	RuleID   uuid.UUID
 }
 
-// FindingPage is a keyset page of the finding list.
+// FindingPage is a keyset page of the finding list, ordered by priority
+// (ADR-069). The cursor is (priority_score, finding_id), not a timestamp, because
+// the list is priority-ordered — the first meaningful order it has had.
 type FindingPage struct {
-	Findings   []FindingSummary
-	NextBefore time.Time
-	NextID     uuid.UUID
+	Findings  []FindingSummary
+	NextScore int64
+	NextID    uuid.UUID
+	HasNext   bool
 }
 
 // EvidenceRead is one evidence record as an analyst reads it back.
@@ -302,20 +319,31 @@ type FindingDetail struct {
 	ResolvedAt  *time.Time
 	Evidence    []EvidenceRead
 	Exposures   []ExposureRead
+
+	// Priority signals (P3.4, ADR-069), so the detail view shows WHY a finding
+	// ranks where the list put it. Same nullable shapes as FindingSummary: KEV is
+	// membership (false = unlisted); EPSS/CVSS are pointers (nil = unscored/unknown,
+	// never 0). No priority_score here — a single finding has no ordering to encode.
+	KEV            bool
+	KEVRansomware  bool
+	KEVDateAdded   *time.Time
+	EPSS           *float64
+	EPSSPercentile *float64
+	CVSS           *float64
+	PriorityBasis  string
 }
 
-// ListFindings returns a keyset page of findings, newest last_seen first. The
-// cursor is (last_seen, finding_id) so a row cannot shift under a paging client
-// (findings_tenant_last_seen_idx backs it). Rule name and asset hostname are
-// joined; the exposure count is DISTINCT zones per finding, never a join-row
-// count — one finding seen from three zones is one finding (ADR-010).
-func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, before time.Time, beforeID uuid.UUID, limit int) (*FindingPage, error) {
+// List returns a keyset page of findings ordered by priority, highest first
+// (ADR-069) — the finding list's first meaningful order. The cursor is
+// (priority_score, finding_id), not a timestamp, so a row cannot shift under a
+// paging client. Rule name and asset hostname are joined; the exposure count is
+// DISTINCT zones per finding, never a join-row count — one finding seen from
+// three zones is one finding (ADR-010). KEV/EPSS/CVSS are LEFT-joined off the
+// finding's optional vuln_def_id: a finding with no CVE, or a CVE unlisted in KEV
+// and unscored by EPSS, simply has no such row — absence, not a low value.
+func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, beforeScore int64, beforeID uuid.UUID, limit int) (*FindingPage, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
-	}
-	var beforeArg any
-	if !before.IsZero() {
-		beforeArg = before
 	}
 	var assetArg, ruleArg any
 	if f.AssetID != uuid.Nil {
@@ -331,27 +359,62 @@ func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, before t
 	if f.Severity != "" {
 		sevArg = f.Severity
 	}
+	// The cursor is present iff beforeID is set (score alone can be 0 legitimately).
+	var cursorScore any
+	var cursorID any
+	if beforeID != uuid.Nil {
+		cursorScore, cursorID = beforeScore, beforeID
+	}
 
+	// Priority (ADR-069), computed here, ordered here. The bit-packing weights KEV
+	// above the sum of every lower term (1e9 vs a max ~1.5e8), so a KEV finding
+	// outranks any non-KEV one regardless of CVSS — the inversion, structural not
+	// tuned. risk = COALESCE(epss, cvss/10): an unscored-EPSS finding is ranked by
+	// the CVSS we know, NOT dropped to zero (absence is not a low value, ADR-069);
+	// only a finding with neither falls to 0 there and is flagged 'unscored'.
 	const q = `
-		SELECT f.finding_id, r.name, r.category, f.severity::text, f.status::text,
-		       f.asset_id, coalesce(a.primary_hostname, ''), coalesce(f.instance_locator, ''),
-		       f.confidence,
-		       (SELECT count(DISTINCT fe.zone_id) FROM finding_exposure fe
-		         WHERE fe.tenant_id = f.tenant_id AND fe.finding_id = f.finding_id),
-		       f.first_seen, f.last_seen
-		  FROM findings f
-		  JOIN rules r  ON r.rule_id = f.rule_id
-		  JOIN assets a ON a.tenant_id = f.tenant_id AND a.asset_id = f.asset_id
-		 WHERE f.tenant_id = $1
-		   AND ($2::timestamptz IS NULL OR (f.last_seen, f.finding_id) < ($2, $3))
-		   AND ($4::finding_status IS NULL OR f.status = $4::finding_status)
-		   AND ($5::severity IS NULL OR f.severity = $5::severity)
-		   AND ($6::uuid IS NULL OR f.asset_id = $6)
-		   AND ($7::uuid IS NULL OR f.rule_id = $7)
-		 ORDER BY f.last_seen DESC, f.finding_id DESC
+		SELECT * FROM (
+		  SELECT f.finding_id, r.name, r.category, f.severity::text, f.status::text,
+		         f.asset_id, coalesce(a.primary_hostname, ''), coalesce(f.instance_locator, ''),
+		         f.confidence,
+		         (SELECT count(DISTINCT fe.zone_id) FROM finding_exposure fe
+		           WHERE fe.tenant_id = f.tenant_id AND fe.finding_id = f.finding_id) AS exposure_zones,
+		         f.first_seen, f.last_seen,
+		         (k.cve_id IS NOT NULL) AS kev,
+		         coalesce(k.known_ransomware, false) AS kev_ransomware,
+		         k.date_added AS kev_date_added,
+		         e.score AS epss, e.percentile AS epss_pct, vd.cvss_base AS cvss,
+		         ( (CASE WHEN k.cve_id IS NOT NULL THEN 1 ELSE 0 END)::bigint * 1000000000
+		         + (CASE WHEN EXISTS (SELECT 1 FROM finding_exposure fx
+		                               WHERE fx.tenant_id = f.tenant_id AND fx.finding_id = f.finding_id
+		                                 AND fx.internet_reachable) THEN 1 ELSE 0 END)::bigint * 100000000
+		         + (CASE a.criticality WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)::bigint * 10000000
+		         + coalesce(round(coalesce(e.score, vd.cvss_base/10.0) * 1000), 0)::bigint * 1000
+		         + (CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)::bigint
+		         ) AS priority_score,
+		         CASE
+		           WHEN k.cve_id IS NOT NULL THEN 'KEV-listed'
+		           WHEN e.score IS NOT NULL THEN 'EPSS ' || to_char(e.score, 'FM0.00000')
+		           WHEN vd.cvss_base IS NOT NULL THEN 'CVSS ' || vd.cvss_base::text
+		           ELSE 'unscored'
+		         END AS priority_basis
+		    FROM findings f
+		    JOIN rules r  ON r.rule_id = f.rule_id
+		    JOIN assets a ON a.tenant_id = f.tenant_id AND a.asset_id = f.asset_id
+		    LEFT JOIN vulnerability_defs vd ON vd.vuln_def_id = f.vuln_def_id
+		    LEFT JOIN kev  k ON k.cve_id = vd.cve_id
+		    LEFT JOIN epss e ON e.cve_id = vd.cve_id
+		   WHERE f.tenant_id = $1
+		     AND ($4::finding_status IS NULL OR f.status = $4::finding_status)
+		     AND ($5::severity IS NULL OR f.severity = $5::severity)
+		     AND ($6::uuid IS NULL OR f.asset_id = $6)
+		     AND ($7::uuid IS NULL OR f.rule_id = $7)
+		) s
+		 WHERE ($2::bigint IS NULL OR (s.priority_score, s.finding_id) < ($2, $3))
+		 ORDER BY s.priority_score DESC, s.finding_id DESC
 		 LIMIT $8`
 
-	rows, err := c.Query(ctx, q, c.Tenant().UUID(), beforeArg, beforeID,
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), cursorScore, cursorID,
 		statusArg, sevArg, assetArg, ruleArg, limit)
 	if err != nil {
 		return nil, mapError(err)
@@ -363,7 +426,9 @@ func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, before t
 		var s FindingSummary
 		if err := rows.Scan(&s.ID, &s.RuleName, &s.Category, &s.Severity, &s.Status,
 			&s.AssetID, &s.AssetHostname, &s.Locator, &s.Confidence, &s.ExposureZones,
-			&s.FirstSeen, &s.LastSeen); err != nil {
+			&s.FirstSeen, &s.LastSeen,
+			&s.KEV, &s.KEVRansomware, &s.KEVDateAdded, &s.EPSS, &s.EPSSPercentile, &s.CVSS,
+			&s.PriorityScore, &s.PriorityBasis); err != nil {
 			return nil, mapError(err)
 		}
 		page.Findings = append(page.Findings, s)
@@ -373,7 +438,7 @@ func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, before t
 	}
 	if len(page.Findings) == limit {
 		last := page.Findings[len(page.Findings)-1]
-		page.NextBefore, page.NextID = last.LastSeen, last.ID
+		page.NextScore, page.NextID, page.HasNext = last.PriorityScore, last.ID, true
 	}
 	return page, nil
 }
@@ -383,23 +448,41 @@ func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, before t
 // on purpose). Evidence and exposures are separate reads because they are
 // one-to-many; each is empty rather than an error when there is none.
 func (Findings) GetFinding(ctx context.Context, c *Conn, id uuid.UUID) (*FindingDetail, error) {
+	// Priority signals off the optional vuln_def_id (ADR-069). LEFT JOINs, so a
+	// finding with no CVE — or a CVE unlisted in KEV and unscored by EPSS — simply
+	// carries nulls: absence, not a low value. priority_basis matches List's CASE.
 	const q = `
 		SELECT f.finding_id, f.asset_id, coalesce(a.primary_hostname, ''),
 		       r.name, r.category, coalesce(r.cwe, ''), coalesce(r.remediation_template, ''),
 		       f.source::text, f.dedup_key, coalesce(f.instance_locator, ''),
 		       f.severity::text, f.confidence, f.status::text,
 		       (f.vuln_def_id IS NOT NULL),
-		       f.first_seen, f.last_seen, f.resolved_at
+		       f.first_seen, f.last_seen, f.resolved_at,
+		       (k.cve_id IS NOT NULL) AS kev,
+		       coalesce(k.known_ransomware, false) AS kev_ransomware,
+		       k.date_added AS kev_date_added,
+		       e.score AS epss, e.percentile AS epss_pct, vd.cvss_base AS cvss,
+		       CASE
+		         WHEN k.cve_id IS NOT NULL THEN 'KEV-listed'
+		         WHEN e.score IS NOT NULL THEN 'EPSS ' || to_char(e.score, 'FM0.00000')
+		         WHEN vd.cvss_base IS NOT NULL THEN 'CVSS ' || vd.cvss_base::text
+		         ELSE 'unscored'
+		       END AS priority_basis
 		  FROM findings f
 		  JOIN rules r  ON r.rule_id = f.rule_id
 		  JOIN assets a ON a.tenant_id = f.tenant_id AND a.asset_id = f.asset_id
+		  LEFT JOIN vulnerability_defs vd ON vd.vuln_def_id = f.vuln_def_id
+		  LEFT JOIN kev  k ON k.cve_id = vd.cve_id
+		  LEFT JOIN epss e ON e.cve_id = vd.cve_id
 		 WHERE f.tenant_id = $1 AND f.finding_id = $2`
 
 	var d FindingDetail
 	err := c.QueryRow(ctx, q, c.Tenant().UUID(), id).Scan(
 		&d.ID, &d.AssetID, &d.AssetHost, &d.RuleName, &d.Category, &d.CWE, &d.Remediation,
 		&d.Source, &d.DedupKey, &d.Locator, &d.Severity, &d.Confidence, &d.Status,
-		&d.HasVulnDef, &d.FirstSeen, &d.LastSeen, &d.ResolvedAt)
+		&d.HasVulnDef, &d.FirstSeen, &d.LastSeen, &d.ResolvedAt,
+		&d.KEV, &d.KEVRansomware, &d.KEVDateAdded, &d.EPSS, &d.EPSSPercentile, &d.CVSS,
+		&d.PriorityBasis)
 	if err != nil {
 		return nil, mapError(err)
 	}

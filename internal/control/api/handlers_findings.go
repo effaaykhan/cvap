@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -39,13 +40,27 @@ type FindingSummaryResponse struct {
 	ExposureZones int       `json:"exposure_zones" doc:"Distinct zones this finding is visible from (ADR-008). One finding, N zones — never counted as N findings."`
 	FirstSeen     time.Time `json:"first_seen"`
 	LastSeen      time.Time `json:"last_seen"`
+
+	// Priority signals (P3.4, ADR-069). The list is ordered by priority (KEV >
+	// exposure > criticality > EPSS > CVSS). kev is membership (false = unlisted,
+	// NOT known-unexploited); epss/cvss are absent when unscored/unknown (never 0);
+	// priority_basis names the dominant reason for the order.
+	KEV            bool     `json:"kev" doc:"In CISA KEV — confirmed exploited in the wild. false means unlisted, NOT known-unexploited."`
+	KEVRansomware  bool     `json:"kev_ransomware,omitempty" doc:"KEV entry flagged as used in ransomware campaigns."`
+	KEVDateAdded   *string  `json:"kev_date_added,omitempty" doc:"Date CISA added the CVE to KEV."`
+	EPSS           *float64 `json:"epss,omitempty" doc:"FIRST EPSS probability of exploitation in 30 days (0..1). Absent = unscored, NOT low."`
+	EPSSPercentile *float64 `json:"epss_percentile,omitempty"`
+	CVSS           *float64 `json:"cvss,omitempty" doc:"CVSS base score. Absent = unknown, NOT zero."`
+	PriorityBasis  string   `json:"priority_basis" doc:"Why this finding sits where it does: KEV-listed | EPSS <x> | CVSS <x> | unscored (ADR-069)."`
 }
 
-// FindingListResponse is a keyset page of findings, newest-seen first.
+// FindingListResponse is a keyset page of findings, priority-ordered (ADR-069).
 type FindingListResponse struct {
-	Findings   []FindingSummaryResponse `json:"findings"`
-	NextBefore *string                  `json:"next_before,omitempty"`
-	NextID     *string                  `json:"next_id,omitempty"`
+	Findings []FindingSummaryResponse `json:"findings"`
+	// Priority keyset cursor (ADR-069): pass next_score as before_score and next_id
+	// as before_id for the next page. Absent on the last page.
+	NextScore *string `json:"next_score,omitempty"`
+	NextID    *string `json:"next_id,omitempty"`
 
 	// AssetAdvisoryStatus is present ONLY when the list is scoped to one asset
 	// (asset_id filter): that asset's advisory posture (ADR-068). It qualifies an
@@ -159,7 +174,10 @@ func (s *Server) listFindings(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
-	before, beforeID, ok := s.keysetCursor(w, r)
+	// The finding list is priority-ordered (ADR-069), so the cursor is
+	// (priority_score, finding_id), not a timestamp — a findings-specific cursor,
+	// distinct from the shared timestamp keyset the asset list uses.
+	beforeScore, beforeID, ok := s.priorityCursor(w, r)
 	if !ok {
 		return
 	}
@@ -170,7 +188,7 @@ func (s *Server) listFindings(w http.ResponseWriter, r *http.Request) {
 	var advisoryStatus string
 	err := s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
-		if page, err = (store.Findings{}).List(ctx, c, f, before, beforeID, limit); err != nil {
+		if page, err = (store.Findings{}).List(ctx, c, f, beforeScore, beforeID, limit); err != nil {
 			return err
 		}
 		// When scoped to one asset, carry that asset's advisory posture (ADR-068)
@@ -197,8 +215,34 @@ func (s *Server) listFindings(w http.ResponseWriter, r *http.Request) {
 	if assetScoped {
 		out.AssetAdvisoryStatus = &advisoryStatus
 	}
-	setKeysetNext(&out.NextBefore, &out.NextID, page.NextBefore, page.NextID)
+	if page.HasNext {
+		sc := strconv.FormatInt(page.NextScore, 10)
+		id := page.NextID.String()
+		out.NextScore, out.NextID = &sc, &id
+	}
 	writeJSON(w, r, s.log, http.StatusOK, out)
+}
+
+// priorityCursor parses the finding list's priority keyset cursor: before_score
+// (the priority_score of the last row of the previous page) + before_id. Both or
+// neither; the first page passes neither.
+func (s *Server) priorityCursor(w http.ResponseWriter, r *http.Request) (int64, uuid.UUID, bool) {
+	q := r.URL.Query()
+	v := q.Get("before_score")
+	if v == "" {
+		return 0, uuid.Nil, true
+	}
+	score, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest, "before_score must be an integer.", err)
+		return 0, uuid.Nil, false
+	}
+	id, err := uuid.Parse(q.Get("before_id"))
+	if err != nil {
+		writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest, "before_score requires before_id, and it must be a uuid.", err)
+		return 0, uuid.Nil, false
+	}
+	return score, id, true
 }
 
 func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
@@ -251,6 +295,9 @@ func findingSummaryResponse(f store.FindingSummary) FindingSummaryResponse {
 		Severity: f.Severity, Status: f.Status, AssetID: f.AssetID.String(),
 		AssetHostname: f.AssetHostname, Locator: f.Locator, Confidence: f.Confidence,
 		ExposureZones: f.ExposureZones, FirstSeen: f.FirstSeen, LastSeen: f.LastSeen,
+		KEV: f.KEV, KEVRansomware: f.KEVRansomware, KEVDateAdded: dateOrNil(f.KEVDateAdded),
+		EPSS: f.EPSS, EPSSPercentile: f.EPSSPercentile, CVSS: f.CVSS,
+		PriorityBasis: f.PriorityBasis,
 	}
 }
 
@@ -261,6 +308,9 @@ func findingResponse(d *store.FindingDetail) FindingResponse {
 			Severity: d.Severity, Status: d.Status, AssetID: d.AssetID.String(),
 			AssetHostname: d.AssetHost, Locator: d.Locator, Confidence: d.Confidence,
 			ExposureZones: len(d.Exposures), FirstSeen: d.FirstSeen, LastSeen: d.LastSeen,
+			KEV: d.KEV, KEVRansomware: d.KEVRansomware, KEVDateAdded: dateOrNil(d.KEVDateAdded),
+			EPSS: d.EPSS, EPSSPercentile: d.EPSSPercentile, CVSS: d.CVSS,
+			PriorityBasis: d.PriorityBasis,
 		},
 		Source: d.Source, DedupKey: d.DedupKey, CWE: d.CWE, Remediation: d.Remediation,
 		HasVulnDef: d.HasVulnDef, ResolvedAt: d.ResolvedAt,

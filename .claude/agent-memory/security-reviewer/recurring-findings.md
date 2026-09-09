@@ -495,3 +495,32 @@ handlers) silently ships without them.
 **How to apply:** whenever a new handler writes a body without going through `writeJSON`, check
 which of the five headers it drops. The durable fix is a security-header middleware in
 `Server.Handler()`/`mount`, not per-handler Set calls.
+
+**37. The knowledge-import psql-via-stdin injection surface — measured safe, so bound the review.**
+`knowledge/*_ingest.py` (usn, release, and session-34 `risk_ingest.py`) all build a SQL script
+as an f-string and pipe it to `psql <db_url> -v ON_ERROR_STOP=1` over stdin, mixing `\copy`
+meta-commands with `INSERT...SELECT`. The safe-by-construction rule, verified by measurement so
+future reviews need not re-derive: (a) per-row attacker-controlled values (cve_id, score,
+percentile, dates) reach Postgres ONLY through a `csv.writer`-quoted temp file + `\copy ... WITH
+(FORMAT csv)`, never string-interpolated; (b) the only interpolated values are pack metadata
+(feed name, source_url, fetched_at, source_version, score_date, staleness) through `_sql_lit`,
+which wraps in single quotes and doubles internal quotes; (c) `{path}` is a server-side
+`mkdtemp` path and `{count_expr}` a constant. Measured facts: psql keeps a `\!`/`\copy` embedded
+via a newline INSIDE a properly-quoted string literal (it does NOT run it — tested against the
+deploy container), and the deploy DB has `standard_conforming_strings=on`, which neutralises the
+one theoretical break (a trailing backslash `'a\'` escaping the closing quote — only bites if
+that GUC is off, pre-9.1 behaviour). Residual Notes, not defects: the db_url with an inline
+password is passed as an argv (`["psql", db_url, ...]`), so it shows in the Core host's process
+table — pre-existing across all three pipelines, prefer `-v`/PGPASSWORD/a service file; and one
+poisoned feed row (bad `score::numeric`, out-of-`numeric(6,5)`-CHECK-range, or invalid
+`::date`) aborts the whole import under ON_ERROR_STOP — a feed-integrity DoS on knowledge
+freshness, acceptable under the refuse-not-truncate doctrine (ADR-069) given the HTTPS-fixed-host
+trust boundary. Unlike class 36's `usn_ingest.py`, `risk_ingest.py`'s bounds all REFUSE
+(`MAX_KEV_ENTRIES`, `MAX_EPSS_ROWS` raise before append; the gzip-bomb guard reads exactly
+`MAX_DECOMPRESSED_BYTES + 1` and refuses — a correctly bounded read, not read-all-then-check).
+**Why:** these pipelines look injectable at a glance (shell-adjacent psql, f-string SQL) but are
+not; spending the review budget re-proving it each session is the waste this entry prevents.
+**How to apply:** on a new/changed knowledge pipeline, confirm the three-part rule above holds
+and that any NEW interpolated value is metadata through `_sql_lit` (not a per-row value); if a
+per-row value ever gets interpolated, or a bound truncates instead of raising (class 36), THAT is
+the finding.

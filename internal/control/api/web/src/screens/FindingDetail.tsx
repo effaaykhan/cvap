@@ -35,6 +35,50 @@ export function FindingDetail() {
         <div className="kv"><dt>Last seen</dt><dd>{fmt(f.last_seen)}</dd></div>
       </dl>
 
+      {f.has_vuln_def && (
+        <>
+          <h2>Priority</h2>
+          <dl className="facts">
+            <div className="kv">
+              <dt>Exploitation</dt>
+              <dd>
+                {f.kev ? (
+                  <>
+                    <span className={`kev-badge${f.kev_ransomware ? " kev-ransomware" : ""}`}>KEV</span>{" "}
+                    In CISA KEV — confirmed exploited in the wild
+                    {f.kev_ransomware && " (known ransomware use)"}
+                    {f.kev_date_added && <span className="muted"> · added {f.kev_date_added}</span>}
+                  </>
+                ) : (
+                  // Absence is not evidence (ADR-069): not listed, NOT known-unexploited.
+                  <span className="muted">Not listed in CISA KEV (unlisted — not known-unexploited)</span>
+                )}
+              </dd>
+            </div>
+            <div className="kv">
+              <dt>EPSS</dt>
+              <dd>
+                {f.epss == null ? (
+                  <span className="muted">Unscored (no signal — not low probability)</span>
+                ) : (
+                  <>
+                    {f.epss.toFixed(5)}
+                    {f.epss_percentile != null && (
+                      <span className="muted"> · {(f.epss_percentile * 100).toFixed(1)}th percentile</span>
+                    )}
+                  </>
+                )}
+              </dd>
+            </div>
+            <div className="kv">
+              <dt>CVSS</dt>
+              <dd>{f.cvss == null ? <span className="muted">Unknown</span> : f.cvss}</dd>
+            </div>
+            <div className="kv"><dt>Basis</dt><dd>{f.priority_basis}</dd></div>
+          </dl>
+        </>
+      )}
+
       {f.remediation && (
         <>
           <h2>Remediation</h2>

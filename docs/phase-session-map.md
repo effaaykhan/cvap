@@ -22,7 +22,7 @@ agent memory until now.
 | Phase 1 — control plane, scan-point protocol | Weeks 2–3 | 5–11 | complete |
 | Phase 2 — discovery, fingerprint, resolution, findings, UI, hardening | Weeks 4–8 | 12–23 | complete (closed S23) |
 | Phase 2 validation — real-network accuracy | S24 | 24 | done; P3.3 entry condition measured & **failed** (ADR-060), then met by S26–S31 |
-| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–31+ | **P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ — the matching chain closes on real data.** B21/B22 entry conditions (ADR-060) met; P3.4 (KEV × EPSS × internet-reachable) next |
+| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–34+ | **P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ · B29 coverage window (S33) ✅ · P3.4 KEV/EPSS prioritisation (S34) ✅ — the matching chain closes and the finding set orders by priority.** B21/B22 entry conditions (ADR-060) met; advisory→finding production (B28/B30) is the remaining P3.3 wiring |
 
 Weeks and sessions are not one-to-one. The eight-week plan assumed a team; this
 build is sequential under one operator with Claude Code, so a "week" of the plan
@@ -363,6 +363,57 @@ before P3.4 trusts the finding set.
   - **P3.4 is unblocked:** all matching-integrity floors (P3.1 comparators, P3.2
     advisories, P3.3 resolution, B29 coverage) are in; the finding set P3.4 will
     prioritise is complete-or-honestly-bounded, never silently incomplete.
+
+- **S34 (this session) — P3.4: KEV and EPSS prioritise the finding set (ADR-069).**
+  The finding list gains a meaningful sort order for the first time — priority, not
+  severity. CVSS scores badness in the abstract; KEV says someone is exploiting it,
+  EPSS says how likely that is to start. A KEV CVE on a reachable asset outranks a
+  higher-CVSS finding nobody exploits, and **that inversion is the whole point.**
+  - **Two feeds ingested on the P3.2/P3.3 pattern** (`knowledge/risk_ingest.py`,
+    `make knowledge-kev`/`knowledge-epss`): CISA KEV (~1700 CVEs) and FIRST EPSS
+    (~370k, daily). fetch/import separable, offline per ADR-019, provenance and
+    freshness in `knowledge_feed_status`. **EPSS staleness threshold is 2 days**
+    (tighter than USN's 7 — it updates daily); KEV's is 7.
+  - **Bounds that refuse, not truncate** (ADR-069, requirement 2): EPSS is every
+    published CVE, so USN's 5000-notice cap would bite. Raised **deliberately with
+    the number stated** — `MAX_EPSS_ROWS = 1,000,000` (headroom over ~370k) and a
+    `128 MB` decompressed-size cap guarding a gzip bomb; a larger body is refused,
+    because a truncated risk feed is the silent under-reporting P3.1 was ordered
+    first to prevent.
+  - **The model is an ADR before code** (ADR-069): a lexicographic order —
+    **KEV > internet-reachable > criticality > EPSS > CVSS > severity** — bit-packed
+    into `priority_score` so KEV (weight 1e9) dominates the sum of every lower term.
+    The inversion is **structural, not tuned**: no CVSS or EPSS value can lift a
+    non-KEV finding above a KEV one.
+  - **Exposure is a weak input, and the model says so** (ADR-069): `internet_reachable`
+    is zone-derived and largely unwritten (backlog #6), so today the order degrades in
+    practice to **KEV > criticality > EPSS/CVSS**. Stated, not papered over — unknown
+    exposure is its own value, not ranked as "internal".
+  - **Absence is not evidence, the FIFTH application** (ADR-069, requirement 4): a CVE
+    absent from KEV is **unlisted**, not known-unexploited (no boost, no penalty); a
+    CVE with no EPSS is **unscored**, not probability 0 — the long-tail key is
+    `COALESCE(epss, cvss/10)`, so an unscored finding ranks by the CVSS we know, never
+    drops to the bottom. Only a finding with **neither** is genuinely no-signal, and it
+    is flagged `unscored`. (After: no advisory for a package; no keyspace analogue for
+    a product; no corpus instance for a rule; no coverage for a release.)
+  - **Dashboard shipped** (standing requirement): the finding list is priority-ordered
+    by default with a **KEV badge** + `priority_basis` + EPSS column; the detail view
+    carries a Priority section (KEV/EPSS/CVSS with honest null semantics — "unlisted",
+    "unscored", "unknown"). The knowledge panel already picks up both feeds' freshness
+    via `FeedFreshnessAll` (no API change). List cursor is now `(priority_score, id)`.
+  - **★ Acceptance, demonstrated not asserted** (`TestFindingSetOrdersByPriorityNotSeverity`):
+    on one asset, four findings at equal severity. **CVE-2012-2122 (Metasploitable's
+    MySQL) is NOT in KEV** — checked, and it does not show the inversion. So the KEV
+    case is **CVE-2012-1823** (PHP-CGI, in KEV, CVSS 7.5) and it ranks **above
+    CVE-2007-2447** (Samba usermap RCE, not in KEV, **CVSS 10.0**) — both real on
+    Metasploitable, the higher-CVSS one losing to the KEV one. Two more CVEs prove the
+    absence rule: a CVSS-only CVE ranks above a genuinely no-signal one.
+  - **`kev`/`epss` are the 8th/9th knowledge tables, 17th/18th ERD-undrawn** — recorded
+    in ADR-069 and this file's lists, folded into B27.
+  - **Advisory→finding production is still not wired** (a P3.3 remainder bounded by
+    B28/B30): the model orders findings that carry a `vuln_def_id`, and until the
+    match→finding link lands the CVE-bearing findings are seeded for the acceptance.
+    Nothing in the model assumes seeded data — it is ready the moment the link lands.
 
 ---
 

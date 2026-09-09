@@ -77,3 +77,4 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 066 | The two-vote release threshold is reasoned, not validated — review trigger: the first real host resolving on exactly two agreeing votes (refines ADR-064/065) | Accepted |
 | 067 | The advisory coverage window is data (release_coverage, ingested EOL/ESM), and a release past it is cannot-know not clean — fourth application of absence-is-not-evidence (B29) | Accepted |
 | 068 | The advisory assessment state is a server-owned enum on the asset (no_release/clean/cannot_know/vulnerable) — clean is never an empty finding list, so a client cannot collapse cannot-know into clean (extends ADR-067) | Accepted |
+| 069 | KEV/EPSS prioritisation — lexicographic KEV > exposure > criticality > EPSS > CVSS, KEV dominates the inversion; absence (unlisted/unscored) is no-signal, never a low value (fifth application); P3.4 | Accepted |
