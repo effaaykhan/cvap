@@ -47,6 +47,7 @@ export function AssetDetail() {
         <div className="kv"><dt>Criticality</dt><dd>{a.criticality}</dd></div>
         <div className="kv"><dt>Fragile</dt><dd>{a.fragile ? "yes" : "no"}</dd></div>
         <div className="kv"><dt>Open findings</dt><dd>{a.open_findings}</dd></div>
+        <div className="kv"><dt>Advisory status</dt><dd>{advisoryStatus(a.advisory_status)}</dd></div>
         <div className="kv"><dt>First seen</dt><dd>{fmt(a.first_seen)}</dd></div>
         <div className="kv"><dt>Last seen</dt><dd>{fmt(a.last_seen)}</dd></div>
       </dl>
@@ -150,6 +151,25 @@ export function AssetDetail() {
       ) : <p className="muted">No services observed.</p>}
     </section>
   );
+}
+
+// advisoryStatus renders the server-owned verdict (ADR-068). "Clean" is reachable
+// here ONLY from advisory_status === "clean" — there is no path from an empty
+// finding list to the word clean, which is the point: cannot-know cannot be shown
+// as clean by a client that forgets to check coverage.
+function advisoryStatus(status?: string) {
+  switch (status) {
+    case "clean":
+      return <span className="freshness freshness-current">No known advisory vulnerabilities</span>;
+    case "vulnerable":
+      return <span className="freshness freshness-stale">Vulnerable</span>;
+    case "cannot_know":
+      return <span className="freshness freshness-stale">Cannot assess — release out of coverage</span>;
+    case "no_release":
+      return <span className="freshness freshness-never">Unmatched — no release resolved</span>;
+    default:
+      return <span className="muted">—</span>;
+  }
 }
 
 // osAttribution renders the three-state model (ADR-061) so each state LOOKS like

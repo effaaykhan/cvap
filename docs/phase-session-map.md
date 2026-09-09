@@ -345,6 +345,21 @@ before P3.4 trusts the finding set.
     one into the other was the entire defect.
   - **`release_coverage` is the 7th knowledge table / 16th ERD-undrawn** — recorded
     in ADR-067 and this file's lists, folded into B27.
+  - **The three states reach the WIRE, not only the store (ADR-068).** The defect
+    collapses again if the finding-list endpoint returns an empty array for both
+    clean and cannot-know, so `advisory_status` is a server-owned enum on the asset
+    (`no_release`/`clean`/`cannot_know`/`vulnerable`) and on the asset-scoped finding
+    list. "Clean" is emitted only for a resolved release in coverage — never the
+    emptiness of a list — so a client that ignores the field gets no verdict, not a
+    wrong one. `domain.AssetAdvisoryStatus` (pure); rendered as the asset's advisory
+    posture in the UI.
+  - **B30 recorded (not decided):** the keyspace holds packages that were *advised*,
+    not packages that *shipped*, so a covered release with a never-advised package
+    reads clean for the wrong reason — B29's defect one layer in. Its two candidate
+    fixes are the same two P3.3 weighed: a release-baseline feed (option (b)) or
+    Phase-4 credentialed assessment. This is the **second** independent gap pointing
+    at that pair — (b) is now a defect fix not an enhancement, and the case for
+    pulling Phase 4 forward is stronger. Not a P3.4 blocker.
   - **P3.4 is unblocked:** all matching-integrity floors (P3.1 comparators, P3.2
     advisories, P3.3 resolution, B29 coverage) are in; the finding set P3.4 will
     prioritise is complete-or-honestly-bounded, never silently incomplete.
@@ -353,10 +368,10 @@ before P3.4 trusts the finding set.
 
 ## 3. Artifact inventory (as of S31)
 
-**ADRs.** 001–066 accepted (`docs/adr/`, index at `000-index.md`). Corrections are
+**ADRs.** 001–068 accepted (`docs/adr/`, index at `000-index.md`). Corrections are
 recorded as new ADRs, never edits: 028 corrects the pre-release contract; 041
 supersedes 033; 044 corrects 042; 046 corrects 045; the Phase-3 matching chain is
-059→060→061→062→063→064→065→066, each refining the last, none rewritten. The freeze
+059→060→061→062→063→064→065→066→067→068, each refining the last, none rewritten. The freeze
 rule holds — a committed ADR is superseded, never rewritten.
 
 **Migrations.** 0001–0035. Every tenant-scoped table carries `tenant_id` + RLS

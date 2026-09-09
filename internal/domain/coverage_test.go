@@ -21,6 +21,33 @@ func TestClassifyMatch(t *testing.T) {
 	}
 }
 
+// AssetAdvisoryStatus (ADR-068): the per-host wire verdict. clean requires BOTH a
+// resolved release and coverage; every other combination is something other than
+// clean, so a client can never reach "clean" except when the server means it.
+func TestAssetAdvisoryStatus(t *testing.T) {
+	cases := []struct {
+		resolved, inCoverage, anyFinding bool
+		want                             MatchState
+	}{
+		{false, false, false, MatchNoRelease}, // no release -> matching never ran
+		{false, true, false, MatchNoRelease},  // coverage irrelevant without a release
+		{true, true, false, MatchClean},       // resolved + covered + nothing matched
+		{true, false, false, MatchCannotKnow}, // resolved but out of coverage -> NOT clean
+		{true, true, true, MatchVulnerable},   // a match, in coverage
+		{true, false, true, MatchVulnerable},  // a match stands even out of coverage
+	}
+	for _, c := range cases {
+		if got := AssetAdvisoryStatus(c.resolved, c.inCoverage, c.anyFinding); got != c.want {
+			t.Errorf("AssetAdvisoryStatus(resolved=%t,inCov=%t,finding=%t) = %q, want %q",
+				c.resolved, c.inCoverage, c.anyFinding, got, c.want)
+		}
+	}
+	// clean is reachable from exactly one input combination.
+	if AssetAdvisoryStatus(true, true, false) != MatchClean {
+		t.Fatal("clean must be reachable only from resolved+covered+no-finding")
+	}
+}
+
 // The load-bearing distinction stated once more, explicitly: a no-match must
 // produce a DIFFERENT state depending on coverage — never the same one.
 func TestNoMatchDiffersByCoverage(t *testing.T) {

@@ -8,8 +8,18 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/effaaykhan/cvap/internal/domain"
 	"github.com/effaaykhan/cvap/internal/store"
 )
+
+// advisoryStatusOf computes the asset's advisory posture (ADR-068) from the
+// resolved release, its coverage state, and whether any advisory finding is open.
+// The one place "clean" is decided, server-side, gated on coverage.
+func advisoryStatusOf(distroRelease, coverageState *string, hasAdvisoryFinding bool) string {
+	resolved := distroRelease != nil
+	inCoverage := coverageState != nil && *coverageState == "covered"
+	return string(domain.AssetAdvisoryStatus(resolved, inCoverage, hasAdvisoryFinding))
+}
 
 // The asset read surface (session 18). Reads only — assets are DERIVED from
 // observations (ADR-006) and nothing here writes one.
@@ -89,6 +99,13 @@ type AssetResponse struct {
 	// accumulating for it. Absent when there is no resolved release.
 	ReleaseCoverageState *string `json:"release_coverage_state,omitempty" doc:"covered | out_of_coverage | unknown. out_of_coverage means a no-advisory result is cannot-know, not clean — the release is past its feed's window."`
 	ReleaseCoverageEnd   *string `json:"release_coverage_end,omitempty" doc:"The effective last-covered date for the release: the newest advisory the keyspace holds for it, or the feed's ESM end."`
+
+	// AdvisoryStatus is the host's advisory posture as ONE server-owned value
+	// (ADR-068): no_release | clean | cannot_know | vulnerable. "clean" is emitted
+	// only when a release is resolved AND in coverage AND nothing matched — it is
+	// never an empty finding list. A client renders this; there is no other clean
+	// signal, so cannot-know cannot collapse into clean at the wire.
+	AdvisoryStatus string `json:"advisory_status" doc:"no_release | clean | cannot_know | vulnerable (ADR-068). The only expression of advisory-clean; emptiness of the finding list is never a clean verdict."`
 }
 
 func assetSummary(a *store.Asset) AssetSummary {
@@ -186,6 +203,7 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 		OSConfidence: d.OSConfidence, OSProvenance: d.OSProvenance,
 		ReleaseConfidence: d.ReleaseConfidence, ReleaseProvenance: d.ReleaseProvenance,
 		ReleaseCoverageState: d.ReleaseCoverageState, ReleaseCoverageEnd: dateOrNil(d.ReleaseCoverageEnd),
+		AdvisoryStatus: advisoryStatusOf(d.DistroRelease, d.ReleaseCoverageState, d.HasOpenAdvisoryFinding),
 	}
 	for _, a := range d.Addresses {
 		out.Addresses = append(out.Addresses, AssetAddressResponse{IP: a.IP, MAC: a.MAC, ValidFrom: a.ValidFrom})

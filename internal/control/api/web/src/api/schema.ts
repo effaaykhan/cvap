@@ -621,6 +621,8 @@ export interface components {
         };
         AssetResponse: {
             addresses: components["schemas"]["AssetAddressResponse"][];
+            /** @description no_release | clean | cannot_know | vulnerable (ADR-068). The only expression of advisory-clean; emptiness of the finding list is never a clean verdict. */
+            advisory_status: string;
             criticality: string;
             device_type: string;
             /** @description Distribution family from banners (ubuntu, debian, windows). Absent means no OS attribution. */
@@ -755,6 +757,8 @@ export interface components {
             zone_type: string;
         };
         FindingListResponse: {
+            /** @description When scoped to one asset, that asset's advisory_status (ADR-068). Emptiness of findings is never a clean verdict; this is. */
+            asset_advisory_status?: string | null;
             findings: components["schemas"]["FindingSummaryResponse"][];
             next_before?: string | null;
             next_id?: string | null;

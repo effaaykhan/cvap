@@ -31,7 +31,25 @@ const (
 	// window. The keyspace stopped accumulating for this release, so a no-match
 	// says nothing about safety. This must NOT read as clean (B29).
 	MatchCannotKnow MatchState = "cannot_know"
+	// MatchNoRelease: no distro release was resolved, so advisory matching did not
+	// run at all. Distinct from cannot_know (matching ran, feed ran out) and from
+	// clean (matching ran, nothing matched) — the host is family-only or
+	// unattributed, unmatched for advisories (ADR-061/064).
+	MatchNoRelease MatchState = "no_release"
 )
+
+// AssetAdvisoryStatus is a host's advisory posture as one server-owned value
+// (ADR-068), the wire representation of the three-state model plus the
+// no-release case. It exists so "clean" is never inferred from an empty finding
+// list: clean is returned only when a release is resolved AND in coverage AND no
+// advisory matched. A client renders this value; there is no other clean signal
+// to fall back on, so ignoring it yields no verdict rather than a wrong one.
+func AssetAdvisoryStatus(releaseResolved, inCoverage, anyAdvisoryFinding bool) MatchState {
+	if !releaseResolved {
+		return MatchNoRelease
+	}
+	return ClassifyMatch(anyAdvisoryFinding, inCoverage)
+}
 
 // ClassifyMatch combines whether any advisory matched with whether the release is
 // within advisory coverage. A no-match on an out-of-coverage release is

@@ -357,6 +357,87 @@ func TestCoverageSurfaces(t *testing.T) {
 	}
 }
 
+// TestAdvisoryStatusOnTheWire — ADR-068: the three states (plus no_release) reach
+// the client as a first-class enum on the asset AND on the asset-scoped finding
+// list, so an empty finding array is never read as clean. clean is reachable only
+// for a resolved release in coverage.
+func TestAdvisoryStatusOnTheWire(t *testing.T) {
+	importURL := os.Getenv("KNOWLEDGE_IMPORT_DATABASE_URL")
+	if importURL == "" {
+		t.Skip("KNOWLEDGE_IMPORT_DATABASE_URL not set; skipping advisory-status wire test")
+	}
+	f := newFixture(t, `{"finding.read": true, "asset.read": true}`)
+	cookies, csrf := f.login(t)
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, importURL)
+	if err != nil {
+		t.Fatalf("connect as import role: %v", err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO release_coverage (feed, distro_release, release_date, support_expires, esm_expires, coverage_source, last_fetched_at)
+		 VALUES ('ubuntu-usn','hardy','2008-04-24','2008-04-24','2008-04-24','feed-degenerate', now()),
+		        ('ubuntu-usn','jammy','2022-04-21','2027-04-30','2032-04-30','feed', now())
+		 ON CONFLICT (feed, distro_release) DO NOTHING`); err != nil {
+		t.Fatalf("seed coverage: %v", err)
+	}
+
+	// Three hosts: out-of-coverage release, covered release, no release.
+	mk := func(family string, release *string) uuid.UUID {
+		var id uuid.UUID
+		if err := f.db.Write(ctx, f.tenant, func(ctx context.Context, c *store.Conn) error {
+			a, e := (store.Assets{}).Create(ctx, c, store.Asset{Hostname: "h-" + uuid.NewString()[:8] + ".corp", Environment: "production"})
+			if e != nil {
+				return e
+			}
+			id = a.ID
+			if family == "" {
+				return nil // no attribution -> no release
+			}
+			return (store.Assets{}).SetAttribution(ctx, c, a.ID, family, release, 0.9, []byte(`[]`))
+		}); err != nil {
+			t.Fatalf("seed asset: %v", err)
+		}
+		return id
+	}
+	hardy := "hardy"
+	jammy := "jammy"
+	out := mk("ubuntu", &hardy)     // out of coverage -> cannot_know
+	covered := mk("ubuntu", &jammy) // covered -> clean
+	noRel := mk("", nil)            // no release -> no_release
+
+	want := map[uuid.UUID]string{out: "cannot_know", covered: "clean", noRel: "no_release"}
+	for id, exp := range want {
+		// Asset detail.
+		w := f.do(t, http.MethodGet, "/v1/assets/"+id.String(), nil, cookies, csrf)
+		var ar api.AssetResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &ar); err != nil {
+			t.Fatal(err)
+		}
+		if ar.AdvisoryStatus != exp {
+			t.Errorf("asset %s advisory_status = %q, want %q", id, ar.AdvisoryStatus, exp)
+		}
+		// Asset-scoped finding list carries the same verdict alongside an (empty) array.
+		fw := f.do(t, http.MethodGet, "/v1/findings?asset_id="+id.String(), nil, cookies, csrf)
+		var fr api.FindingListResponse
+		if err := json.Unmarshal(fw.Body.Bytes(), &fr); err != nil {
+			t.Fatal(err)
+		}
+		if fr.AssetAdvisoryStatus == nil || *fr.AssetAdvisoryStatus != exp {
+			t.Errorf("findings?asset_id=%s asset_advisory_status = %v, want %q — an empty list must carry the verdict", id, fr.AssetAdvisoryStatus, exp)
+		}
+		if len(fr.Findings) != 0 {
+			t.Errorf("expected no findings for the seeded host, got %d", len(fr.Findings))
+		}
+	}
+	// The structural point: clean is reachable only for the covered host; the
+	// out-of-coverage host is a DIFFERENT value, never clean.
+	if want[out] == want[covered] {
+		t.Fatal("out-of-coverage and covered hosts must not share an advisory_status")
+	}
+}
+
 func TestAssetDetailCarriesReleaseProvenance(t *testing.T) {
 	f := newFixture(t, `{"asset.read": true}`)
 	cookies, csrf := f.login(t)

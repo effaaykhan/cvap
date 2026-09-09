@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/effaaykhan/cvap/internal/domain"
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
@@ -45,6 +46,13 @@ type FindingListResponse struct {
 	Findings   []FindingSummaryResponse `json:"findings"`
 	NextBefore *string                  `json:"next_before,omitempty"`
 	NextID     *string                  `json:"next_id,omitempty"`
+
+	// AssetAdvisoryStatus is present ONLY when the list is scoped to one asset
+	// (asset_id filter): that asset's advisory posture (ADR-068). It qualifies an
+	// empty Findings array — a client reading this endpoint alone must not read
+	// no findings as advisory-clean, because clean is this value being "clean",
+	// never the array being empty. no_release | clean | cannot_know | vulnerable.
+	AssetAdvisoryStatus *string `json:"asset_advisory_status,omitempty" doc:"When scoped to one asset, that asset's advisory_status (ADR-068). Emptiness of findings is never a clean verdict; this is."`
 }
 
 // EvidenceResponse is one piece of the proof, copied from the observation at
@@ -157,11 +165,25 @@ func (s *Server) listFindings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tenant, _ := tenantFrom(r.Context())
+	assetScoped := f.AssetID != (uuid.UUID{})
 	var page *store.FindingPage
+	var advisoryStatus string
 	err := s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
-		page, err = (store.Findings{}).List(ctx, c, f, before, beforeID, limit)
-		return err
+		if page, err = (store.Findings{}).List(ctx, c, f, before, beforeID, limit); err != nil {
+			return err
+		}
+		// When scoped to one asset, carry that asset's advisory posture (ADR-068)
+		// so an empty Findings array here is never read as advisory-clean. Clean is
+		// this value, never the emptiness of the list.
+		if assetScoped {
+			resolved, inCov, hasAdv, e := (store.Assets{}).AdvisoryStatusInputs(ctx, c, f.AssetID)
+			if e != nil {
+				return e
+			}
+			advisoryStatus = string(domain.AssetAdvisoryStatus(resolved, inCov, hasAdv))
+		}
+		return nil
 	})
 	if err != nil {
 		storeError(w, r, s.log, err)
@@ -171,6 +193,9 @@ func (s *Server) listFindings(w http.ResponseWriter, r *http.Request) {
 	out := FindingListResponse{Findings: make([]FindingSummaryResponse, 0, len(page.Findings))}
 	for i := range page.Findings {
 		out.Findings = append(out.Findings, findingSummaryResponse(page.Findings[i]))
+	}
+	if assetScoped {
+		out.AssetAdvisoryStatus = &advisoryStatus
 	}
 	setKeysetNext(&out.NextBefore, &out.NextID, page.NextBefore, page.NextID)
 	writeJSON(w, r, s.log, http.StatusOK, out)

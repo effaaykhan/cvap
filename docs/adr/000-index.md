@@ -76,3 +76,4 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 065 | Release-resolution confidence tiered by vote count (2/3/4+), and the measured service-coverage bound — the reach is B22 service identification, not the resolver (refines ADR-064) | Accepted |
 | 066 | The two-vote release threshold is reasoned, not validated — review trigger: the first real host resolving on exactly two agreeing votes (refines ADR-064/065) | Accepted |
 | 067 | The advisory coverage window is data (release_coverage, ingested EOL/ESM), and a release past it is cannot-know not clean — fourth application of absence-is-not-evidence (B29) | Accepted |
+| 068 | The advisory assessment state is a server-owned enum on the asset (no_release/clean/cannot_know/vulnerable) — clean is never an empty finding list, so a client cannot collapse cannot-know into clean (extends ADR-067) | Accepted |

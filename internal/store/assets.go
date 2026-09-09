@@ -342,6 +342,12 @@ type AssetDetail struct {
 	// advisory the keyspace holds for the release, or the feed's ESM date).
 	ReleaseCoverageState *string
 	ReleaseCoverageEnd   *time.Time
+
+	// HasOpenAdvisoryFinding is whether any open finding carries a vuln_def_id
+	// (an advisory match). Input to the advisory_status enum (ADR-068). Always
+	// false until P3.4 produces advisory findings; queried, not assumed, so the
+	// vulnerable state activates automatically when it does.
+	HasOpenAdvisoryFinding bool
 }
 
 // GetDetail returns the full asset view, or ErrNotFound (also what a
@@ -402,9 +408,12 @@ func (Assets) GetDetail(ctx context.Context, c *Conn, id uuid.UUID) (*AssetDetai
 	srows.Close()
 
 	const cntQ = `
-		SELECT count(*) FROM findings
+		SELECT count(*),
+		       count(*) FILTER (WHERE vuln_def_id IS NOT NULL) > 0
+		  FROM findings
 		 WHERE tenant_id = $1 AND asset_id = $2 AND status IN ('open','confirmed')`
-	if err := c.QueryRow(ctx, cntQ, c.Tenant().UUID(), id).Scan(&d.OpenFindings); err != nil {
+	if err := c.QueryRow(ctx, cntQ, c.Tenant().UUID(), id).
+		Scan(&d.OpenFindings, &d.HasOpenAdvisoryFinding); err != nil {
 		return nil, mapError(err)
 	}
 
@@ -430,6 +439,25 @@ func (Assets) GetDetail(ctx context.Context, c *Conn, id uuid.UUID) (*AssetDetai
 		return nil, mapError(err)
 	}
 	return d, nil
+}
+
+// AdvisoryStatusInputs returns the three inputs to an asset's advisory_status
+// (ADR-068): whether a release is resolved, whether it is in advisory coverage,
+// and whether any open advisory finding exists. The verdict itself is
+// domain.AssetAdvisoryStatus (the caller applies it) — the store gathers, the
+// domain decides. ErrNotFound if the asset is not the caller's.
+func (Assets) AdvisoryStatusInputs(ctx context.Context, c *Conn, id uuid.UUID) (releaseResolved, inCoverage, hasAdvisoryFinding bool, err error) {
+	const q = `
+		SELECT a.distro_release IS NOT NULL,
+		       (rc.esm_expires IS NOT NULL AND rc.esm_expires >= now()::date),
+		       EXISTS (SELECT 1 FROM findings f
+		                WHERE f.tenant_id = $1 AND f.asset_id = $2
+		                  AND f.status IN ('open','confirmed') AND f.vuln_def_id IS NOT NULL)
+		  FROM assets a
+		  LEFT JOIN release_coverage rc ON rc.distro_release = a.distro_release
+		 WHERE a.tenant_id = $1 AND a.asset_id = $2`
+	err = c.QueryRow(ctx, q, c.Tenant().UUID(), id).Scan(&releaseResolved, &inCoverage, &hasAdvisoryFinding)
+	return releaseResolved, inCoverage, hasAdvisoryFinding, mapError(err)
 }
 
 // AssetExportRowCap bounds a CSV export of assets, the asset analogue of
