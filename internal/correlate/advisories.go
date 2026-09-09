@@ -36,7 +36,6 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 		comparator  string
 		product     string
 		installed   string
-		versionConf float64 // best (max) version-extraction confidence among contributing observations
 		zones       []uuid.UUID
 		obsID       uuid.UUID
 		observedAt  time.Time
@@ -97,11 +96,6 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 					m.zones = appendZone(m.zones, so.ZoneID)
 					m.obsID = so.ObservationID
 					m.observedAt = so.ObservedAt
-					// Best evidence wins: if the same package was seen by two methods
-					// (a volunteered banner and an active probe), take the higher.
-					if vc := versionConfidence(so.Method); vc > m.versionConf {
-						m.versionConf = vc
-					}
 				}
 			}
 		}
@@ -110,14 +104,16 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 	for key, m := range matches {
 		// The finding's confidence is the MINIMUM of its inference inputs, not a
 		// constant and not their product (ADR-072). The comparator is exact (ADR-062)
-		// and contributes 1.0, so it never binds; the three inferences — release
-		// resolution (ADR-065), version extraction from a banner (ADR-014), and the
-		// product->package map (content, ADR-064/071) — each cap the finding, and the
-		// weakest is the honest bound. min, not product: a product of four plausible
-		// values collapses to a misleadingly low number, whereas min says "only as
-		// trustworthy as the weakest input" and is interpretable — a 0.80 finding
-		// means every input was >= 0.80 and the weakest was exactly that.
-		conf := minConf(releaseConf, m.versionConf, packageMapConfidence)
+		// and contributes 1.0, so it never binds. TODAY only release resolution
+		// (ADR-065) carries a real sub-1.0 value; version extraction and the
+		// product->package map are 1.0 pass-throughs — we have no principled sub-1.0
+		// number for either, and inventing one is the guess this design refuses
+		// (ADR-073). So min() is currently the release confidence alone: correct, and
+		// untested as a composition until a genuinely weak input appears (B28's
+		// response-shape version extraction is the expected first one). No floor: a
+		// low input passes through honestly rather than being raised to look better
+		// than its evidence.
+		conf := minConf(releaseConf, versionExtractionConfidence, packageMapConfidence)
 		id, _, err := (store.Findings{}).Upsert(ctx, conn, store.Finding{
 			AssetID:  assetID,
 			RuleID:   c.advisoryRuleID,
@@ -142,8 +138,9 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 		// Everything an analyst needs to confirm the match by hand without
 		// re-scanning (write-detection-rule evidence rule): the advisory, the CVE,
 		// the package, the two versions the comparator judged — and the confidence
-		// breakdown, so a 0.80 finding shows WHICH input was weakest (ADR-072), not
-		// just the number.
+		// breakdown, so a finding shows WHICH input bound it (ADR-072/073), not just
+		// the number. The 1.0 pass-throughs make the coverage visible on the finding:
+		// only release is being weighed today.
 		if err := (store.Findings{}).ReplaceEvidence(ctx, conn, id, []store.FindingEvidence{{
 			ObservationID: m.obsID,
 			Type:          "response",
@@ -157,11 +154,11 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 				"comparator":        m.comparator,
 				"confidence_inputs": map[string]any{
 					"release_resolution": releaseConf,
-					"version_extraction": m.versionConf,
+					"version_extraction": versionExtractionConfidence,
 					"package_map":        packageMapConfidence,
 					"comparator":         "exact (1.0)",
 					"composed":           conf,
-					"rule":               "min of the three inferences (ADR-072)",
+					"rule":               "min of the inputs; version/map are 1.0 pass-throughs today (ADR-073)",
 				},
 			},
 			CapturedAt: m.observedAt,
@@ -172,37 +169,34 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 	return nil
 }
 
-// packageMapConfidence is the trust in the product->package mapping (ADR-064/071):
-// curated content, but a fingerprint product string is matched to a source package
-// by a human-maintained table, so it is an inference, not a certainty. It caps an
-// advisory finding at 0.90 — even a perfectly resolved release and a clean version
-// read cannot make the finding more certain than the package guess behind it.
-const packageMapConfidence = 0.90
-
-// versionConfidence is how much to trust the installed version the finding rests on,
-// by how it was obtained. A volunteered banner is medium at best (ADR-014); an active
-// probe that elicited the version is better; an unknown method is treated conservatively.
-// This is the version-EXTRACTION confidence, distinct from the observation's own
-// confidence (that we saw the banner) — the question here is whether the banner's
-// version matches what is installed.
-func versionConfidence(method string) float64 {
-	switch method {
-	case "banner":
-		return 0.60
-	case "probe":
-		return 0.75
-	default:
-		return 0.50
-	}
-}
+// These two inputs are 1.0 PASS-THROUGHS today (ADR-073), not weights. We have no
+// principled sub-1.0 confidence for either — a banner-extracted version and a curated
+// product->package map are both plausibly less than certain, but assigning a number
+// (0.60, 0.90) would be a first-value guess dressed as a measurement, the very shape
+// this project keeps finding. So they contribute 1.0 and min() is currently the
+// release confidence alone. This is a coverage statement, not a claim of certainty:
+// the min mechanism is correct and UNTESTED as a composition, because there is no weak
+// input in the tree yet to exercise it.
+//
+// Review trigger: the first input that carries a real sub-1.0 confidence tests min()
+// as a composition rather than a pass-through. B28's service-identification work is the
+// expected source — a version extracted by response-shape rather than a volunteered
+// banner is exactly the weaker claim that should pull a finding's confidence down, and
+// that is when versionExtractionConfidence stops being a constant.
+const (
+	versionExtractionConfidence = 1.0
+	packageMapConfidence        = 1.0
+)
 
 // minConf returns the smallest of the confidences — the weakest-link composition
-// (ADR-072). Ignores non-positive inputs so an absent signal does not zero the
-// finding; a genuine input is always > 0.
+// (ADR-072/073). NO floor and no skipping: a low input passes through and lowers the
+// finding honestly, because a finding that inherits 0.4 should carry 0.4 rather than be
+// raised to look better than its evidence. Every value passed is a real input; an
+// absent signal is passed as 1.0 (not binding), never as 0 to be guarded against.
 func minConf(vals ...float64) float64 {
 	m := 1.0
 	for _, v := range vals {
-		if v > 0 && v < m {
+		if v < m {
 			m = v
 		}
 	}

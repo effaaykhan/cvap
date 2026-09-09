@@ -91,8 +91,10 @@ happen to share a fix:
   never-advised package reads clean for the wrong reason (completeness).
 - **B31** — advisory findings have no remediation lifecycle, and the one they need is complicated by
   the map-derived identity (ADR-071) (lifecycle + identity).
-- **ADR-072 / version confidence** — the installed version is a banner inference, which caps every
-  advisory finding's confidence at medium (trust).
+- **ADR-072/073 / version confidence** — the installed version is a banner inference. It is a 1.0
+  pass-through *today* (ADR-073: no principled sub-1.0 value yet), so it does not cap confidence
+  now — but it *becomes* a cap the moment B28 gives response-shape extraction a real weaker value,
+  and every banner-inferred finding will then rank below a credentialed one (trust).
 
 A credentialed read of the package manager answers all three at once: it gives the *installed* set
 (B30 dissolves), the authoritative package name and version (B31's identity problem and ADR-071's

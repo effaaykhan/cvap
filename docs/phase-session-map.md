@@ -467,6 +467,20 @@ before P3.4 trusts the finding set.
     gaps sharing one fix is structural, and it belongs where the sequencing is decided.
     Phase 4 is **not** pulled forward yet; the accumulation is made visible for when it is.
 
+- **S34d (this session) — the confidence constants were invented; corrected to 1.0
+  pass-throughs (ADR-073).** ADR-072's 0.60 banner and 0.90 map were first-value
+  guesses dressed as a composition, and `minConf` carried a 0.5-ish floor (skip ≤0,
+  unknown-method default 0.50) — the latent-guard shape that does nothing today and
+  becomes a wrong answer when a real weak input appears. Corrected: version extraction
+  and the product→package map contribute **1.0** (no principled sub-1.0 value yet), so
+  `min()` is the **release confidence alone** today; the floor is dropped so a weak
+  input passes through honestly (a finding that inherits 0.4 carries 0.4). Stated as a
+  **coverage** statement, not a defect: the min mechanism is correct and untested as a
+  composition until a genuinely weak input exists. **Review trigger:** B28's
+  response-shape version extraction is the first sub-1.0 input that will exercise it.
+  The Metasploitable acceptance now asserts **0.80** (release-bound), and the backlog
+  ordering-signal bullet is corrected — version is not a cap today, it becomes one at B28.
+
 ---
 
 ## 3. Artifact inventory (as of S31)

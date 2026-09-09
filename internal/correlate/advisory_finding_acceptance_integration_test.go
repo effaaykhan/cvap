@@ -121,27 +121,33 @@ func TestAdvisoryFindingProducedOnMetasploitable(t *testing.T) {
 	default:
 		t.Errorf("severity = %q, not a valid band", got.severity)
 	}
-	// Confidence is COMPOSED, not a constant (ADR-072): the minimum of release
-	// resolution (2 unanimous votes -> 0.80), version extraction (a banner -> 0.60),
-	// and the package map (0.90). The weakest is the banner, so the finding is 0.60 —
-	// not the old fixed 0.5, and not 1.00. This is the whole point: an inferred claim
-	// must not look as certain as an exact one.
-	if got.confidence < 0.595 || got.confidence > 0.605 {
-		t.Errorf("confidence = %.3f, want ~0.60 (min of release 0.80, banner 0.60, map 0.90)", got.confidence)
+	// Confidence is COMPOSED, not a constant (ADR-072/073): min of release resolution
+	// (2 unanimous votes -> 0.80), version extraction (1.0 pass-through today), and the
+	// package map (1.0 pass-through today). Only release carries a real sub-1.0 value,
+	// so the finding is 0.80 — the release confidence alone. Not the old fixed 0.5, not
+	// 1.00: an inferred claim reads exactly as trustworthy as the one input we weigh.
+	if got.confidence < 0.795 || got.confidence > 0.805 {
+		t.Errorf("confidence = %.3f, want ~0.80 (release binds; version/map are 1.0 pass-throughs)", got.confidence)
 	}
 	// The evidence lets an analyst confirm the match by hand without re-scanning,
-	// AND shows which input was weakest (ADR-072).
+	// AND shows the confidence breakdown (ADR-072/073).
 	for _, k := range []string{"advisory", "cve", "package", "installed_version", "fixed_version", "comparator", "confidence_inputs"} {
 		if got.evidence[k] == nil || got.evidence[k] == "" {
 			t.Errorf("evidence missing %q: %+v", k, got.evidence)
 		}
 	}
-	// The breakdown names version_extraction as the weakest input here.
+	// The breakdown shows release_resolution binding, version/map as 1.0 pass-throughs
+	// — the coverage statement visible on the finding: only release is weighed today.
 	if ci, ok := got.evidence["confidence_inputs"].(map[string]any); ok {
+		rel, _ := ci["release_resolution"].(float64)
 		ve, _ := ci["version_extraction"].(float64)
+		pm, _ := ci["package_map"].(float64)
 		composed, _ := ci["composed"].(float64)
-		if ve > composed+0.001 {
-			t.Errorf("confidence_inputs should show version_extraction (%.2f) as the binding minimum (composed %.2f)", ve, composed)
+		if ve != 1.0 || pm != 1.0 {
+			t.Errorf("version_extraction (%.2f) and package_map (%.2f) should be 1.0 pass-throughs today", ve, pm)
+		}
+		if composed != rel {
+			t.Errorf("composed (%.2f) should equal release_resolution (%.2f) — release is the only weighed input", composed, rel)
 		}
 	} else {
 		t.Errorf("evidence confidence_inputs not a breakdown object: %+v", got.evidence["confidence_inputs"])
