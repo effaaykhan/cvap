@@ -649,6 +649,10 @@ export interface components {
             owner?: string;
             /** @description Confidence in the resolved release — the share of agreeing band votes (ADR-064). */
             release_confidence?: number | null;
+            /** @description The effective last-covered date for the release: the newest advisory the keyspace holds for it, or the feed's ESM end. */
+            release_coverage_end?: string | null;
+            /** @description covered | out_of_coverage | unknown. out_of_coverage means a no-advisory result is cannot-know, not clean — the release is past its feed's window. */
+            release_coverage_state?: string | null;
             /** @description Which services voted for a release, agreed, or abstained (with the reason: no advisory analogue, or the version matched no release band). */
             release_provenance?: number[];
             services: components["schemas"]["AssetServiceResponse"][];
@@ -837,6 +841,7 @@ export interface components {
             state: string;
         };
         KnowledgeFreshnessResponse: {
+            coverage: components["schemas"]["ReleaseCoverageResponse"][];
             feeds: components["schemas"]["KnowledgeFeedResponse"][];
         };
         LoginRequest: {
@@ -887,6 +892,16 @@ export interface components {
             max_rate_pps?: number | null;
             name: string;
             safety_mode: string;
+        };
+        ReleaseCoverageResponse: {
+            /** @description 'feed' when the feed gave a real support window; 'feed-degenerate' when it returned only the release date (a placeholder for pre-ESM-tracking releases). */
+            coverage_source?: string;
+            /** @description Coverage end (ESM), the last date advisories flow for this release. */
+            esm_expires?: string | null;
+            /** @description The newest advisory the keyspace holds for this release — the honest coverage-end where the feed date is degenerate. */
+            newest_advisory_at?: string | null;
+            release: string;
+            state: string;
         };
         SafetyModeRequest: {
             /** @description safe | intrusive. Must be at or beneath the policy's ceiling. */

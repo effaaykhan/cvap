@@ -104,6 +104,23 @@ export function AssetDetail() {
         </>
       ) : null}
 
+      {a.release_coverage_state === "out_of_coverage" && (
+        <p className="error">
+          ⚠ This host's release{a.distro_release ? <> (<span className="data">{a.distro_release}</span>)</> : null} is
+          <strong> out of advisory coverage</strong>
+          {a.release_coverage_end ? <> since <span className="data">{a.release_coverage_end}</span></> : null}. The
+          advisory feed no longer issues advisories for it, so a result with no advisory match here means
+          <strong> cannot-know, not clean</strong> — this host may carry vulnerabilities disclosed after its window
+          closed that the keyspace cannot see (B29). Treat an empty finding list as "not assessed", not "safe".
+        </p>
+      )}
+      {a.release_coverage_state === "unknown" && a.distro_release && (
+        <p className="note">
+          The advisory coverage window for <span className="data">{a.distro_release}</span> is not recorded, so
+          whether this host is fully assessable cannot be confirmed. A no-advisory result is treated as cannot-know.
+        </p>
+      )}
+
       <h2>Addresses</h2>
       {a.addresses?.length ? (
         <table><thead><tr><th>IP</th><th>MAC</th><th>Since</th></tr></thead>

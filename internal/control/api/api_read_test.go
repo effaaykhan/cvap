@@ -281,6 +281,82 @@ func TestKnowledgeFreshnessReportsComputedState(t *testing.T) {
 // services voted and which abstained), so an operator can check the claim. Seeds
 // the asset state directly (the resolver itself is proven end to end in
 // internal/correlate); this asserts the read path carries release_provenance.
+// TestCoverageSurfaces — B29's dashboard (ADR-067): the knowledge panel reports
+// each release's coverage state beside feed freshness, and an asset on an
+// out-of-coverage release carries the caveat, so an operator never reads an empty
+// finding list on such a host as "clean".
+func TestCoverageSurfaces(t *testing.T) {
+	importURL := os.Getenv("KNOWLEDGE_IMPORT_DATABASE_URL")
+	if importURL == "" {
+		t.Skip("KNOWLEDGE_IMPORT_DATABASE_URL not set; skipping coverage surface test (needs cvap_knowledge_import)")
+	}
+	f := newFixture(t, `{"finding.read": true, "asset.read": true}`)
+	cookies, csrf := f.login(t)
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, importURL)
+	if err != nil {
+		t.Fatalf("connect as import role: %v", err)
+	}
+	defer pool.Close()
+	// hardy: out of coverage. Plus a hardy advisory so it appears in CoverageAll.
+	for _, s := range []string{
+		`INSERT INTO release_coverage (feed, distro_release, release_date, support_expires, esm_expires, coverage_source, last_fetched_at)
+		 VALUES ('ubuntu-usn','hardy','2008-04-24','2008-04-24','2008-04-24','feed-degenerate', now())
+		 ON CONFLICT (feed, distro_release) DO NOTHING`,
+		`INSERT INTO vendor_advisories (advisory_ref, vendor) VALUES ('USN-1467-1','ubuntu') ON CONFLICT (advisory_ref) DO NOTHING`,
+		`INSERT INTO advisory_fixed_packages (advisory_id, distro_release, package_name, fixed_version, comparator)
+		 SELECT advisory_id, 'hardy', 'mysql-dfsg-5.0', '5.0.96-0ubuntu3', 'dpkg'::version_comparator
+		   FROM vendor_advisories WHERE advisory_ref='USN-1467-1'
+		 ON CONFLICT (advisory_id, distro_release, package_name) DO NOTHING`,
+	} {
+		if _, err := pool.Exec(ctx, s); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	// Knowledge panel: coverage beside freshness.
+	w := f.do(t, http.MethodGet, "/v1/knowledge/freshness", nil, cookies, csrf)
+	if w.Code != http.StatusOK {
+		t.Fatalf("freshness: %d %s", w.Code, w.Body.String())
+	}
+	var kr api.KnowledgeFreshnessResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &kr); err != nil {
+		t.Fatal(err)
+	}
+	var hardyState string
+	for _, c := range kr.Coverage {
+		if c.Release == "hardy" {
+			hardyState = c.State
+		}
+	}
+	if hardyState != "out_of_coverage" {
+		t.Errorf("knowledge coverage: hardy = %q, want out_of_coverage", hardyState)
+	}
+
+	// Asset caveat: a host resolved to hardy carries the out-of-coverage state.
+	var assetID uuid.UUID
+	if err := f.db.Write(ctx, f.tenant, func(ctx context.Context, c *store.Conn) error {
+		a, err := (store.Assets{}).Create(ctx, c, store.Asset{Hostname: "eol.corp", Environment: "production"})
+		if err != nil {
+			return err
+		}
+		assetID = a.ID
+		rel := "hardy"
+		return (store.Assets{}).SetAttribution(ctx, c, a.ID, "ubuntu", &rel, 0.9, []byte(`[]`))
+	}); err != nil {
+		t.Fatalf("seed asset: %v", err)
+	}
+	aw := f.do(t, http.MethodGet, "/v1/assets/"+assetID.String(), nil, cookies, csrf)
+	var ar api.AssetResponse
+	if err := json.Unmarshal(aw.Body.Bytes(), &ar); err != nil {
+		t.Fatal(err)
+	}
+	if ar.ReleaseCoverageState == nil || *ar.ReleaseCoverageState != "out_of_coverage" {
+		t.Fatalf("asset release_coverage_state = %v, want out_of_coverage — an EOL host must not read as clean (B29)", ar.ReleaseCoverageState)
+	}
+}
+
 func TestAssetDetailCarriesReleaseProvenance(t *testing.T) {
 	f := newFixture(t, `{"asset.read": true}`)
 	cookies, csrf := f.login(t)

@@ -4,7 +4,11 @@
 *.exe
 *.test
 *.out
-coverage.*
+# Coverage REPORTS at the repo root (coverage.out/.html from `go test -cover`).
+# Anchored to root: unanchored `coverage.*` also matched source files like
+# internal/domain/coverage.go, which would silently drop them from commits and
+# break the HEAD build while the local build stayed green.
+/coverage.*
 
 # python
 __pycache__/

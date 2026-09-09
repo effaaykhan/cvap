@@ -12,10 +12,14 @@ Rules:
   every child table has a composite FK `(tenant_id, parent_id)` to its parent. Scope is not
   inherited through a plain foreign key — Postgres RLS does not work that way (ADR-017).
 - `RULE_PACK`, `RULE`, `VULNERABILITY_DEF`, `VENDOR_ADVISORY`, `ADVISORY_FIXED_PACKAGE`,
-  `knowledge_feed_status` (advisory-feed provenance/freshness, migration 0034) and
+  `knowledge_feed_status` (advisory-feed provenance/freshness, migration 0034),
   `product_packages` (the product→package map for release resolution, migration 0035, ADR-064)
-  are global knowledge tables and correctly carry no `tenant_id`. `cvap_app` holds `SELECT` on
-  all of them; only `cvap_knowledge_import` writes them (ADR-030, ADR-063).
+  and `release_coverage` (per-release advisory coverage window, migration 0036, ADR-067) are
+  global knowledge tables and correctly carry no `tenant_id`. `cvap_app` holds `SELECT` on all
+  of them. The seven advisory-knowledge tables (`VULNERABILITY_DEF` through `release_coverage`)
+  are written only by `cvap_knowledge_import` (ADR-063); `RULE_PACK` and `RULE` are detection
+  content on the separate rule-pack path (ADR-030's "separate identity", migration-seeded
+  today), not by `cvap_knowledge_import`.
 - Observations are ephemeral. **Anything that must outlive them is copied at the moment it
   becomes load-bearing** (ADR-016): merge evidence into `asset_identity_keys`, finding and
   verdict payloads into `evidence`. `evidence.observation_id` is a nullable soft reference,
@@ -24,7 +28,7 @@ Rules:
   finding status, not by time.
 - Large evidence goes to the object store; the row holds a summary and a pointer (ADR-015).
 
-Fifteen tables in the schema are not drawn in the v2 ERD. They are required, and ADR-029
+Sixteen tables in the schema are not drawn in the v2 ERD. They are required, and ADR-029
 records why, so they do not read as inventions when you diff schema against diagram:
 `result_submissions` (ADR-026's idempotency ledger — `observations.submission_id` has no FK
 target without it), `asset_resolution_queue` (ADR-007's unresolved merge queue),
@@ -33,9 +37,10 @@ target without it), `asset_resolution_queue` (ADR-007's unresolved merge queue),
 `user_credentials` and `sessions` (the operator API's authentication surface, migration 0026),
 `oidc_auth_requests` (ADR-046's pre-auth state, migration 0027), the join tables
 `scan_policy_credential_profiles` and `advisory_vuln_map`, `knowledge_feed_status`
-(advisory-feed freshness, migration 0034 — recorded in ADR-063), and `product_packages`
-(the product→package map for release resolution, migration 0035 — the fifteenth, recorded in
-ADR-064).
+(advisory-feed freshness, migration 0034 — recorded in ADR-063), `product_packages`
+(the product→package map for release resolution, migration 0035 — recorded in ADR-064), and
+`release_coverage` (per-release advisory coverage window, migration 0036 — the sixteenth,
+recorded in ADR-067).
 
 That list is ADR-029's to hold, not this file's — a tenth table belongs in the ADR, and this
 paragraph should be updated from it rather than the other way round. It said "four" for two

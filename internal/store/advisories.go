@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -93,6 +94,108 @@ func (Advisories) ReleasesForProduct(ctx context.Context, c *Conn, product strin
 			return nil, mapError(err)
 		}
 		out = append(out, v)
+	}
+	return out, mapError(rows.Err())
+}
+
+// CoverageState is a release's advisory-coverage status, computed from the
+// coverage window in the data (release_coverage.esm_expires) against now — the
+// same "put the answer in the data, not the UI" rule as feed freshness (ADR-063).
+// A release past its window is out of coverage: a no-match on it is cannot-know,
+// not clean (B29, ADR-067).
+type CoverageState string
+
+const (
+	CoverageCovered CoverageState = "covered"         // esm_expires >= now: advisories still flow
+	CoverageOut     CoverageState = "out_of_coverage" // esm_expires < now: keyspace stopped for this release
+	CoverageUnknown CoverageState = "unknown"         // no coverage window recorded for the release
+)
+
+// ReleaseCoverage is one release's coverage window and computed state.
+// NewestAdvisoryAt is the empirical last advisory the keyspace holds for the
+// release — the honest display value where the feed gave only a degenerate date
+// (coverage_source = 'feed-degenerate', e.g. hardy's placeholder 2008 date). The
+// state itself is decided by esm_expires, the feed's authoritative coverage end.
+type ReleaseCoverage struct {
+	Release          string
+	State            CoverageState
+	ESMExpires       *time.Time
+	SupportExpires   *time.Time
+	CoverageSource   string
+	NewestAdvisoryAt *time.Time
+}
+
+// InCoverage is the boolean the matcher's ClassifyMatch consumes: covered is in,
+// out and unknown are both NOT in — an unrecorded window cannot be presented as
+// coverage (absence is not evidence, B29/ADR-067).
+func (rc ReleaseCoverage) InCoverage() bool { return rc.State == CoverageCovered }
+
+const coverageStateSQL = `CASE
+	    WHEN rc.esm_expires IS NULL THEN 'unknown'
+	    WHEN rc.esm_expires < now()::date THEN 'out_of_coverage'
+	    ELSE 'covered' END`
+
+// ReleaseCoverageFor returns the coverage window and computed state for one
+// release, plus the empirical newest advisory the keyspace holds for it. A
+// release with no coverage row comes back as CoverageUnknown — not an error, and
+// not covered. Global-table read from inside a tenant Read (ADR-030), like FixesFor.
+func (Advisories) ReleaseCoverageFor(ctx context.Context, c *Conn, release string) (ReleaseCoverage, error) {
+	const q = `
+		SELECT rc.support_expires, rc.esm_expires, COALESCE(rc.coverage_source, ''),
+		       (SELECT max(va.issued_at) FROM advisory_fixed_packages afp
+		          JOIN vendor_advisories va USING (advisory_id)
+		         WHERE afp.distro_release = $1) AS newest_advisory_at,
+		       ` + coverageStateSQL + ` AS state
+		  FROM release_coverage rc
+		 WHERE rc.distro_release = $1`
+	out := ReleaseCoverage{Release: release, State: CoverageUnknown}
+	var state string
+	err := c.QueryRow(ctx, q, release).
+		Scan(&out.SupportExpires, &out.ESMExpires, &out.CoverageSource, &out.NewestAdvisoryAt, &state)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			// No window recorded: unknown, and the newest-advisory fallback is worth
+			// having for display even without a window row.
+			return out, nil
+		}
+		return out, mapError(err)
+	}
+	out.State = CoverageState(state)
+	return out, nil
+}
+
+// CoverageAll returns, per release the keyspace actually holds advisories for, its
+// coverage state and newest advisory — the dashboard's coverage surface beside
+// feed freshness. Starts from the releases in advisory_fixed_packages so it shows
+// what a host could resolve to, LEFT JOINed to the window (a release with
+// advisories but no window row reads as unknown).
+func (Advisories) CoverageAll(ctx context.Context, c *Conn) ([]ReleaseCoverage, error) {
+	const q = `
+		SELECT r.release, rc.support_expires, rc.esm_expires, COALESCE(rc.coverage_source, ''),
+		       r.newest_advisory_at,
+		       CASE WHEN rc.esm_expires IS NULL THEN 'unknown'
+		            WHEN rc.esm_expires < now()::date THEN 'out_of_coverage'
+		            ELSE 'covered' END AS state
+		  FROM (SELECT afp.distro_release AS release, max(va.issued_at) AS newest_advisory_at
+		          FROM advisory_fixed_packages afp JOIN vendor_advisories va USING (advisory_id)
+		         GROUP BY afp.distro_release) r
+		  LEFT JOIN release_coverage rc ON rc.distro_release = r.release
+		 ORDER BY r.release`
+	rows, err := c.Query(ctx, q)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	var out []ReleaseCoverage
+	for rows.Next() {
+		var rc ReleaseCoverage
+		var state string
+		if err := rows.Scan(&rc.Release, &rc.SupportExpires, &rc.ESMExpires, &rc.CoverageSource,
+			&rc.NewestAdvisoryAt, &state); err != nil {
+			return nil, mapError(err)
+		}
+		rc.State = CoverageState(state)
+		out = append(out, rc)
 	}
 	return out, mapError(rows.Err())
 }

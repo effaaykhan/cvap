@@ -82,6 +82,13 @@ type AssetResponse struct {
 	// can. Present even when the release did not resolve.
 	ReleaseConfidence *float64        `json:"release_confidence,omitempty" doc:"Confidence in the resolved release — the share of agreeing band votes (ADR-064)."`
 	ReleaseProvenance json.RawMessage `json:"release_provenance,omitempty" doc:"Which services voted for a release, agreed, or abstained (with the reason: no advisory analogue, or the version matched no release band)."`
+
+	// Advisory coverage for the resolved release (B29, ADR-067). When
+	// out_of_coverage, an empty finding list on this host means CANNOT-KNOW, not
+	// clean — the release is past its advisory window and the keyspace stopped
+	// accumulating for it. Absent when there is no resolved release.
+	ReleaseCoverageState *string `json:"release_coverage_state,omitempty" doc:"covered | out_of_coverage | unknown. out_of_coverage means a no-advisory result is cannot-know, not clean — the release is past its feed's window."`
+	ReleaseCoverageEnd   *string `json:"release_coverage_end,omitempty" doc:"The effective last-covered date for the release: the newest advisory the keyspace holds for it, or the feed's ESM end."`
 }
 
 func assetSummary(a *store.Asset) AssetSummary {
@@ -178,6 +185,7 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 		DistroFamily: d.DistroFamily, DistroRelease: d.DistroRelease,
 		OSConfidence: d.OSConfidence, OSProvenance: d.OSProvenance,
 		ReleaseConfidence: d.ReleaseConfidence, ReleaseProvenance: d.ReleaseProvenance,
+		ReleaseCoverageState: d.ReleaseCoverageState, ReleaseCoverageEnd: dateOrNil(d.ReleaseCoverageEnd),
 	}
 	for _, a := range d.Addresses {
 		out.Addresses = append(out.Addresses, AssetAddressResponse{IP: a.IP, MAC: a.MAC, ValidFrom: a.ValidFrom})

@@ -18,6 +18,7 @@ export type AssetSummary = Schemas["AssetSummary"];
 export type ExposureByZone = Schemas["ExposureByZoneResponse"];
 export type KnowledgeFreshness = Schemas["KnowledgeFreshnessResponse"];
 export type KnowledgeFeed = Schemas["KnowledgeFeedResponse"];
+export type ReleaseCoverage = Schemas["ReleaseCoverageResponse"];
 export type Scan = Schemas["ScanResponse"];
 export type ScanList = Schemas["ScanListResponse"];
 

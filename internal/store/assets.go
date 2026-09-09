@@ -332,6 +332,16 @@ type AssetDetail struct {
 	// why a release did not resolve rather than a silent family-only.
 	ReleaseConfidence *float64
 	ReleaseProvenance json.RawMessage
+
+	// Advisory coverage for the resolved release (B29, ADR-067). State is
+	// covered / out_of_coverage / unknown, nil when there is no release. When
+	// out_of_coverage, a "clean" (no advisory) result on this host means
+	// cannot-know, and the asset page must say so — a finding list that shows
+	// nothing here is otherwise indistinguishable from one that could not be
+	// assessed. ReleaseCoverageEnd is the effective last-covered date (the newest
+	// advisory the keyspace holds for the release, or the feed's ESM date).
+	ReleaseCoverageState *string
+	ReleaseCoverageEnd   *time.Time
 }
 
 // GetDetail returns the full asset view, or ErrNotFound (also what a
@@ -399,12 +409,24 @@ func (Assets) GetDetail(ctx context.Context, c *Conn, id uuid.UUID) (*AssetDetai
 	}
 
 	const osQ = `
-		SELECT coalesce(distro_family,''), distro_release, os_confidence, os_provenance,
-		       release_confidence, release_provenance
-		  FROM assets WHERE tenant_id = $1 AND asset_id = $2`
+		SELECT coalesce(a.distro_family,''), a.distro_release, a.os_confidence, a.os_provenance,
+		       a.release_confidence, a.release_provenance,
+		       CASE WHEN a.distro_release IS NULL THEN NULL
+		            WHEN rc.esm_expires IS NULL THEN 'unknown'
+		            WHEN rc.esm_expires < now()::date THEN 'out_of_coverage'
+		            ELSE 'covered' END AS coverage_state,
+		       COALESCE(
+		           (SELECT max(va.issued_at)::date FROM advisory_fixed_packages afp
+		              JOIN vendor_advisories va USING (advisory_id)
+		             WHERE afp.distro_release = a.distro_release),
+		           rc.esm_expires) AS coverage_end
+		  FROM assets a
+		  LEFT JOIN release_coverage rc ON rc.distro_release = a.distro_release
+		 WHERE a.tenant_id = $1 AND a.asset_id = $2`
 	if err := c.QueryRow(ctx, osQ, c.Tenant().UUID(), id).
 		Scan(&d.DistroFamily, &d.DistroRelease, &d.OSConfidence, &d.OSProvenance,
-			&d.ReleaseConfidence, &d.ReleaseProvenance); err != nil {
+			&d.ReleaseConfidence, &d.ReleaseProvenance,
+			&d.ReleaseCoverageState, &d.ReleaseCoverageEnd); err != nil {
 		return nil, mapError(err)
 	}
 	return d, nil

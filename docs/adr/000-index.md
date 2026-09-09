@@ -75,3 +75,4 @@ Create one with `/new-adr <title>`. Check a change against them with the
 | 064 | Release resolution by upstream version band over the advisory keyspace — every failure mode is unresolved not wrong; ≥2 agreeing votes, feed codename, product→package map is content (P3.3) | Accepted |
 | 065 | Release-resolution confidence tiered by vote count (2/3/4+), and the measured service-coverage bound — the reach is B22 service identification, not the resolver (refines ADR-064) | Accepted |
 | 066 | The two-vote release threshold is reasoned, not validated — review trigger: the first real host resolving on exactly two agreeing votes (refines ADR-064/065) | Accepted |
+| 067 | The advisory coverage window is data (release_coverage, ingested EOL/ESM), and a release past it is cannot-know not clean — fourth application of absence-is-not-evidence (B29) | Accepted |

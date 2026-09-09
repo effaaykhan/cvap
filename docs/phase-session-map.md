@@ -314,6 +314,40 @@ before P3.4 trusts the finding set.
     the corpus can't extract (Samba, Apache, PostgreSQL, UnrealIRCd, Postfix,
     distccd) are **backlog B28** — a B22 service-ID gap that bounds P3.3's real-host
     reach, NOT a resolver limitation.
+- **S32 — checkpoint before P3.4.** No feature code: synced this map (nine sessions
+  stale), positioned B29 before P3.4, recorded the two-vote threshold as reasoned-
+  not-validated (ADR-066, a review trigger), and confirmed P3.4's ADR-060 entry
+  conditions met.
+- **S33 (this session) — B29: the keyspace coverage window, before P3.4 (ADR-067).**
+  The last matching-integrity item. A release's advisory feed covers only until its
+  support ends; a host past that window has exposure the keyspace cannot know about,
+  so a no-match read as **clean** — a silent false negative. Now it reports
+  **cannot-know**.
+  - **Coverage is DATA, not a constant:** `release_coverage` (migration 0036)
+    ingests each release's EOL/ESM dates from `ubuntu.com/security/releases.json`
+    (`fetch-releases`/`import-releases`, offline per ADR-019). Real dates for current
+    releases (jammy ESM 2032, focal 2030); the feed returns a degenerate placeholder
+    for pre-ESM releases (hardy = release date 2008), recorded as
+    `coverage_source='feed-degenerate'` with the empirical newest-advisory date as
+    the honest display value — the decision (`esm_expires < now`) holds regardless.
+  - **Matching returns a state** (`domain.ClassifyMatch`): vulnerable / clean /
+    **cannot-know** — the fourth application of absence-is-not-evidence (after no
+    advisory for a package, no analogue for a product, no corpus instance for a
+    rule). A positive match stays vulnerable; only a *no-match* on an out-of-coverage
+    release becomes cannot-know. The three states are distinct and stay distinct.
+  - **Dashboard shipped** (standing requirement): the knowledge panel renders
+    per-release coverage beside feed freshness; the asset page carries a prominent
+    caveat when its release is out of coverage — "an empty finding list here means
+    cannot-know, not clean."
+  - **★ Acceptance, demonstrated not asserted** (`TestReleasePastCoverageWindowIsCannotKnow`):
+    hardy (ESM ended, degenerate date, out of coverage) → a no-match is cannot-know;
+    jammy (ESM 2032, covered) → a no-match is clean. The two differ; the collapse of
+    one into the other was the entire defect.
+  - **`release_coverage` is the 7th knowledge table / 16th ERD-undrawn** — recorded
+    in ADR-067 and this file's lists, folded into B27.
+  - **P3.4 is unblocked:** all matching-integrity floors (P3.1 comparators, P3.2
+    advisories, P3.3 resolution, B29 coverage) are in; the finding set P3.4 will
+    prioritise is complete-or-honestly-bounded, never silently incomplete.
 
 ---
 

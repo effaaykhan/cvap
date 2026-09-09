@@ -1,5 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
-import { api, type KnowledgeFeed } from "../lib/api";
+import { api, type KnowledgeFeed, type ReleaseCoverage } from "../lib/api";
+
+// Coverage state labels (B29). "Out of coverage" means the release is past its
+// advisory window — the keyspace stopped accumulating for it, so a no-match on a
+// host of that release is cannot-know, not clean.
+const COVERAGE_LABEL: Record<string, string> = {
+  covered: "Covered",
+  out_of_coverage: "Out of coverage",
+  unknown: "Unknown",
+};
 
 // Knowledge feed freshness (P3.2). Whether the vendor-advisory data behind
 // advisory-matched findings is current. The `state` word is the SERVER's verdict,
@@ -31,6 +40,24 @@ function thresholdText(seconds: number): string {
   return `${Math.round(seconds / 3600)}h`;
 }
 
+function CoverageRow({ c }: { c: ReleaseCoverage }) {
+  // covered -> ok, out_of_coverage -> danger, unknown -> muted; reuse the
+  // freshness badge classes so the two states read the same way.
+  const cls =
+    c.state === "covered" ? "freshness-current" : c.state === "out_of_coverage" ? "freshness-stale" : "freshness-never";
+  return (
+    <tr>
+      <td className="data">{c.release}</td>
+      <td>
+        <span className={`freshness ${cls}`}>{COVERAGE_LABEL[c.state] ?? c.state}</span>
+      </td>
+      <td className="muted">{c.esm_expires || <span className="faint">—</span>}</td>
+      <td className="muted">{c.newest_advisory_at || <span className="faint">—</span>}</td>
+      <td className="muted">{c.coverage_source || <span className="faint">—</span>}</td>
+    </tr>
+  );
+}
+
 function FeedRow({ f }: { f: KnowledgeFeed }) {
   return (
     <tr>
@@ -54,6 +81,7 @@ export function Knowledge() {
   });
 
   const anyStale = data?.feeds.some((f) => f.state === "stale" || f.state === "never");
+  const anyOutOfCoverage = data?.coverage?.some((c) => c.state === "out_of_coverage");
 
   return (
     <section>
@@ -90,6 +118,45 @@ export function Knowledge() {
             {data.feeds.length === 0 && (
               <tr className="empty">
                 <td colSpan={6}>No advisory feeds ingested yet.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      )}
+
+      <h2>Release coverage</h2>
+      <p className="note">
+        Each ingested release's advisory window. <strong>Out of coverage</strong> means the
+        release is past its support/ESM end — the feed no longer issues advisories for it, so a
+        host on it can carry exposure the keyspace cannot know about. On such a host, a result
+        with no advisory match means <strong>cannot-know</strong>, not clean (B29). Where the feed
+        gave only a placeholder date (<span className="data">feed-degenerate</span>), the newest
+        advisory column is the honest coverage end.
+      </p>
+      {anyOutOfCoverage && (
+        <p className="error">
+          One or more ingested releases are out of advisory coverage. Hosts on those releases
+          cannot be assessed for vulnerabilities disclosed after their window closed.
+        </p>
+      )}
+      {data && (
+        <table>
+          <thead>
+            <tr>
+              <th>Release</th>
+              <th>Coverage</th>
+              <th>ESM / support end</th>
+              <th>Newest advisory</th>
+              <th>Source</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(data.coverage ?? []).map((c) => (
+              <CoverageRow key={c.release} c={c} />
+            ))}
+            {(data.coverage ?? []).length === 0 && (
+              <tr className="empty">
+                <td colSpan={5}>No release coverage recorded yet.</td>
               </tr>
             )}
           </tbody>

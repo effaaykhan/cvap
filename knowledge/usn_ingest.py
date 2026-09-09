@@ -254,6 +254,109 @@ def _sql_lit(v):
     return "'" + str(v).replace("'", "''") + "'"
 
 
+RELEASES_URL = "https://ubuntu.com/security/releases.json"
+MAX_RELEASES = 500
+
+
+def _date10(v):
+    """The YYYY-MM-DD of an ISO timestamp the feed returns ('2008-04-24T00:00:00'),
+    or None. The coverage window is a date, not a moment."""
+    if not v:
+        return None
+    s = _bounded(v, 32)
+    return s[:10] if s else None
+
+
+def fetch_releases(out):
+    """Online: the release support/EOL/ESM dates -> a coverage pack. The coverage
+    boundary is DATA from the feed (B29), not a constant in code."""
+    req = urllib.request.Request(RELEASES_URL, headers={"User-Agent": "CVAP-knowledge/usn (ADR-019)"})
+    with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310 (fixed https host)
+        raw = _read_capped(r, MAX_FEED_BYTES)
+    doc = json.loads(raw)
+    rels = doc.get("releases") or []
+    if len(rels) > MAX_RELEASES:
+        raise SystemExit(f"REFUSED: {len(rels)} releases exceeds the {MAX_RELEASES} bound.")
+    releases = []
+    for rel in rels:
+        codename = _bounded(rel.get("codename"), 64)
+        if not codename or codename == "upstream":
+            continue  # 'upstream' is a sentinel row with null dates, not a release
+        releases.append({
+            "codename": codename,
+            "release_date": _date10(rel.get("release_date")),
+            "support_expires": _date10(rel.get("support_expires")),
+            "esm_expires": _date10(rel.get("esm_expires")),
+        })
+    pack = {
+        "feed": FEED,
+        "source_url": RELEASES_URL,
+        "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "releases": releases,
+    }
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(pack, f, indent=1)
+    print(f"fetched {len(releases)} release coverage rows from {RELEASES_URL} -> {out}")
+
+
+def import_releases(pack_path, db_url):
+    """Offline: a coverage pack -> release_coverage (B29). Same injection-safe path
+    as the advisory import: CSV + \\copy into a temp staging table, then upsert."""
+    size = os.path.getsize(pack_path)
+    if size > MAX_FEED_BYTES:
+        raise SystemExit(f"REFUSED: pack {pack_path} is {size} bytes, over the {MAX_FEED_BYTES} bound.")
+    with open(pack_path, encoding="utf-8") as f:
+        pack = json.load(f)
+    feed = pack.get("feed", FEED)
+    fetched_at = pack.get("fetched_at")
+    releases = pack.get("releases") or []
+
+    tmp = tempfile.mkdtemp(prefix="usn-releases-")
+    try:
+        csv_path = os.path.join(tmp, "rel.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as cf:
+            w = csv.writer(cf)
+            for rel in releases:
+                rd = rel.get("release_date")
+                se = rel.get("support_expires")
+                esm = rel.get("esm_expires")
+                # 'feed-degenerate': the feed gave only the release date (its
+                # placeholder for releases predating ESM tracking), so the true
+                # coverage end is unknown from the feed — but the release is still
+                # clearly EOL and the out-of-coverage decision (esm < now) holds.
+                degenerate = (not esm) or (rd and esm <= rd)
+                source = "feed-degenerate" if degenerate else "feed"
+                w.writerow([feed, rel["codename"], rd or "", se or "", esm or "", source])
+
+        sql = f"""
+\\set ON_ERROR_STOP on
+BEGIN;
+CREATE TEMP TABLE _rc (feed text, distro_release text, release_date text,
+                       support_expires text, esm_expires text, coverage_source text) ON COMMIT DROP;
+\\copy _rc FROM '{csv_path}' WITH (FORMAT csv)
+INSERT INTO release_coverage
+    (feed, distro_release, release_date, support_expires, esm_expires, coverage_source, last_fetched_at)
+SELECT feed, distro_release,
+       nullif(release_date,'')::date, nullif(support_expires,'')::date, nullif(esm_expires,'')::date,
+       coverage_source, {_sql_lit(fetched_at)}::timestamptz
+FROM _rc
+ON CONFLICT (feed, distro_release) DO UPDATE SET
+    release_date = excluded.release_date, support_expires = excluded.support_expires,
+    esm_expires = excluded.esm_expires, coverage_source = excluded.coverage_source,
+    last_fetched_at = excluded.last_fetched_at;
+COMMIT;
+"""
+        proc = subprocess.run(["psql", db_url, "-v", "ON_ERROR_STOP=1", "-q"],
+                              input=sql, text=True, capture_output=True)
+        sys.stdout.write(proc.stdout)
+        sys.stderr.write(proc.stderr)
+        if proc.returncode != 0:
+            raise SystemExit(f"import failed (psql exit {proc.returncode})")
+        print(f"imported {len(releases)} release coverage rows from {pack_path}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Ubuntu USN advisory ingestion (P3.2)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -267,9 +370,21 @@ def main():
     i.add_argument("--pack", required=True)
     i.add_argument("--db-url", default=os.environ.get("KNOWLEDGE_IMPORT_DATABASE_URL"),
                    help="cvap_knowledge_import_login connection string")
+    fr = sub.add_parser("fetch-releases", help="online: release EOL/ESM dates -> coverage pack (B29)")
+    fr.add_argument("--out", required=True)
+    ir = sub.add_parser("import-releases", help="offline: coverage pack -> release_coverage (B29)")
+    ir.add_argument("--pack", required=True)
+    ir.add_argument("--db-url", default=os.environ.get("KNOWLEDGE_IMPORT_DATABASE_URL"),
+                    help="cvap_knowledge_import_login connection string")
     args = ap.parse_args()
     if args.cmd == "fetch":
         fetch(args.release, args.package, args.limit, args.out, args.offset)
+    elif args.cmd == "fetch-releases":
+        fetch_releases(args.out)
+    elif args.cmd == "import-releases":
+        if not args.db_url:
+            raise SystemExit("import-releases: --db-url or KNOWLEDGE_IMPORT_DATABASE_URL required")
+        import_releases(args.pack, args.db_url)
     else:
         if not args.db_url:
             raise SystemExit("import: --db-url or KNOWLEDGE_IMPORT_DATABASE_URL required")

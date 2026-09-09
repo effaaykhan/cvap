@@ -11,7 +11,7 @@
         safety corpus-check frontmatter licences gitignore-test scope-guard-test \
         env-check app-role store-test e2e dev-ca gosec mutate \
         contract-guard-test fmt-check tidy-check govulncheck db-gates db-reachable \
-        safety-sabotage adr-index ci-parity knowledge-usn knowledge-product-map \
+        safety-sabotage adr-index ci-parity knowledge-usn knowledge-product-map knowledge-coverage \
         ui ui-deps ui-types ui-verify ui-typecheck ui-test ui-build embedui-build
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
@@ -620,6 +620,12 @@ knowledge-product-map: ## Load the product->package map for release resolution (
 	@test -n "$(KNOWLEDGE_IMPORT_DATABASE_URL)" || { echo "KNOWLEDGE_IMPORT_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
 	KNOWLEDGE_IMPORT_DATABASE_URL="$(KNOWLEDGE_IMPORT_DATABASE_URL)" \
 		python3 knowledge/import_product_map.py --file knowledge/product_packages.json
+
+knowledge-coverage: ## Load per-release advisory coverage windows (EOL/ESM dates) (B29, ADR-067)
+	@test -n "$(KNOWLEDGE_IMPORT_DATABASE_URL)" || { echo "KNOWLEDGE_IMPORT_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
+	python3 knowledge/usn_ingest.py fetch-releases --out "$(KNOWLEDGE_PACK).releases"
+	KNOWLEDGE_IMPORT_DATABASE_URL="$(KNOWLEDGE_IMPORT_DATABASE_URL)" \
+		python3 knowledge/usn_ingest.py import-releases --pack "$(KNOWLEDGE_PACK).releases"
 
 frontmatter: ## Validate .claude agent and skill frontmatter
 	python3 .github/scripts/check_frontmatter.py
