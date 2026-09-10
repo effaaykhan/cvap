@@ -63,6 +63,25 @@ type osHintPayload struct {
 	Source string `json:"source"`
 }
 
+// packagePayload is what a credentialed-host engine's `package` observation carries
+// (ADR-076/077). It is DORMANT: no engine emits it today — the production
+// credentialed-host engine is deferred to full Phase 4 (ADR-076), and the
+// operator-run validation instrument deliberately does NOT emit observations, on
+// principle (ADR-077: an instrument that measures whether the pipeline is right must
+// not mutate what it measures). The precedence rule that reads this is defined now,
+// while the measurement motivating it is in front of us — the same way ADR-068
+// defined the `vulnerable` state dormant — so the decision is recorded once and
+// fires when the engine emits.
+//
+// Release is EXACT: read from /etc/os-release, not inferred from a banner band. The
+// resolver lets it outrank the band vote (ADR-064) because ReleaseSource marks it
+// read, not estimated — ground truth beats an estimate of it.
+type packagePayload struct {
+	Address       string `json:"address"`
+	Release       string `json:"release"`        // VERSION_CODENAME, e.g. "jammy"
+	ReleaseSource string `json:"release_source"` // "os-release" = read on the host, authoritative
+}
+
 // addressed is the minimum any observation carries: which address it is about.
 type addressed struct {
 	Address string `json:"address"`

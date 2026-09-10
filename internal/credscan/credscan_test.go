@@ -1,6 +1,9 @@
 package credscan
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseDpkgQuery(t *testing.T) {
 	// jammy-style output of DpkgQueryCommand; the third line has an empty
@@ -107,5 +110,115 @@ func TestDiff(t *testing.T) {
 	}
 	if len(a.FalseNegative) != 2 {
 		t.Errorf("FN = %+v, want 2 (samba, sudo)", a.FalseNegative)
+	}
+}
+
+func TestCredentialedTruth(t *testing.T) {
+	pkgs := []Package{
+		{Source: "openssl", Version: "3.0.2-0ubuntu1.6"}, // below the fix -> vulnerable
+		{Source: "sudo", Version: "1.9.9-1ubuntu2.4"},    // at/above the fix -> not
+		{Source: "bash", Version: "5.1-6ubuntu1"},        // no advisory at all
+	}
+	fixes := func(release, pkg string) ([]AdvisoryFix, error) {
+		if release != "jammy" {
+			t.Fatalf("truth queried release %q, want jammy", release)
+		}
+		switch pkg {
+		case "openssl":
+			return []AdvisoryFix{
+				{AdvisoryRef: "USN-5710-1", FixedVersion: "3.0.2-0ubuntu1.7", Comparator: "dpkg"},
+				{AdvisoryRef: "USN-BAD", FixedVersion: "", Comparator: "dpkg"},         // empty -> skipped
+				{AdvisoryRef: "USN-RPM", FixedVersion: "3.0.2", Comparator: "rpm-ish"}, // unknown -> skipped
+			}, nil
+		case "sudo":
+			return []AdvisoryFix{
+				{AdvisoryRef: "USN-5811-1", FixedVersion: "1.9.9-1ubuntu2.4", Comparator: "dpkg"},
+			}, nil
+		default:
+			return nil, nil
+		}
+	}
+	vulns := func(ref string) ([]string, error) {
+		if ref == "USN-5710-1" {
+			return []string{"CVE-2022-3602", "CVE-2022-3786"}, nil // one advisory, two CVEs
+		}
+		return nil, nil
+	}
+	res, err := CredentialedTruth(pkgs, "jammy", fixes, vulns)
+	if err != nil {
+		t.Fatalf("truth: %v", err)
+	}
+	if len(res.Keys) != 2 {
+		t.Fatalf("truth keys = %+v, want 2 (openssl x2 CVE)", res.Keys)
+	}
+	if res.Keys[0].Package != "openssl" || res.Keys[0].CVE != "CVE-2022-3602" {
+		t.Errorf("first key = %+v", res.Keys[0])
+	}
+	if len(res.Skipped) != 2 { // empty fixed_version + unknown comparator
+		t.Errorf("skipped = %+v, want 2", res.Skipped)
+	}
+}
+
+func TestBuildServiceVersion(t *testing.T) {
+	installed := map[string]string{
+		"openssl":   "3.0.2-0ubuntu1.10",
+		"mysql-8.0": "8.0.35-0ubuntu0.22.04.1",
+		"apache2":   "2.4.52-1ubuntu4.7",
+	}
+	// consistent with an installed candidate (upstream prefix) -> right, and picks it
+	sv := BuildServiceVersion("mysql", "MySQL", "8.0.35", []string{"mysql-5.7", "mysql-8.0"}, installed)
+	if sv.SourcePackage != "mysql-8.0" || sv.InstalledVersion != "8.0.35-0ubuntu0.22.04.1" {
+		t.Errorf("consistent match wrong: %+v", sv)
+	}
+	if ClassifyVersion([]ServiceVersion{sv})[0].Verdict != VersionRight {
+		t.Errorf("should classify right: %+v", sv)
+	}
+	// product maps to no installed candidate -> empty installed -> wrong
+	sv = BuildServiceVersion("ftp", "vsftpd", "3.0.5", []string{"vsftpd"}, installed)
+	if sv.InstalledVersion != "" {
+		t.Errorf("no installed candidate should give empty installed: %+v", sv)
+	}
+	if ClassifyVersion([]ServiceVersion{sv})[0].Verdict != VersionWrong {
+		t.Errorf("claimed version, package absent -> wrong: %+v", sv)
+	}
+	// installed but inconsistent -> reports the first installed, classifies wrong
+	sv = BuildServiceVersion("http", "Apache", "9.9.9", []string{"apache2"}, installed)
+	if sv.InstalledVersion != "2.4.52-1ubuntu4.7" {
+		t.Errorf("inconsistent should still report installed: %+v", sv)
+	}
+	if ClassifyVersion([]ServiceVersion{sv})[0].Verdict != VersionWrong {
+		t.Errorf("inconsistent -> wrong: %+v", sv)
+	}
+}
+
+func TestReportRender(t *testing.T) {
+	r := Report{
+		Host:     "10.0.0.9",
+		Release:  OSRelease{ID: "ubuntu", VersionID: "22.04", Codename: "jammy"},
+		Packages: 512,
+		Versions: ClassifyVersion([]ServiceVersion{
+			{Service: "ssh", BannerVersion: "8.9p1", InstalledVersion: "1:8.9p1-3ubuntu0.6"}, // wrong
+			{Service: "smtp", BannerVersion: "", InstalledVersion: "1.18"},                   // absent
+		}),
+		BandResolved:   "focal",
+		ReleaseVerdict: CompareRelease("focal", "jammy"),
+		Accuracy: Diff(
+			[]FindingKey{{"mysql-5.7", "CVE-2023-1111"}},
+			[]FindingKey{{"samba", "CVE-2017-7494"}},
+		),
+		TruthSkipped: []string{"empty fixed_version, USN-BAD / openssl"},
+	}
+	out := r.Render()
+	for _, want := range []string{
+		"right 0   wrong 1   absent 1",
+		"band vote \"focal\"", "mismatch",
+		"false positive 1   false negative 1",
+		"mysql-5.7  CVE-2023-1111", // the FP is listed
+		"samba  CVE-2017-7494",     // the FN is listed
+		"is tuned against this sample",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q\n---\n%s", want, out)
+		}
 	}
 }

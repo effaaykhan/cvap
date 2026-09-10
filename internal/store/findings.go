@@ -219,6 +219,47 @@ type OpenFinding struct {
 	Status   string
 }
 
+// AdvisoryKey is one currently-asserted advisory finding as (source package, CVE) —
+// the unit the credentialed instrument measures against ground truth (ADR-076).
+type AdvisoryKey struct {
+	Package string // the finding's instance_locator (ADR-070's package-shaped dedup)
+	CVE     string // joined from the finding's vuln_def_id
+}
+
+// AdvisoryKeysForAsset returns the (package, CVE) pairs of an asset's currently
+// asserted advisory findings — the unauthenticated finding set the credentialed
+// validation instrument compares against the credentialed ground truth (ADR-076,
+// §6.2). Only findings that carry a vuln_def_id (advisory-sourced, ADR-070) are
+// returned; a finding with no CVE has no key to compare. 'open' and 'confirmed' are
+// the currently-asserted states (the same set OpenForAssetLocators uses), so a
+// remediated or resolved finding is not counted as a live claim. vulnerability_defs
+// is a global knowledge table joined from inside a tenant-scoped Read — the ADR-030
+// case, exactly as List does it.
+func (Findings) AdvisoryKeysForAsset(ctx context.Context, c *Conn, assetID uuid.UUID) ([]AdvisoryKey, error) {
+	const q = `
+		SELECT coalesce(f.instance_locator, ''), vd.cve_id
+		  FROM findings f
+		  JOIN vulnerability_defs vd ON vd.vuln_def_id = f.vuln_def_id
+		 WHERE f.tenant_id = $1 AND f.asset_id = $2
+		   AND f.status IN ('open', 'confirmed')
+		   AND f.vuln_def_id IS NOT NULL
+		 ORDER BY f.instance_locator, vd.cve_id`
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), assetID)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	var out []AdvisoryKey
+	for rows.Next() {
+		var k AdvisoryKey
+		if err := rows.Scan(&k.Package, &k.CVE); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, k)
+	}
+	return out, mapError(rows.Err())
+}
+
 // MarkRemediated moves a finding to remediated. Used by the lifecycle when the
 // endpoint was re-observed and the rule did not fire — the issue is gone, and
 // that is different from the endpoint simply not being scanned.

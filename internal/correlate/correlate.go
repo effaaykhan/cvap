@@ -612,6 +612,31 @@ func (c *Correlator) deriveAttribution(ctx context.Context, conn *store.Conn, as
 // so the caller can match advisories against it in the same transaction (ADR-070)
 // without a re-read, and compose the finding's confidence from it (ADR-072).
 func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetID uuid.UUID, h host) (string, float32, error) {
+	// Credentialed precedence (ADR-076/077), DORMANT. An exact release READ from a
+	// credentialed `package` observation (/etc/os-release) outranks the band-vote
+	// INFERENCE below, because the credentialed source is ground truth and the vote
+	// is an estimate of it — the same relation the validation instrument measures.
+	// This is unreachable today: no scan point emits `package` observations (the
+	// production credentialed-host engine is deferred, ADR-076), so credentialedRelease
+	// finds nothing on any real host and the band vote runs as before. The rule is
+	// decided here, while the measurement is in front of us, and tested in isolation;
+	// it fires the day the engine emits, with no rediscovery of the reasoning.
+	if release, ok := credentialedRelease(h); ok {
+		prov, err := json.Marshal(map[string]any{
+			"source":  "package_manager",
+			"release": release,
+			"basis":   "exact release read from /etc/os-release; outranks band voting (ADR-076/077)",
+		})
+		if err != nil {
+			return "", 0, err
+		}
+		rel := release
+		if err := (store.Assets{}).SetRelease(ctx, conn, assetID, &rel, 1.0, prov); err != nil {
+			return "", 0, err
+		}
+		return release, 1.0, nil
+	}
+
 	var votes []domain.ReleaseVote
 	// One vote per listening endpoint (port/protocol), the same unit the services
 	// table dedups on: a service seen across several observations (a rescan) must
@@ -683,6 +708,29 @@ func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetI
 		return "", 0, nil
 	}
 	return *res.Release, res.Confidence, nil
+}
+
+// credentialedRelease returns an exact release read from a credentialed `package`
+// observation (/etc/os-release), if the host has one. This is the read side of the
+// ADR-076/077 precedence decision: an exact release READ on the host outranks the
+// band-vote inference. DORMANT — no scan point emits `package` observations today
+// (the production engine is deferred), so on every real host this returns
+// ("", false) and band voting decides; it is exercised only by its unit test, by
+// design (decide the rule now, fire it when the engine emits).
+func credentialedRelease(h host) (string, bool) {
+	for _, o := range h.obs {
+		if o.Type != store.ObsPackage {
+			continue
+		}
+		var p packagePayload
+		if err := json.Unmarshal(o.Payload, &p); err != nil {
+			continue // a malformed package payload is not a release we can trust
+		}
+		if p.ReleaseSource == "os-release" && p.Release != "" {
+			return p.Release, true
+		}
+	}
+	return "", false
 }
 
 // normaliseOSService collapses service names that name the same platform source

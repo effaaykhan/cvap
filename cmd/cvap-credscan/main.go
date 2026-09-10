@@ -1,0 +1,341 @@
+// Command cvap-credscan is the credentialed validation instrument (ADR-075/076).
+//
+// It is an operator-run measurement tool, NOT a fleet engine: one short-lived
+// process that holds a credential (ADR-027/076: the runtime holds it, never an
+// engine), reads a Linux host's package inventory and exact release over SSH, and
+// measures the unauthenticated pipeline's findings against that credentialed ground
+// truth. It authenticates only to a host in lab/scope.txt (non-negotiable #10) and
+// establishes evidence without impact — it reads inventory, runs no exploit, writes
+// nothing to the target (non-negotiable #9).
+//
+// It prints three numbers on the real host (ADR-076): version extraction (banner vs
+// installed), release attribution (band vote vs /etc/os-release), and the §6.2 FP/FN
+// of the unauthenticated findings. It changes nothing in the database and tunes
+// nothing against the sample — a banner-inference error is a backlog finding, not a
+// fix.
+//
+// Usage:
+//
+//	APP_DATABASE_URL=... cvap-credscan \
+//	  --host 10.10.4.9 --user ubuntu --key ~/.ssh/id_ed25519 \
+//	  --known-hosts ~/.ssh/known_hosts \
+//	  --tenant <uuid> --asset <uuid> [--scope lab/scope.txt] [--port 22]
+//
+// The credential is a private key file (--key) or a password (env
+// CVAP_CREDSCAN_PASSWORD). Prefer --key: an env-var password persists in the process
+// environment for the whole run, beyond the reach of the credential's zeroise (the
+// key file's bytes are read into a zeroisable Credential; the env string is not).
+// Host-key verification is mandatory: --known-hosts must contain the host's key,
+// because presenting a credential to an unverified host is the credential handed to
+// whoever answered.
+package main
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"net"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
+
+	"github.com/effaaykhan/cvap/internal/credscan"
+	"github.com/effaaykhan/cvap/internal/scanpoint"
+	"github.com/effaaykhan/cvap/internal/scope"
+	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/target"
+)
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "cvap-credscan:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	var (
+		host       = flag.String("host", "", "target host address (must be in scope)")
+		port       = flag.Int("port", 22, "SSH port")
+		user       = flag.String("user", "", "SSH user")
+		keyPath    = flag.String("key", "", "path to an SSH private key (or set CVAP_CREDSCAN_PASSWORD)")
+		knownHosts = flag.String("known-hosts", "", "path to a known_hosts file (required)")
+		scopePath  = flag.String("scope", "lab/scope.txt", "scan scope file")
+		tenantStr  = flag.String("tenant", "", "tenant uuid")
+		assetStr   = flag.String("asset", "", "asset uuid (already scanned unauthenticated)")
+		timeout    = flag.Duration("timeout", 30*time.Second, "SSH connect/read timeout")
+	)
+	flag.Parse()
+
+	if *host == "" || *user == "" || *knownHosts == "" || *tenantStr == "" || *assetStr == "" {
+		return errors.New("--host, --user, --known-hosts, --tenant and --asset are all required")
+	}
+
+	// --- Scope gate (non-negotiable #10): the same matcher Core uses. ---
+	canon, err := target.Canonicalise(*host)
+	if err != nil {
+		return fmt.Errorf("host %q: %w", *host, err)
+	}
+	// This instrument requires an ADDRESS target, not a hostname. A hostname is
+	// matched by scope.Permits by exact string, but the address DNS resolves it to
+	// is never re-checked against the scope — so a hostname allow rule could resolve
+	// to an out-of-scope or excluded address and still be handed the credential
+	// (scope.go's own stated limitation, made live by this tool's dial). Refusing a
+	// hostname closes that outright, and costs nothing: lab/scope.txt is addresses
+	// and CIDRs by convention.
+	if canon.Kind != target.KindAddress {
+		return fmt.Errorf("host %q must be an address, not a hostname: this instrument does not resolve names (a resolved address is never re-checked against scope)", *host)
+	}
+	allowed, exclusions, err := loadScope(*scopePath)
+	if err != nil {
+		return err
+	}
+	if ok, why := scope.Permits(canon, allowed, exclusions); !ok {
+		return fmt.Errorf("refusing to authenticate: %s is not in scope (%s): %s", canon.Value, *scopePath, why)
+	}
+
+	tenantUUID, err := uuid.Parse(*tenantStr)
+	if err != nil {
+		return fmt.Errorf("--tenant is not a uuid: %w", err)
+	}
+	tenant, err := store.NewTenantID(tenantUUID)
+	if err != nil {
+		return err
+	}
+	assetID, err := uuid.Parse(*assetStr)
+	if err != nil {
+		return fmt.Errorf("--asset is not a uuid: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout+30*time.Second)
+	defer cancel()
+
+	// --- Credential: runtime-held (ADR-027/076), memory-only, zeroised (ADR-038). ---
+	cred, err := loadCredential(canon.Value, *keyPath, *timeout)
+	if err != nil {
+		return err
+	}
+	defer cred.Zeroise() // backstop; zeroised explicitly below once the read is done
+
+	auth, err := authMethod(cred)
+	if err != nil {
+		cred.Zeroise()
+		return err
+	}
+
+	hostKeyCallback, err := knownhosts.New(*knownHosts)
+	if err != nil {
+		cred.Zeroise()
+		return fmt.Errorf("known_hosts %q: %w", *knownHosts, err)
+	}
+
+	// --- The one host-dependent step: authenticate and read. ---
+	read, err := credscan.ReadHost(ctx, credscan.SSHConfig{
+		Addr:            net.JoinHostPort(canon.Value, fmt.Sprint(*port)),
+		User:            *user,
+		Auth:            auth,
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         *timeout,
+	})
+	// The credential's job is done the moment the authenticated read returns: the
+	// session is closed and the inventory is in hand (ADR-057 derive-before-zeroise).
+	cred.Zeroise()
+	if err != nil {
+		return err
+	}
+
+	// --- The measurement: all store reads in one read-only tenant transaction. ---
+	report, err := measure(ctx, tenant, assetID, read)
+	if err != nil {
+		return err
+	}
+	fmt.Print(report.Render())
+	return nil
+}
+
+// measure gathers the stored side (the asset's band-resolved release, its identified
+// services, its unauthenticated advisory findings, and the advisory keyspace) and
+// computes the three measurements. It only READS — the instrument changes nothing.
+func measure(ctx context.Context, tenant store.TenantID, assetID uuid.UUID, read credscan.HostRead) (credscan.Report, error) {
+	dbURL := os.Getenv("APP_DATABASE_URL")
+	if dbURL == "" {
+		return credscan.Report{}, errors.New("APP_DATABASE_URL is not set (the same value cvap-core uses)")
+	}
+	db, err := store.Open(ctx, store.Config{URL: dbURL})
+	if err != nil {
+		return credscan.Report{}, fmt.Errorf("database: %w", err)
+	}
+	defer db.Close()
+
+	// Installed inventory indexed by source package; first wins for a multi-arch
+	// duplicate — the version is the same across arches for this comparison.
+	installed := map[string]string{}
+	for _, p := range read.Packages {
+		if _, ok := installed[p.Source]; !ok {
+			installed[p.Source] = p.Version
+		}
+	}
+
+	report := credscan.Report{
+		Host:     read.Release.Get("PRETTY_NAME"),
+		Release:  read.Release,
+		Packages: len(read.Packages),
+	}
+	if report.Host == "" {
+		report.Host = assetID.String()
+	}
+
+	err = db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		adv := store.Advisories{}
+
+		// Credentialed ground truth (measurement 3's truth side): exact inventory,
+		// exact release, same matching rules as the unauthenticated path.
+		fixes := func(release, pkg string) ([]credscan.AdvisoryFix, error) {
+			rows, err := adv.FixesFor(ctx, c, release, pkg)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]credscan.AdvisoryFix, len(rows))
+			for i, r := range rows {
+				out[i] = credscan.AdvisoryFix{AdvisoryRef: r.AdvisoryRef, FixedVersion: r.FixedVersion, Comparator: r.Comparator}
+			}
+			return out, nil
+		}
+		vulns := func(ref string) ([]string, error) {
+			rows, err := adv.AdvisoryVulnDefs(ctx, c, ref)
+			if err != nil {
+				return nil, err
+			}
+			cves := make([]string, len(rows))
+			for i, r := range rows {
+				cves[i] = r.CVE
+			}
+			return cves, nil
+		}
+		truth, err := credscan.CredentialedTruth(read.Packages, read.Release.Codename, fixes, vulns)
+		if err != nil {
+			return err
+		}
+		report.TruthSkipped = truth.Skipped
+
+		// Measurement 3: FP/FN of the unauthenticated findings vs the truth.
+		unauthRows, err := (store.Findings{}).AdvisoryKeysForAsset(ctx, c, assetID)
+		if err != nil {
+			return err
+		}
+		unauth := make([]credscan.FindingKey, len(unauthRows))
+		for i, r := range unauthRows {
+			unauth[i] = credscan.FindingKey{Package: r.Package, CVE: r.CVE}
+		}
+		report.Accuracy = credscan.Diff(unauth, truth.Keys)
+
+		// Measurements 1 and 2 come off the asset detail.
+		detail, err := (store.Assets{}).GetDetail(ctx, c, assetID)
+		if err != nil {
+			return err
+		}
+		if detail.DistroRelease != nil {
+			report.BandResolved = *detail.DistroRelease
+		}
+		report.ReleaseVerdict = credscan.CompareRelease(report.BandResolved, read.Release.Codename)
+
+		var svcs []credscan.ServiceVersion
+		for _, s := range detail.Services {
+			if s.Product == "" {
+				continue // no product to map; not a version-extraction subject
+			}
+			candidates, err := adv.PackagesForProduct(ctx, c, s.Product)
+			if err != nil {
+				return err
+			}
+			name := s.Service
+			if name == "" {
+				name = fmt.Sprintf("%s/%d", s.Protocol, s.Port)
+			}
+			svcs = append(svcs, credscan.BuildServiceVersion(name, s.Product, s.Version, candidates, installed))
+		}
+		report.Versions = credscan.ClassifyVersion(svcs)
+		return nil
+	})
+	if err != nil {
+		return credscan.Report{}, err
+	}
+	return report, nil
+}
+
+// loadCredential reads the credential material into a runtime-held Credential
+// (ADR-038: func-backed, zeroisable), scoped to the one host. A private key file if
+// --key is given, else the password from CVAP_CREDSCAN_PASSWORD. The material is
+// owned by the Credential from here on; nothing else retains it.
+func loadCredential(host, keyPath string, ttl time.Duration) (*scanpoint.Credential, error) {
+	scopeHost := []string{host}
+	expires := time.Now().Add(ttl + time.Minute)
+	if keyPath != "" {
+		material, err := os.ReadFile(keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("reading key %q: %w", keyPath, err)
+		}
+		return scanpoint.NewCredential("credscan-instrument", "credscan", "ssh-key", scopeHost, expires, material), nil
+	}
+	pw := os.Getenv("CVAP_CREDSCAN_PASSWORD")
+	if pw == "" {
+		return nil, errors.New("no credential: pass --key or set CVAP_CREDSCAN_PASSWORD")
+	}
+	return scanpoint.NewCredential("credscan-instrument", "credscan", "ssh-password", scopeHost, expires, []byte(pw)), nil
+}
+
+// authMethod builds an ssh.AuthMethod from the runtime-held credential. It reveals
+// the material only to construct the method and does not retain the revealed slice.
+// The ssh library copies key/password bytes into its own buffers (the ADR-038 caveat
+// that a zeroise is one layer), which is why the credential lives only for the job.
+func authMethod(cred *scanpoint.Credential) (ssh.AuthMethod, error) {
+	switch cred.Kind {
+	case "ssh-key":
+		signer, err := ssh.ParsePrivateKey(cred.Reveal())
+		if err != nil {
+			return nil, fmt.Errorf("parsing private key: %w", err)
+		}
+		return ssh.PublicKeys(signer), nil
+	case "ssh-password":
+		return ssh.Password(string(cred.Reveal())), nil
+	default:
+		return nil, fmt.Errorf("unknown credential kind %q", cred.Kind)
+	}
+}
+
+// loadScope reads a scope file into allow and exclusion rule lists. One rule per
+// line; a leading '!' is an exclusion; '#' begins a comment; blanks are ignored.
+// This is the operator-written policy text scope.Permits parses on the rule side.
+func loadScope(path string) (allowed, exclusions []string, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("scope file: %w", err)
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "!") {
+			exclusions = append(exclusions, strings.TrimSpace(line[1:]))
+			continue
+		}
+		allowed = append(allowed, line)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, nil, fmt.Errorf("scope file: %w", err)
+	}
+	return allowed, exclusions, nil
+}
