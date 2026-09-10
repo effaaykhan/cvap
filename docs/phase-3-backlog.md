@@ -28,14 +28,39 @@ parallel and each is routed to the right reviewer.
 
 ## Ordered backlog
 
-### Position as of S31 (checkpoint)
+### Position as of S38 — Phase 3 COMPLETE
 
-Phase 3 is underway, so the section headers below ("Before / During / After Phase 3") read
-against where we now are: **P3.1 (comparators, S27) ✅ · P3.2 (advisory ingestion, S28) ✅ ·
-P3.3 (release resolution, S31) ✅ · B29 (coverage window, S33) ✅ · P3.4 (KEV/EPSS
-prioritisation, S34) ✅ — the family → release → comparator → advisory → finding chain closes
-on real data, and the finding set now orders by priority.**
-The ordered front, most-blocking first:
+Phase 3 closed at S37. The dated section headers below ("Before / During / After Phase 3") are
+now historical framing; the current positions are stated here explicitly, not implied by them.
+
+**The live front (S38), most-blocking first:**
+
+1. **Enterprise console (#12) — the next build.** Designed S37 (`docs/superpowers/specs/
+   2026-09-09-enterprise-console-design.md` + canvas), not built. IA + a visual design language
+   over the shipped tokens; rung 1 (accurate-first) is the constraint. Its backend-reads map
+   phases the build: triage rides existing reads, landing/health/trends need new reads. This is
+   where the Phase-3 data becomes a triage surface.
+2. **The Phase 4 sequencing decision — open, the operator's.** `docs/phase-4-sequencing-decision.md`.
+   B30, B31 and B33 converge on credentialed assessment. Recommendation: hold Phase 4 behind a named
+   trigger; take the console then B28 first. Blocks nothing mechanically, but shapes everything after
+   the console.
+3. **B28 — service identification / version extraction (highest-leverage unauthenticated work).**
+   Raises reach *and* lifts the confidence ceiling: a response-shape-extracted version is the first
+   real sub-1.0 input that exercises ADR-073's min-composition and pushes confidence up. A normal
+   session, not a phase. Recommended after the console if Phase 4 is held.
+4. **B24 — Debian-vs-Ubuntu family correctness.** Widens reach; correctness of attribution on
+   Debian-family hosts. Alongside/after B28.
+5. **B31 — advisory-finding remediation lifecycle.** Required before the finding set is trustworthy
+   over time (a patched package must close its finding). Bounded `correlate` work; account for
+   ADR-071's re-key (or take ADR-071's mitigation first).
+6. **B32 — real per-asset reachability (external-vantage probe); B33 — the manual known-exploited
+   case; B34 — load-test coarse-ceiling robustness.** B32/B33 fold into the Phase 4 decision (both
+   dissolve under credentialed); B34 is a small CI-hardening (a slow runner trips the 1000ms ceiling)
+   — do it if the flake recurs, per ADR-058's accepted-flakiness stance.
+7. **B27 — redraw the ERD / supersede ADR-029.** Docs task, any time — now eighteen ERD-undrawn
+   tables. **B26 — rpm proved in situ:** ⛔ operator action (a real RHEL/Rocky/Alma/CentOS host).
+
+**What Phase 3 landed, in the order it landed (all ✅) — record, not front:**
 
 1. **B29 — keyspace coverage window (silent under-reporting): BUILT (S33, ADR-067).** The one
    item positioned ahead of the phase, now done: a release past its window reports cannot-know,
@@ -85,28 +110,27 @@ The ordered front, most-blocking first:
    scope), not schedulable as a code session.
 7. **Enterprise console (#12): after P3.4**, per ADR-059.
 
-**Sequencing signal — three independent gaps now point at credentialed assessment (Phase 4).**
-This is recorded here, at the ordering level, not only inside the items, because it is where the
-sequencing gets decided. The three are not one problem seen thrice; they are distinct gaps that
-happen to share a fix:
+**Sequencing signal — three independent gaps now resolve to credentialed assessment (Phase 4).**
+The full decision, with the actual choice, costs, and a recommendation, is in
+**`docs/phase-4-sequencing-decision.md`** (S38). In brief: the three are distinct gaps that share one
+fix because all three sit on the same weak input — a banner-*inferred* package identity:
 
 - **B30** — the keyspace holds *advised* packages, not *shipped* ones, so a no-match on a
   never-advised package reads clean for the wrong reason (completeness).
 - **B31** — advisory findings have no remediation lifecycle, and the one they need is complicated by
   the map-derived identity (ADR-071) (lifecycle + identity).
-- **ADR-072/073 / version confidence** — the installed version is a banner inference. It is a 1.0
-  pass-through *today* (ADR-073: no principled sub-1.0 value yet), so it does not cap confidence
-  now — but it *becomes* a cap the moment B28 gives response-shape extraction a real weaker value,
-  and every banner-inferred finding will then rank below a credentialed one (trust).
+- **B33 — the manual known-exploited case** — KEV is a fact about a CVE, but whether *this host*
+  runs the vulnerable package rests on a medium-confidence banner match (ADR-073), so a KEV finding
+  can need manual confirmation before it is actioned (the loudest signal carries a manual step).
 
-A credentialed read of the package manager answers all three at once: it gives the *installed* set
-(B30 dissolves), the authoritative package name and version (B31's identity problem and ADR-071's
-re-key fragility dissolve), and a near-exact version so ADR-072's min stops binding on version
-(confidence rises). **Three independent gaps converging on one fix is a structural signal, not a
-coincidence** — the kind that should move a phase's ordering. It is recorded, not acted on: Phase 4
-is **not** pulled forward yet, and P3.4 (ordering the findings that now exist) comes next as planned.
-But the next time a fourth gap lands here, the decision to resequence should be made deliberately
-against this accumulation, not rediscovered.
+A credentialed read of the package manager answers all three: the *installed* set (B30 dissolves),
+the authoritative package name+version (B31's identity + ADR-071's re-key dissolve), and KEV attaching
+to a host without a manual step (B33 dissolves). **Three independent gaps converging is a structural
+signal, not coincidence.** The S38 decision does not pull Phase 4 forward yet: it recommends holding
+it behind a named trigger and taking the enterprise console then B28 first, because the gaps produce
+*bounded* answers (the product discloses its ceiling honestly) and the unauthenticated approach has
+the broader first sale — with the stated condition (credential-providing enterprise buyers) under
+which the recommendation flips. **The operator decides.**
 
 Everything below keeps its original section for provenance; the positions above are current.
 
@@ -139,6 +163,8 @@ Everything below keeps its original section for provenance; the positions above 
 | B29 | **✅ BUILT (S33, ADR-067) — the keyspace coverage window: a host past its feed's end is silently under-reported.** A release's advisory feed covers only until that release's support ends (EOL, or ESM end). A host running a release **past that window** has real exposure the keyspace cannot know about, so backport-aware matching returns *no advisory match* and the host reads as **clean** — a silent false negative, the exact failure P3.1 was sequenced first to prevent. It has not bitten on Metasploitable because hardy had ESM advisories through 2012, so its feed covers the host's exposure; it **will** bite on the first customer host on a release past its window. The fix is the freshness pattern applied to coverage: record each feed/release's **coverage-end** as data (alongside `knowledge_feed_status`'s freshness threshold, ADR-063), and when a host's release is past it, matching must return a **STATE** — "release out of advisory coverage, findings incomplete" — never silent clean. Same argument as the exposure count and feed freshness: put the boundary in the data so the API answers it and the panel renders it. **Done (S33, ADR-067):** `release_coverage` (migration 0036) ingests each release's EOL/ESM dates from `ubuntu.com/security/releases.json` (`make knowledge-coverage`); `domain.ClassifyMatch` returns vulnerable / clean / **cannot-know**, the fourth absence-is-not-evidence application; the knowledge panel shows per-release coverage beside feed freshness and the asset page carries the out-of-coverage caveat. Acceptance: hardy (ESM ended, degenerate feed date) → cannot-know; jammy (ESM 2032) → clean, demonstrated. | `knowledge` / `correlate` → `web` | **Done.** The advisory→finding consumer (P3.4+) calls `ClassifyMatch`; the state is live on the reads and both surfaces now. | **Landed S33 — knowledge panel coverage + asset out-of-coverage caveat** |
 | B30 | **The keyspace holds packages that were ADVISED, not packages that SHIPPED — B29's defect one layer in.** B29 is about a release past its coverage *window*; B30 is per-package *within* a covered release. The advisory keyspace has rows only for packages that had a USN. So on a fully-covered release (jammy, ESM active), a host running a package that never had an advisory matches nothing and reads **clean** — but "clean" here means "this package was never advised", not "this version is unaffected". Same reasoning as B29: absence of a match is not evidence of safety when the keyspace never held the package. `advisory_status = clean` (ADR-068) honestly means "no known advisory vulnerability among advised packages", which is narrower than safe; B30 is about closing that gap, not just labelling it. **Two candidate fixes, and they are the SAME two P3.3's re-decision weighed** (design doc): **(b) a release-baseline feed** — the shipped package set per release, so a package's absence from advisories can be read against what actually shipped; and **Phase 4 credentialed assessment** — reading the package manager gives the *installed* set, so a package's absence from the keyspace stops mattering (you match each installed package and flag the unmatched). Phase 4 fixes it more completely. **Recorded now while the reasoning is fresh (not to be decided this session):** this is the **second independent gap** whose answer is (b) or Phase 4 — B29 was the coverage window, B30 is per-package coverage. (b) was correctly deferred in P3.3 because the band worked; it is now the fix for a *defect*, not an enhancement, which changes its standing. And the case for pulling **Phase 4 forward is stronger than it was**: two independent gaps pointing at the same fix is a different signal from one. **Not a P3.4 blocker** (unlike B29): P3.4 prioritises the findings that exist; B30 bounds completeness within covered releases and needs a larger decision. | `knowledge` (baseline feed) **or** Phase 4 (credentialed) | **Decision deferred — a genuine (b)-vs-Phase-4 choice, now with two instances behind it.** Not blocking P3.4. | n/a (matching completeness; `advisory_status=clean` already states the honest boundary) |
 | B32 | **Real per-asset reachability determination — the mechanism the categorical exposure term stands in for (ADR-074).** ADR-074 dropped `internet_reachable` and made the priority model's exposure term **categorical**: external/dmz/internal from `zone_type`, an operator's zone *classification*, not a per-asset reachability *probability*. The real determination — does this specific asset actually answer **from an external vantage** — is a **vantage-point observation from an external scan point**, which the architecture already supports (scan points live in zones and emit observations, ADR-005/006/008; exposure is derived per vantage, ADR-008) and **no engine performs**. So this is a named mechanism with a home, not a gap: an external-vantage reachability probe (or a route/ACL analysis) whose result replaces the `zone_type` derivation at the two call sites (`List` priority term, `findingExposures`), lifting ADR-074's ceiling with nothing else in the model changing — it already consumes a single boolean. Until it exists, the categorical term is the honest floor. | `scanpoint` (external-vantage probe) → `correlate` | None — a named mechanism; scoped after the console (#12). | **Exposure term is categorical until this lands** |
+| B33 | **The manual known-exploited case — a KEV finding on a real host can need manual confirmation (resolves to credentialed).** KEV status is a fact about a CVE (from the feed), but whether *this host* actually runs the vulnerable package rests on the advisory→finding path's **banner-inferred, medium-confidence** package identity (ADR-070/073). So the loudest signal the product has — known-exploited-in-the-wild, the KEV badge that dominates the priority order — is only as trustworthy as a banner match, and before an operator actions a KEV finding they may have to confirm by hand that the host really runs the vulnerable package/version. That manual step is the gap. **Third of the three gaps converging on credentialed assessment** (with B30, B31): a credentialed read gives the authoritative installed package+version, so KEV attaches to a host without a manual confirmation. Not a defect in the KEV/EPSS model (ADR-069 is correct); a limit on how far a banner-inferred identity can carry the model's strongest signal. | `correlate` (identity) — dissolves under Phase 4 | The Phase 4 decision (`docs/phase-4-sequencing-decision.md`). | n/a (trust in the KEV signal per host) |
+| B34 | **Load-test coarse-ceiling robustness on slow CI runners (NEW, S37).** The `db-gates` load test seeds 50k findings and asserts finding-list p95 < 1000ms (`2 × findingListSLOms`). On a healthy runner the query clears it with ~9x headroom (113ms local); on a ~10x-slow GitHub runner even the good query reads ~1100–1260ms and trips the ceiling, and the 50k seed can hit the 15m timeout. ADR-058 already **accepts** this as a known coarse-ceiling flake (the precise SLO gate runs on the quiet nightly/local path), so the standing response is a re-run — but it recurs. A permanent fix is to **normalize the ceiling to a same-runner baseline** (a 10x-slow runner scales the bound too, while a true 10x regression still trips it), and/or raise the seed timeout — a change to ADR-058's mechanism, so it needs a new ADR. Do it only if the flake keeps costing cycles; do **not** raise the absolute ceiling (it would weaken a real regression guard to mask transient infra, exactly the §5.10 trap). Caveat: S37 showed the ceiling *did* also catch a real p95 regression — so it earns its keep; the fix must keep it sensitive. | `test/load` (+ new ADR refining 058) | None — bounded, but touches a frozen ADR. | n/a (CI robustness) |
 | 7 | **enroll-token API home + UI.** The `/v1/enrollment-tokens` route exists; issuing a token is still a CLI step in the installer. Phase 3 growth (more scan points, rule-pack ops) makes enrollment a console task. Give it a UI home. | `control/api` / `web` | Depends on #5's admin-console surface. | **Gap — no UI** |
 | 8 | **Kill-switch UI + safety-mode indicator.** `/v1/kill` and `/v1/scans/{id}/safety-mode` exist as API; the console cannot show or trigger either. Do alongside the admin surface from #5/#7. | `web` | Depends on #5's admin-console surface. | **Gap — no UI** |
 | 12 | **Enterprise-console rebuild (dedicated session, after P3.4).** The current UI reads as a developer's view of the data model, not a security console. A dedicated session, not incremental patching. Scope and ordering below. Placed after P3.4 per ADR-059 — the data must carry real confidence and priority distinctions first, or the triage view is designed twice. | `web` | P3.4 complete (CVE-matched findings with KEV/EPSS priority + the full weak-data confidence spectrum). | **Rebuild of all** |

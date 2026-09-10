@@ -22,7 +22,8 @@ agent memory until now.
 | Phase 1 — control plane, scan-point protocol | Weeks 2–3 | 5–11 | complete |
 | Phase 2 — discovery, fingerprint, resolution, findings, UI, hardening | Weeks 4–8 | 12–23 | complete (closed S23) |
 | Phase 2 validation — real-network accuracy | S24 | 24 | done; P3.3 entry condition measured & **failed** (ADR-060), then met by S26–S31 |
-| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–36 | **COMPLETE (S36).** P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ · B29 coverage window (S33) ✅ · P3.4 KEV/EPSS model + ingestion (S34) ✅ · advisory→finding path (S34b, ADR-070) ✅ · confidence by weakest link (S34c/d, ADR-072/073) ✅ · P3.4 ordering acceptance on real findings (S36) ✅ · #6 exposure resolved (S36, ADR-074) ✅ — the chain closes, produces real CVE-linked findings, and orders them by priority. Reach bounded by B28/B30; the enterprise console (#12) and the credentialed-assessment sequencing decision are the next conversations |
+| Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–37 | **COMPLETE (close-out S37).** P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ · B29 coverage window (S33) ✅ · P3.4 KEV/EPSS model + ingestion (S34) ✅ · advisory→finding path (S34b, ADR-070) ✅ · confidence by weakest link (S34c/d, ADR-072/073) ✅ · P3.4 ordering acceptance on real findings (S36) ✅ · #6 exposure resolved (S37, ADR-074) ✅ — the chain closes, produces real CVE-linked findings, and orders them by priority (see "What Phase 3 changed", §2). Ceiling is the banner-inferred package identity. Next: enterprise console (#12, designed S37); the Phase 4 credentialed-vs-widen decision (S38, `docs/phase-4-sequencing-decision.md`) is the operator's |
+| Phase 4 — credentialed assessment | §7 path-to-sellable | (sequencing decision open, S38) | **Not started; sequencing under decision.** Three gaps (B30, B31, B33) converge on it. Recommendation: hold behind a named trigger, take the console + B28 first (`docs/phase-4-sequencing-decision.md`). Operator decides. |
 
 Weeks and sessions are not one-to-one. The eight-week plan assumed a team; this
 build is sequential under one operator with Claude Code, so a "week" of the plan
@@ -513,20 +514,76 @@ before P3.4 trusts the finding set.
     shipped" (B30) landing between, KEV/EPSS is more precisely the **sixth**. The ADR is
     not edited (freeze); the recount is recorded here.
 
+- **S37 — Phase 3 close-out: internet_reachable resolved, the console designed.**
+  - **internet_reachable (backlog #6, open since S18) decided (ADR-074).** The column was
+    `NOT NULL DEFAULT false` and never written true, yet P3.4 made it the priority model's
+    1e8 exposure term — an *inert* input, not merely weak, disclosed twice (ADR-059/069)
+    without a decision. Migration 0040 drops the column and its dead index; the exposure
+    term derives from `zone_type IN ('external','dmz')` — the term is now **categorical**
+    (a zone classification), not a reachability probability, and the ceiling is stated once.
+    The real determination (a vantage-point observation from an external scan point, which
+    the architecture supports and no engine performs) is named as **B32**, so the deletion
+    is a decision with a path, not an abandonment.
+  - **A real p95 regression, caught not masked (ADR-074 follow-up).** The zone_type
+    derivation first joined `scan_zones` inside a correlated per-finding EXISTS; the load
+    test caught the finding-list p95 climbing (375ms local, over the ceiling on a slow CI
+    runner). Fixed by evaluating the external/dmz zone set once as an InitPlan (113ms). The
+    lesson is §5.10: an environmental flake and a real regression wore the same mask, and
+    confirming instead of re-running surfaced it.
+  - **Enterprise console (#12) designed, not built (docs-only).** IA (landing-first,
+    triage-centric, reuse the honest detail views) + a visual design language extending the
+    shipped tokens, in `docs/superpowers/specs/2026-09-09-enterprise-console-design.md` with
+    a visual canvas; the backend-reads map phases the future build (triage on existing reads;
+    landing/health/trends need new reads). Rung 1 (accurate-first) is the hard constraint.
+
+- **S38 (this session) — checkpoint: Phase 3 close-out + the Phase 4 sequencing decision.**
+  No feature code. This map synced (S32–S37, inventory, phases table, §5 patterns 5.7–5.10);
+  the backlog re-ordered against a done Phase 3 (B29–B34 positioned); and the Phase 4
+  sequencing decision set out for the operator in `docs/phase-4-sequencing-decision.md` —
+  three gaps (B30, B31, B33) converge on credentialed assessment; the recommendation is to
+  hold Phase 4 behind a named trigger and take the enterprise console then B28 first, with
+  the condition under which that flips stated. The operator decides.
+
+### What Phase 3 changed — a different product (S25–S37)
+
+The way S31 recorded what P3.3 changed, this records what the whole phase changed. Phase 2
+closed (S23) with an **unauthenticated exposure scanner**: it found hosts and services, ran
+evidence-based rules over them, and reported TLS/config/hygiene findings honestly. It did not
+know CVEs.
+
+Phase 3 made it a **CVE-matching vulnerability scanner**. The product now, on a real host,
+attributes the OS family and distro release from banners (ADR-061/064), resolves the release
+by upstream-version band voting (ADR-064/065), matches installed versions against **vendor
+advisories with backport awareness** — the comparator the advisory names, Go-authoritative,
+never NVD ranges (ADR-014/062) — states **cannot-know** where the advisory keyspace cannot
+reach (ADR-067/068), turns a match into a **CVE-linked finding** (ADR-070) with a confidence
+composed from its weakest input (ADR-072/073), and orders the finding set by **exploitation-
+weighted priority** — KEV dominates, then exposure, criticality, EPSS, CVSS (ADR-069) — so a
+known-exploited CVE outranks a higher-CVSS one nobody has exploited. That inversion, on real
+Metasploitable findings, is the phase's proof.
+
+That is a different product from the one S23 closed with. Its ceiling is honest and named:
+every match rests on a banner-inferred package identity (medium confidence), which is where
+the Phase 4 sequencing decision picks up.
+
 ---
 
-## 3. Artifact inventory (as of S36)
+## 3. Artifact inventory (as of S38)
 
-**S32–S36 delta (Phase 3.4 + closing).** New since the S31 snapshot: ADRs 069
+**S32–S38 delta (Phase 3.4 + close-out).** New since the S31 snapshot: ADRs 069
 (KEV/EPSS prioritisation), 070 (advisory→finding path), 071 (dedup map fragility),
 072 (confidence = min of inputs), 073 (confidence 1.0 pass-throughs), 074 (exposure
 from zone_type, #6 resolved). Migrations 0037 (`kev`/`epss`), 0038/0039 (advisory
 engine kind + rule), 0040 (drop `internet_reachable`). `knowledge/risk_ingest.py`
 (`make knowledge-kev`/`-epss`). `internal/correlate/advisories.go` (advisory matcher).
-The finding list is priority-ordered with a KEV badge + EPSS column. Backlog grew by
-B29 (done S33), B30, B31 — the three now converging on credentialed assessment (§4's
-sequencing note). The rest of this section is the S31 snapshot and is not re-verified
-here; the deltas above are the current additions.
+The finding list is priority-ordered with a KEV badge + EPSS column, and the exposure
+term is a categorical `zone_type` derivation (ADR-074). Design docs (no feature code):
+`docs/superpowers/specs/2026-09-09-enterprise-console-design.md` (+ visual canvas) and
+`docs/phase-4-sequencing-decision.md`. Backlog grew by six — B29 (done S33), B30, B31,
+B32, B33, B34 — with B30/B31/B33 converging on credentialed assessment (the §4 decision).
+Gates unchanged in shape (`make ci` + the `db-gates` load test); the S37 load-test flake
+was a slow-runner p95 fragility, not a gate change. The rest of this section is the S31
+snapshot and is not re-verified here; the deltas above are the current additions.
 
 **ADRs.** 001–074 accepted (`docs/adr/`, index at `000-index.md`). Corrections are
 recorded as new ADRs, never edits: 028 corrects the pre-release contract; 041
@@ -809,6 +866,60 @@ arithmetic — so a mis-ordering `ORDER BY` or a broken cursor fails it, and a c
 scorer with a broken reader cannot pass. For any decision a query surfaces, the test
 drives the query and asserts the order/selection it returns, never only the value the
 decision computed.
+
+### 5.8 An invented constant dressed as a computed value
+
+ADR-072 composed an advisory finding's confidence as `min(release, version, map)` and
+assigned the version and map inputs first-value constants — `0.60` for a banner, `0.90`
+for the product→package map. They read as measurements. They were guesses. `min()`
+*looked* like it weighed three inputs when two were made-up numbers standing in for
+signals that did not exist yet, and a reader would have trusted a 0.60 as if it meant
+something. ADR-073 corrected them to **1.0 pass-throughs** — so `min()` is honestly the
+release confidence alone today, "correct and untested as a composition until a genuinely
+weak input appears (B28)," stated as coverage rather than certainty.
+
+**Why it is its own pattern:** the danger is not a wrong number, it is a *plausible* one.
+A fabricated constant with a reasonable value passes every test, satisfies review, and
+misleads exactly because nothing flags it — it is [[measure-dont-read]] inverted: a value
+presented as measured that was never measured. **How to apply:** a value that stands in
+for a signal you do not yet compute is a **1.0 pass-through (or an explicit "unknown"),
+not a plausible guess** — make the absence of the signal visible, and record the trigger
+(the real input) that will replace it. The same shape, one layer up, is §5.9.
+
+### 5.9 A gap disclosed instead of decided
+
+`internet_reachable` was disclosed as a weakness in ADR-059 and again in ADR-069 — named,
+explained, and left. Twenty sessions unwritten. Disclosure felt like diligence, but a gap
+disclosed twice and never decided is **a decision nobody made**: ADR-069 even misdescribed
+the state ("the read derives from `zone_type`") to make the disclosure read as handled,
+when the code still read the dead column. ADR-074 ended it with a decision — drop the
+column, derive from `zone_type`, state the ceiling **once** — and named the real mechanism
+(B32) so the deletion was a decision, not an abandonment.
+
+**Why it is its own pattern:** an honest disclosure is not free. Each restatement makes the
+next reader believe the gap is understood and handled, so it accretes trust it has not
+earned, and it can drift from the code (069's misdescription) because nothing tests a
+prose hedge. **How to apply:** the second time a gap is about to be disclosed rather than
+fixed, that is the signal to decide it — write it or delete it — because a third disclosure
+is not more disclosure, it is proof no one will. (This is the process-level twin of §5.6's
+field-nobody-reads: 5.6 is data with no consumer, 5.9 is a gap with no decision.)
+
+### 5.10 An environmental flake and a real regression wearing one mask
+
+The S37 load test failed in CI three ways that looked identical from the badge — a 15-minute
+timeout, then a coarse-ceiling miss (1264ms), then another. Two of them were a ~10x-slow
+GitHub runner (environmental, ADR-058 accepts it); one of them, on a run that completed, was
+a **real p95 regression** ADR-074 had introduced (a per-finding `scan_zones` join). The
+temptation was to file all three as "the load-test flake" and re-run. Confirming the
+completed run's log instead of re-running surfaced the genuine regression, which was then
+fixed (InitPlan, 113ms).
+
+**Why it is its own pattern:** a known-flaky gate is where a real regression hides best —
+every failure is pre-attributed to the flake, so the real one is waved through on the third
+re-run. **How to apply:** before re-running a flaky gate, read the failure. An environmental
+flake and a real regression can wear the same mask, and only the log tells them apart — a
+re-run that goes green does not prove the earlier red was noise, it just reshuffled the
+runner. ([[gate-before-push]] extended: also *read the gate* before dismissing it.)
 
 ---
 
