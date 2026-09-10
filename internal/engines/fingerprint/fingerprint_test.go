@@ -1,6 +1,7 @@
 package fingerprint
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"strings"
@@ -602,5 +603,24 @@ func TestAFragileTargetIsSentNoProbeByThisEngineEither(t *testing.T) {
 	collect(t, cfg, []Target{{TaskID: "t1", Value: "127.0.0.1", Fragile: true}})
 	if n := s.received.Load(); n != 0 {
 		t.Errorf("%d bytes sent to a target marked fragile", n)
+	}
+}
+
+// bannerWait must give a delayed-greeting port (SMTP) longer than the connect
+// ceiling, so exim's ~4s reverse-DNS-delayed 220 is captured and its release vote
+// not dropped (ADR-083). A client-speaks-first port stays short; an ordinary
+// server-first port stays at the connect-capped one second.
+func TestBannerWaitAllowsDelayedGreeters(t *testing.T) {
+	ctx := context.Background()
+	const connect = 3 * time.Second
+
+	if w := bannerWait(ctx, 25, connect); w != maxBannerWait {
+		t.Errorf("SMTP(25) wait = %v, want maxBannerWait %v (above the connect cap)", w, maxBannerWait)
+	}
+	if w := bannerWait(ctx, 443, connect); w != 250*time.Millisecond {
+		t.Errorf("HTTPS(443) wait = %v, want 250ms (client speaks first)", w)
+	}
+	if w := bannerWait(ctx, 9999, connect); w != time.Second {
+		t.Errorf("ordinary server-first port wait = %v, want 1s", w)
 	}
 }

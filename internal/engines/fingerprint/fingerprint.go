@@ -152,6 +152,14 @@ const (
 
 	// maxResponseBytes bounds one read from a host that may be adversarial.
 	maxResponseBytes = 16 << 10
+
+	// maxBannerWait is the unsolicited-read budget for a delaysGreeting port — above
+	// the connect ceiling on purpose, because a server that holds its greeting (SMTP's
+	// client reverse-DNS, ~4s) greets in a phase distinct from connecting. Only these
+	// few ports pay it, and a fast greeter returns the instant it speaks, so the cost
+	// lands only on a silent one (ADR-083). Kept equal to the discovery engine's own
+	// maxBannerWait so the two agree on how long a greeter is given.
+	maxBannerWait = 5 * time.Second
 )
 
 // Run identifies services on every target.
@@ -815,6 +823,14 @@ func bannerWait(ctx context.Context, port uint16, connectTimeout time.Duration) 
 	if wait > connectTimeout {
 		wait = connectTimeout
 	}
+	// A server that greets but DELAYS it needs longer than the connect timeout — the
+	// greeting is a phase distinct from connecting, so it is NOT capped by it. SMTP's
+	// ~4s reverse-DNS pause is the measured case; capping at 1s/3s missed it and
+	// dropped the release vote non-deterministically (ADR-083). Applied after the
+	// connect-cap clamp above precisely so it can exceed it.
+	if delaysGreeting(port) {
+		wait = maxBannerWait
+	}
 	if dl, ok := ctx.Deadline(); ok {
 		if left := time.Until(dl); left < wait {
 			wait = left
@@ -836,6 +852,23 @@ func readResponse(ctx context.Context, conn net.Conn, timeout time.Duration, lim
 	}
 	if timeout <= 0 {
 		return nil
+	}
+	// Make the read cancellable — a plain conn.Read unblocks only on its deadline or
+	// on data, not on ctx cancel. The watcher is created only when ctx.Done() is
+	// non-nil, so it costs nothing under today's context.Background() while keeping a
+	// now-5s greeter read (bannerWait) from blocking cancellation for the whole budget
+	// if Run is ever given a cancellable ctx (the scan-safety-auditor's latent-High,
+	// closed the same way as the discovery engine's readBanner).
+	if done := ctx.Done(); done != nil {
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-done:
+				_ = conn.SetReadDeadline(time.Now())
+			case <-stop:
+			}
+		}()
 	}
 	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		return nil

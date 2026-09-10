@@ -56,3 +56,22 @@ func clientSpeaksFirst(port uint16) bool {
 		return false
 	}
 }
+
+// delaysGreeting reports whether a SERVER-speaks-first protocol may hold its
+// greeting well past the normal one-second wait. SMTP is the measured case: exim
+// delays its 220 until a reverse-DNS lookup of the connecting client completes —
+// ~4s in the lab, above the 3s connect ceiling — so the 1s/connect-capped
+// bannerWait missed it and dropped the release vote NON-DETERMINISTICALLY (ADR-083).
+// Mail and FTP protocols classically do this client lookup on connect; SSH and MySQL
+// greet immediately and are here only for symmetry with the discovery engine's
+// greeter set (a fast greeter returns the instant it speaks, so the longer budget
+// costs nothing on it). A port here gets maxBannerWait, ABOVE the connect cap,
+// because greeting is a phase distinct from connecting.
+func delaysGreeting(port uint16) bool {
+	switch port {
+	case 21, 22, 23, 25, 465, 587, 110, 995, 143, 993, 3306:
+		return true
+	default:
+		return false
+	}
+}
