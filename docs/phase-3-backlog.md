@@ -33,32 +33,33 @@ parallel and each is routed to the right reviewer.
 Phase 3 closed at S37. The dated section headers below ("Before / During / After Phase 3") are
 now historical framing; the current positions are stated here explicitly, not implied by them.
 
-**The live front (S38), most-blocking first:**
+**The live front (S38, revised by the Phase-4 decision ADR-075), most-blocking first:**
 
-1. **Enterprise console (#12) — the next build.** Designed S37 (`docs/superpowers/specs/
-   2026-09-09-enterprise-console-design.md` + canvas), not built. IA + a visual design language
-   over the shipped tokens; rung 1 (accurate-first) is the constraint. Its backend-reads map
-   phases the build: triage rides existing reads, landing/health/trends need new reads. This is
-   where the Phase-3 data becomes a triage surface.
-2. **The Phase 4 sequencing decision — open, the operator's.** `docs/phase-4-sequencing-decision.md`.
-   B30, B31 and B33 converge on credentialed assessment. Recommendation: hold Phase 4 behind a named
-   trigger; take the console then B28 first. Blocks nothing mechanically, but shapes everything after
-   the console.
-3. **B28 — service identification / version extraction (highest-leverage unauthenticated work).**
-   Raises reach *and* lifts the confidence ceiling: a response-shape-extracted version is the first
-   real sub-1.0 input that exercises ADR-073's min-composition and pushes confidence up. A normal
-   session, not a phase. Recommended after the console if Phase 4 is held.
-4. **B24 — Debian-vs-Ubuntu family correctness.** Widens reach; correctness of attribution on
-   Debian-family hosts. Alongside/after B28.
+1. **Narrow credentialed slice (ADR-075) — the next build.** The operator overruled the memo's
+   console/B28-first ordering: the banner-inference ceiling is a **validation** limit (the §6.2
+   accuracy gates can't be computed on a real host without ground truth), so a credentialed slice —
+   **Linux over SSH, package inventory only, one VM, ADR-020 credential discipline** — comes first as
+   a validation instrument. It (a) generates the real-host ground truth to measure banner inference
+   against, (b) **closes B26** (rpm in situ) if the VM is Rocky/Alma, (c) removes B30 for credentialed
+   hosts. Recommended first VM: a densely-covered Ubuntu LTS (jammy) so the §6.2 numbers are
+   computable (USN keyspace); Rocky/Alma as the second VM for B26. Full Phase 4 (Windows/WinRM/domain)
+   stays held.
+2. **B28 — service identification / version extraction.** After the slice, **informed by a real
+   accuracy number, not a lab one.** Raises reach (correction: it does *not* raise confidence — it
+   widens the funnel at the same medium confidence and, until the slice, unmeasured accuracy).
+3. **Enterprise console (#12).** After B28. Designed S37 (`docs/superpowers/specs/
+   2026-09-09-enterprise-console-design.md` + canvas). Deliberately built *over findings whose
+   real-host accuracy is known*, not before — building the trust surface on an unmeasured base was the
+   memo's own contradiction (ADR-075).
+4. **B24 — Debian-vs-Ubuntu family correctness.** Widens reach; alongside/after B28.
 5. **B31 — advisory-finding remediation lifecycle.** Required before the finding set is trustworthy
-   over time (a patched package must close its finding). Bounded `correlate` work; account for
-   ADR-071's re-key (or take ADR-071's mitigation first).
+   over time; account for ADR-071's re-key (or take its mitigation first).
 6. **B32 — real per-asset reachability (external-vantage probe); B33 — the manual known-exploited
-   case; B34 — load-test coarse-ceiling robustness.** B32/B33 fold into the Phase 4 decision (both
-   dissolve under credentialed); B34 is a small CI-hardening (a slow runner trips the 1000ms ceiling)
-   — do it if the flake recurs, per ADR-058's accepted-flakiness stance.
-7. **B27 — redraw the ERD / supersede ADR-029.** Docs task, any time — now eighteen ERD-undrawn
-   tables. **B26 — rpm proved in situ:** ⛔ operator action (a real RHEL/Rocky/Alma/CentOS host).
+   case; B34 — load-test coarse-ceiling robustness.** B32/B33 fold into the credentialed track (both
+   dissolve under credentialed); B34 is a small CI-hardening — do it if the flake recurs (ADR-058).
+7. **B27 — redraw the ERD / supersede ADR-029.** Docs task, any time — eighteen ERD-undrawn tables.
+   **B26 — rpm in situ:** now unblocked *by the slice* if the first/second VM is Rocky/Alma (was ⛔
+   operator action for six sessions; the operator is standing up the VM).
 
 **What Phase 3 landed, in the order it landed (all ✅) — record, not front:**
 
@@ -126,11 +127,17 @@ fix because all three sit on the same weak input — a banner-*inferred* package
 A credentialed read of the package manager answers all three: the *installed* set (B30 dissolves),
 the authoritative package name+version (B31's identity + ADR-071's re-key dissolve), and KEV attaching
 to a host without a manual step (B33 dissolves). **Three independent gaps converging is a structural
-signal, not coincidence.** The S38 decision does not pull Phase 4 forward yet: it recommends holding
-it behind a named trigger and taking the enterprise console then B28 first, because the gaps produce
-*bounded* answers (the product discloses its ceiling honestly) and the unauthenticated approach has
-the broader first sale — with the stated condition (credential-providing enterprise buyers) under
-which the recommendation flips. **The operator decides.**
+signal, not coincidence.**
+
+**DECIDED (ADR-075):** the operator overruled the memo's "hold Phase 4, console/B28 first"
+recommendation, narrowly. The reframe: the ceiling is a **validation** limit — the §6.2 accuracy
+gates are computed against labelled lab targets and **cannot be computed on a real host at all**
+without credentialed ground truth (two real hosts ever scanned; rpm never proved in situ; one advisory
+vendor). So a **narrow credentialed slice** (Linux/SSH, package inventory, one VM) comes next as a
+validation instrument — not full Phase 4 (Windows/WinRM/domain stays held), and at a fraction of its
+cost. B28 and the console follow, informed by a real accuracy number. The memo's **reach reasoning
+still stands** (unauthenticated remains the wedge); only the ordering changed — see
+`docs/phase-4-sequencing-decision.md` (superseded on the recommendation) and ADR-075 (the decision).
 
 Everything below keeps its original section for provenance; the positions above are current.
 

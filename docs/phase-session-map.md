@@ -23,7 +23,7 @@ agent memory until now.
 | Phase 2 — discovery, fingerprint, resolution, findings, UI, hardening | Weeks 4–8 | 12–23 | complete (closed S23) |
 | Phase 2 validation — real-network accuracy | S24 | 24 | done; P3.3 entry condition measured & **failed** (ADR-060), then met by S26–S31 |
 | Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–37 | **COMPLETE (close-out S37).** P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ · B29 coverage window (S33) ✅ · P3.4 KEV/EPSS model + ingestion (S34) ✅ · advisory→finding path (S34b, ADR-070) ✅ · confidence by weakest link (S34c/d, ADR-072/073) ✅ · P3.4 ordering acceptance on real findings (S36) ✅ · #6 exposure resolved (S37, ADR-074) ✅ — the chain closes, produces real CVE-linked findings, and orders them by priority (see "What Phase 3 changed", §2). Ceiling is the banner-inferred package identity. Next: enterprise console (#12, designed S37); the Phase 4 credentialed-vs-widen decision (S38, `docs/phase-4-sequencing-decision.md`) is the operator's |
-| Phase 4 — credentialed assessment | §7 path-to-sellable | (sequencing decision open, S38) | **Not started; sequencing under decision.** Three gaps (B30, B31, B33) converge on it. Recommendation: hold behind a named trigger, take the console + B28 first (`docs/phase-4-sequencing-decision.md`). Operator decides. |
+| Phase 4 — credentialed assessment | §7 path-to-sellable | narrow slice next (decided S38, ADR-075) | **Decided: a NARROW credentialed slice next** — Linux/SSH, package inventory, one VM — as a *validation instrument* (generates the real-host ground truth the §6.2 accuracy gates need; closes B26 if Rocky/Alma; removes B30 for credentialed hosts). Operator overruled the memo's console/B28-first ordering (ADR-075). Full Phase 4 (Windows/WinRM/domain) stays held; reach reasoning preserved. |
 
 Weeks and sessions are not one-to-one. The eight-week plan assumed a team; this
 build is sequential under one operator with Claude Code, so a "week" of the plan
@@ -540,9 +540,15 @@ before P3.4 trusts the finding set.
   No feature code. This map synced (S32–S37, inventory, phases table, §5 patterns 5.7–5.10);
   the backlog re-ordered against a done Phase 3 (B29–B34 positioned); and the Phase 4
   sequencing decision set out for the operator in `docs/phase-4-sequencing-decision.md` —
-  three gaps (B30, B31, B33) converge on credentialed assessment; the recommendation is to
-  hold Phase 4 behind a named trigger and take the enterprise console then B28 first, with
-  the condition under which that flips stated. The operator decides.
+  three gaps (B30, B31, B33) converge on credentialed assessment; the recommendation was to
+  hold Phase 4 behind a named trigger and take the enterprise console then B28 first.
+  **The operator overruled it (ADR-075), narrowly:** the ceiling is a *validation* limit, not a
+  product one — the §6.2 accuracy gates cannot be computed on a real host without credentialed
+  ground truth — so a **narrow credentialed slice** (Linux/SSH, package inventory, one VM) comes
+  next as a validation instrument (generates ground truth, closes B26 if Rocky/Alma, removes B30
+  for credentialed hosts), ahead of B28 and the console, at a fraction of full Phase 4's cost.
+  The memo's reach reasoning stands; full Phase 4 stays held. This is where credentialed
+  assessment begins — as an instrument, not a depth feature.
 
 ### What Phase 3 changed — a different product (S25–S37)
 

@@ -1,7 +1,14 @@
 # Phase 4 sequencing decision — credentialed assessment vs. widening unauthenticated
 
 **Date:** 2026-09-10 (S38 checkpoint)
-**Status:** Recommendation for decision. Nothing is built on it yet; the operator decides.
+**Status:** RECOMMENDATION SUPERSEDED by [ADR-075](adr/075-credentialed-slice-as-validation.md). The
+operator overruled the "hold Phase 4, console/B28 first" recommendation below: the banner-inference
+ceiling is a *validation* limit, not a product one (the §6.2 accuracy gates cannot be computed on a
+real host without credentialed ground truth), so a **narrow credentialed slice** (Linux/SSH, package
+inventory, one VM) comes next as a validation instrument — ahead of B28 and the console. **The reach
+reasoning in this memo still stands** (unauthenticated remains the wedge; full Phase 4 stays held);
+only the ordering changed. Read this for the reach argument and the cost analysis; read ADR-075 for
+the decision.
 
 Phase 3 closed with a coherent product: backport-aware CVE matching with exploitation-weighted
 prioritisation, on real hosts, honest about its own ceiling. The question this memo answers is what
