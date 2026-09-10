@@ -210,9 +210,11 @@ func TestReportRender(t *testing.T) {
 	}
 	out := r.Render()
 	for _, want := range []string{
-		"right 0   wrong 1   absent 1",
+		"totals: RIGHT 0   WRONG 1   ABSENT 1",
 		"band vote \"focal\"", "mismatch",
-		"false positive 1   false negative 1",
+		"TP 0   FP 1   FN 1",
+		"FP rate: 1 / 1 = 100.0% of unauthenticated findings",
+		"FN rate: 1 / 1 = 100.0% of credentialed-truth findings",
 		"mysql-5.7  CVE-2023-1111", // the FP is listed
 		"samba  CVE-2017-7494",     // the FN is listed
 		"is tuned against this sample",

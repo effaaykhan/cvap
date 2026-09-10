@@ -42,14 +42,19 @@ func (r Report) Render() string {
 	fmt.Fprintf(&b, "  packages read:   %d\n", r.Packages)
 	b.WriteString("\n")
 
-	// --- 1. Version extraction ---
+	// --- 1. Version extraction (one line per service) ---
 	fmt.Fprintf(&b, "1. Version extraction (banner vs installed, %d services)\n", len(r.Versions))
-	fmt.Fprintf(&b, "   right %d   wrong %d   absent %d\n", tally.Right, tally.Wrong, tally.Absent)
+	fmt.Fprintf(&b, "   totals: RIGHT %d   WRONG %d   ABSENT %d\n", tally.Right, tally.Wrong, tally.Absent)
 	for _, s := range r.Versions {
-		if s.Verdict == VersionWrong {
-			fmt.Fprintf(&b, "   wrong: %-14s banner %q  installed %q\n",
-				s.Service, s.BannerVersion, s.InstalledVersion)
+		banner, installed := s.BannerVersion, s.InstalledVersion
+		if banner == "" {
+			banner = "-"
 		}
+		if installed == "" {
+			installed = "-"
+		}
+		fmt.Fprintf(&b, "   %-16s banner %-28s installed %-28s %s\n",
+			s.Service, banner, installed, verdictWord(s.Verdict))
 	}
 	b.WriteString("\n")
 
@@ -64,9 +69,19 @@ func (r Report) Render() string {
 	b.WriteString("\n")
 
 	// --- 3. Finding accuracy (the number this session exists for) ---
+	tp := len(r.Accuracy.TruePositive)
+	fp := len(r.Accuracy.FalsePositive)
+	fn := len(r.Accuracy.FalseNegative)
+	unauthTotal := tp + fp // everything the unauthenticated scan claimed
+	truthTotal := tp + fn  // everything the credentialed truth holds
 	b.WriteString("3. Finding accuracy (unauthenticated vs credentialed truth)\n")
-	fmt.Fprintf(&b, "   true positive %d   false positive %d   false negative %d\n",
-		len(r.Accuracy.TruePositive), len(r.Accuracy.FalsePositive), len(r.Accuracy.FalseNegative))
+	fmt.Fprintf(&b, "   TP %d   FP %d   FN %d\n", tp, fp, fn)
+	fmt.Fprintf(&b, "   FP rate: %d / %d = %s of unauthenticated findings were false positives\n",
+		fp, unauthTotal, pct(fp, unauthTotal))
+	fmt.Fprintf(&b, "   FN rate: %d / %d = %s of credentialed-truth findings were missed\n",
+		fn, truthTotal, pct(fn, truthTotal))
+	fmt.Fprintf(&b, "   precision %s (TP/%d)   recall %s (TP/%d)\n",
+		pct(tp, unauthTotal), unauthTotal, pct(tp, truthTotal), truthTotal)
 	writeKeys(&b, "   FP (claimed, not in truth)", r.Accuracy.FalsePositive)
 	writeKeys(&b, "   FN (in truth, missed)     ", r.Accuracy.FalseNegative)
 	if len(r.TruthSkipped) > 0 {
@@ -82,6 +97,27 @@ func (r Report) Render() string {
 	b.WriteString("Nothing above is tuned against this sample this session: a banner-inference\n")
 	b.WriteString("error is a backlog finding, not a fix (§5.5, ADR-076).\n")
 	return b.String()
+}
+
+// pct formats n/d as a percentage, stating "n/a" when the denominator is zero
+// rather than dividing — an empty denominator is "nothing to be right or wrong
+// about", not 0%.
+func pct(n, d int) string {
+	if d == 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.1f%%", 100*float64(n)/float64(d))
+}
+
+func verdictWord(v VersionVerdict) string {
+	switch v {
+	case VersionRight:
+		return "RIGHT"
+	case VersionWrong:
+		return "WRONG"
+	default:
+		return "ABSENT"
+	}
 }
 
 func writeKeys(b *strings.Builder, label string, ks []FindingKey) {

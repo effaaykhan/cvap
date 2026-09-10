@@ -12,6 +12,7 @@
 ::1/128
 10.10.0.0/16        # lab segment A  (compose network)
 10.20.0.0/16        # lab segment B  (across the lab firewall, for multi-vantage tests)
+192.168.93.0/24
 192.168.56.0/24     # host-only VMs
 # Reserved for documentation, never routed. Useful for fixtures.
 192.0.2.0/24
