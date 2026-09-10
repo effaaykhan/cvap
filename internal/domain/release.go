@@ -114,6 +114,16 @@ type ReleaseResolution struct {
 //
 // A tie or a split never resolves: the leader must be unique. Everything short of
 // the bar is family-only, never a guessed release.
+//
+// ADR-080 (superseding ADR-066) adds ONE exception below this threshold: a single
+// clean vote whose candidate set is exactly one release resolves, at reduced
+// confidence (0.60, below the two-vote 0.80). The measurement that fired ADR-066's
+// review trigger showed the two-vote rule's cost was silence — a host where the one
+// exposed service uniquely implied a release, and the scanner said nothing, which
+// reads as clean. A unique vote is not the weak/backport case this threshold guards
+// against; that case is a single AMBIGUOUS vote (several candidates), which is not a
+// clean vote and still abstains. See ADR-080 for why this is a smaller win than it
+// looks (the resolved single-vote host reports mostly false positives, ADR-078).
 const ReleaseVoteThreshold = 2
 
 // ResolveRelease applies band voting to the per-service votes. A service casts a
@@ -148,7 +158,16 @@ func ResolveRelease(votes []ReleaseVote) ReleaseResolution {
 		}
 	}
 
-	resolved := leaderCount >= ReleaseVoteThreshold && unique
+	// Two-or-more agreeing keeps the current tiers (ADR-064/065). A SINGLE clean
+	// vote that narrows the candidate set to exactly one release also resolves, at
+	// reduced confidence (ADR-080, superseding ADR-066). A unique determination is
+	// not a weak one — it excludes every other release — and abstaining on it
+	// produces silence, which reads as clean, the failure this phase was sequenced
+	// to prevent. A single vote consistent with SEVERAL releases (a multi-candidate
+	// band collision) is not a clean vote, so totalClean stays 0 and it still
+	// abstains — the ambiguous case the two-vote threshold was written for, unchanged.
+	singleUnique := leaderCount == 1 && unique && totalClean == 1
+	resolved := (leaderCount >= ReleaseVoteThreshold && unique) || singleUnique
 
 	res := ReleaseResolution{}
 	if resolved {
@@ -201,8 +220,10 @@ func releaseConfidence(leaderCount, totalClean int) float32 {
 		base = 0.95
 	case leaderCount == 3:
 		base = 0.90
-	default: // exactly the threshold, 2
+	case leaderCount == 2:
 		base = 0.80
+	default: // a single unique vote (ADR-080): resolved but uncorroborated
+		base = 0.60
 	}
 	if totalClean == 0 {
 		return 0

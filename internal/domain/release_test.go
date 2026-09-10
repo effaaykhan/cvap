@@ -66,16 +66,21 @@ func TestResolveRelease_ThreeAgreeTwoAbstain(t *testing.T) {
 	}
 }
 
-// One clean vote is below the threshold: family-only, never a guessed release.
-func TestResolveRelease_OneVoteIsNotEnough(t *testing.T) {
+// A single clean vote that narrows to exactly one release now RESOLVES at reduced
+// confidence (ADR-080, superseding ADR-066): a unique determination is not the weak
+// case the threshold guarded against, and abstaining produced silence that reads as
+// clean.
+func TestResolveRelease_SingleUniqueVoteResolves(t *testing.T) {
 	res := ResolveRelease([]ReleaseVote{
 		{Service: "ssh", Port: 22, Product: "OpenSSH", Band: "4.7p1", Candidates: []string{"hardy"}, HasAnalogue: true},
 		{Service: "ftp", Port: 21, Product: "vsftpd", Band: "2.3.4", Candidates: nil, HasAnalogue: true},
 	})
-	if res.Release != nil {
-		t.Fatalf("release = %v, want nil (one vote is below the threshold)", *res.Release)
+	if res.Release == nil || *res.Release != "hardy" {
+		t.Fatalf("release = %v, want hardy (a single unique vote resolves under ADR-080)", res.Release)
 	}
-	// The lone vote is still shown, so an operator sees it pointed at hardy.
+	if !approxEq(res.Confidence, 0.60) {
+		t.Errorf("confidence = %v, want 0.60 (single unique vote, reduced/uncorroborated)", res.Confidence)
+	}
 	var sawContributed bool
 	for _, s := range res.Provenance {
 		if s.Product == "OpenSSH" && s.Role == ReleaseContributed {
@@ -83,7 +88,18 @@ func TestResolveRelease_OneVoteIsNotEnough(t *testing.T) {
 		}
 	}
 	if !sawContributed {
-		t.Errorf("the single hardy vote should still be recorded as contributed toward the leader")
+		t.Errorf("the single hardy vote should be recorded as contributed")
+	}
+}
+
+// The case the threshold still guards: a single AMBIGUOUS vote (several candidates)
+// is not a clean vote and still abstains — unchanged by ADR-080.
+func TestResolveRelease_SingleAmbiguousVoteAbstains(t *testing.T) {
+	res := ResolveRelease([]ReleaseVote{
+		{Service: "ssh", Port: 22, Product: "OpenSSH", Band: "4.7p1", Candidates: []string{"hardy", "lucid"}, HasAnalogue: true},
+	})
+	if res.Release != nil {
+		t.Fatalf("release = %v, want nil (a single vote consistent with several releases must still abstain)", *res.Release)
 	}
 }
 
