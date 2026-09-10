@@ -70,10 +70,20 @@ func run() error {
 		tenantStr  = flag.String("tenant", "", "tenant uuid")
 		assetStr   = flag.String("asset", "", "asset uuid (already scanned unauthenticated)")
 		timeout    = flag.Duration("timeout", 30*time.Second, "SSH connect/read timeout")
+		invOnly    = flag.Bool("inventory-only", false, "read and print the host's release and inventory; no database, no measurement")
+		grep       = flag.String("grep", "", "with --inventory-only, list installed packages whose source or binary contains this substring")
 	)
 	flag.Parse()
 
-	if *host == "" || *user == "" || *knownHosts == "" || *tenantStr == "" || *assetStr == "" {
+	// Inventory-only needs no tenant/asset (it does not touch the database).
+	required := *host == "" || *user == "" || *knownHosts == ""
+	if !*invOnly {
+		required = required || *tenantStr == "" || *assetStr == ""
+	}
+	if required {
+		if *invOnly {
+			return errors.New("--host, --user and --known-hosts are required")
+		}
 		return errors.New("--host, --user, --known-hosts, --tenant and --asset are all required")
 	}
 
@@ -100,17 +110,21 @@ func run() error {
 		return fmt.Errorf("refusing to authenticate: %s is not in scope (%s): %s", canon.Value, *scopePath, why)
 	}
 
-	tenantUUID, err := uuid.Parse(*tenantStr)
-	if err != nil {
-		return fmt.Errorf("--tenant is not a uuid: %w", err)
-	}
-	tenant, err := store.NewTenantID(tenantUUID)
-	if err != nil {
-		return err
-	}
-	assetID, err := uuid.Parse(*assetStr)
-	if err != nil {
-		return fmt.Errorf("--asset is not a uuid: %w", err)
+	var tenant store.TenantID
+	var assetID uuid.UUID
+	if !*invOnly {
+		tenantUUID, err := uuid.Parse(*tenantStr)
+		if err != nil {
+			return fmt.Errorf("--tenant is not a uuid: %w", err)
+		}
+		tenant, err = store.NewTenantID(tenantUUID)
+		if err != nil {
+			return err
+		}
+		assetID, err = uuid.Parse(*assetStr)
+		if err != nil {
+			return fmt.Errorf("--asset is not a uuid: %w", err)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout+30*time.Second)
@@ -148,6 +162,12 @@ func run() error {
 	cred.Zeroise()
 	if err != nil {
 		return err
+	}
+
+	// --- Inventory-only: print the host facts, no database, no measurement. ---
+	if *invOnly {
+		printInventory(read, *grep)
+		return nil
 	}
 
 	// --- The measurement: all store reads in one read-only tenant transaction. ---
@@ -235,6 +255,15 @@ func measure(ctx context.Context, tenant store.TenantID, assetID uuid.UUID, read
 		}
 		report.Accuracy = credscan.Diff(unauth, truth.Keys)
 
+		// Network-exposed subset (S39 "report both"): restrict the credentialed truth
+		// to installed packages that back an observed open service, so the comparison
+		// is like-for-like with what an unauthenticated scan could have seen. The
+		// observed products come from the asset's identified services; their candidate
+		// source packages come from the product->package map; the subset is the
+		// installed packages whose source is in that set. Computed for the report only
+		// — the instrument's truth logic is unchanged (Diff and CredentialedTruth are
+		// the same functions).
+
 		// Measurements 1 and 2 come off the asset detail.
 		detail, err := (store.Assets{}).GetDetail(ctx, c, assetID)
 		if err != nil {
@@ -246,6 +275,8 @@ func measure(ctx context.Context, tenant store.TenantID, assetID uuid.UUID, read
 		report.ReleaseVerdict = credscan.CompareRelease(report.BandResolved, read.Release.Codename)
 
 		var svcs []credscan.ServiceVersion
+		exposedSrc := map[string]bool{} // installed source pkgs backing an observed service
+		seenProduct := map[string]bool{}
 		for _, s := range detail.Services {
 			if s.Product == "" {
 				continue // no product to map; not a version-extraction subject
@@ -254,6 +285,15 @@ func measure(ctx context.Context, tenant store.TenantID, assetID uuid.UUID, read
 			if err != nil {
 				return err
 			}
+			if !seenProduct[s.Product] {
+				seenProduct[s.Product] = true
+				report.ExposedProducts = append(report.ExposedProducts, s.Product)
+			}
+			for _, cand := range candidates {
+				if _, installedHere := installed[cand]; installedHere {
+					exposedSrc[cand] = true
+				}
+			}
 			name := s.Service
 			if name == "" {
 				name = fmt.Sprintf("%s/%d", s.Protocol, s.Port)
@@ -261,12 +301,47 @@ func measure(ctx context.Context, tenant store.TenantID, assetID uuid.UUID, read
 			svcs = append(svcs, credscan.BuildServiceVersion(name, s.Product, s.Version, candidates, installed))
 		}
 		report.Versions = credscan.ClassifyVersion(svcs)
+
+		// Exposed-subset truth: the same CredentialedTruth over only the installed
+		// packages that back an observed service.
+		var exposedPkgs []credscan.Package
+		for _, p := range read.Packages {
+			if exposedSrc[p.Source] {
+				exposedPkgs = append(exposedPkgs, p)
+			}
+		}
+		report.ExposedPackages = len(exposedPkgs)
+		exposedTruth, err := credscan.CredentialedTruth(exposedPkgs, read.Release.Codename, fixes, vulns)
+		if err != nil {
+			return err
+		}
+		report.Exposed = credscan.Diff(unauth, exposedTruth.Keys)
 		return nil
 	})
 	if err != nil {
 		return credscan.Report{}, err
 	}
 	return report, nil
+}
+
+// printInventory reports the host facts a credentialed read yields, with no database
+// access — the authoritative /etc/os-release and dpkg answer, independent of the
+// advisory pipeline. With grep set, it lists installed packages whose source or
+// binary name contains the substring.
+func printInventory(read credscan.HostRead, grep string) {
+	fmt.Printf("host read: %s\n", read.Release.Get("PRETTY_NAME"))
+	fmt.Printf("  /etc/os-release: ID=%s VERSION_ID=%s VERSION_CODENAME=%s\n",
+		read.Release.ID, read.Release.VersionID, read.Release.Codename)
+	fmt.Printf("  packages installed: %d\n", len(read.Packages))
+	if grep == "" {
+		return
+	}
+	fmt.Printf("  packages matching %q:\n", grep)
+	for _, p := range read.Packages {
+		if strings.Contains(p.Source, grep) || strings.Contains(p.Binary, grep) {
+			fmt.Printf("    source=%-20s binary=%-24s version=%s\n", p.Source, p.Binary, p.Version)
+		}
+	}
 }
 
 // loadCredential reads the credential material into a runtime-held Credential

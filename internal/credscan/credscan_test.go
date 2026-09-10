@@ -62,20 +62,21 @@ func TestClassifyVersion(t *testing.T) {
 	in := []ServiceVersion{
 		{Service: "ftp", BannerVersion: "3.0.2-0ubuntu1.10", InstalledVersion: "3.0.2-0ubuntu1.10"}, // exact -> right
 		{Service: "mysql", BannerVersion: "5.7.42", InstalledVersion: "5.7.42-0ubuntu0.22.04.1"},    // upstream prefix -> right
-		{Service: "ssh", BannerVersion: "8.9p1", InstalledVersion: "1:8.9p1-3ubuntu0.6"},            // banner missed the epoch -> wrong
+		{Service: "ssh", BannerVersion: "8.9p1", InstalledVersion: "1:8.9p1-3ubuntu0.6"},            // upstream prefix under a dpkg epoch -> right
+		{Service: "ssh26", BannerVersion: "10.2p1", InstalledVersion: "1:10.2p1-2ubuntu3.5"},        // the real S39 case: epoch stripped -> right
 		{Service: "smtp", BannerVersion: "", InstalledVersion: "1.18.6"},                            // no banner version -> absent
 		{Service: "http", BannerVersion: "2.4.52", InstalledVersion: ""},                            // claimed a version, package not installed -> wrong
 	}
 	got := ClassifyVersion(in)
-	want := []VersionVerdict{VersionRight, VersionRight, VersionWrong, VersionAbsent, VersionWrong}
+	want := []VersionVerdict{VersionRight, VersionRight, VersionRight, VersionRight, VersionAbsent, VersionWrong}
 	for i := range want {
 		if got[i].Verdict != want[i] {
 			t.Errorf("%s: verdict %q, want %q", got[i].Service, got[i].Verdict, want[i])
 		}
 	}
 	tally := TallyVersions(got)
-	if tally.Right != 2 || tally.Wrong != 2 || tally.Absent != 1 {
-		t.Errorf("tally = %+v, want right2 wrong2 absent1", tally)
+	if tally.Right != 4 || tally.Wrong != 1 || tally.Absent != 1 {
+		t.Errorf("tally = %+v, want right4 wrong1 absent1", tally)
 	}
 }
 
@@ -197,7 +198,7 @@ func TestReportRender(t *testing.T) {
 		Release:  OSRelease{ID: "ubuntu", VersionID: "22.04", Codename: "jammy"},
 		Packages: 512,
 		Versions: ClassifyVersion([]ServiceVersion{
-			{Service: "ssh", BannerVersion: "8.9p1", InstalledVersion: "1:8.9p1-3ubuntu0.6"}, // wrong
+			{Service: "ssh", BannerVersion: "7.6p1", InstalledVersion: "1:8.9p1-3ubuntu0.6"}, // banner disagrees -> wrong
 			{Service: "smtp", BannerVersion: "", InstalledVersion: "1.18"},                   // absent
 		}),
 		BandResolved:   "focal",
@@ -206,15 +207,24 @@ func TestReportRender(t *testing.T) {
 			[]FindingKey{{"mysql-5.7", "CVE-2023-1111"}},
 			[]FindingKey{{"samba", "CVE-2017-7494"}},
 		),
-		TruthSkipped: []string{"empty fixed_version, USN-BAD / openssl"},
+		Exposed: Diff(
+			[]FindingKey{{"mysql-5.7", "CVE-2023-1111"}},
+			[]FindingKey{{"mysql-5.7", "CVE-2023-1111"}}, // exposed subset: a TP
+		),
+		ExposedProducts: []string{"MySQL"},
+		ExposedPackages: 2,
+		TruthSkipped:    []string{"empty fixed_version, USN-BAD / openssl"},
 	}
 	out := r.Render()
 	for _, want := range []string{
 		"totals: RIGHT 0   WRONG 1   ABSENT 1",
 		"band vote \"focal\"", "mismatch",
-		"TP 0   FP 1   FN 1",
+		"3a. whole installed inventory",
+		"TP 0   FP 1   FN 1", // whole-inventory block
 		"FP rate: 1 / 1 = 100.0% of unauthenticated findings",
 		"FN rate: 1 / 1 = 100.0% of credentialed-truth findings",
+		"3b. network-exposed packages only (MySQL; 2 installed pkgs)",
+		"TP 1   FP 0   FN 0",       // exposed block: the FP became a TP against the subset
 		"mysql-5.7  CVE-2023-1111", // the FP is listed
 		"samba  CVE-2017-7494",     // the FN is listed
 		"is tuned against this sample",

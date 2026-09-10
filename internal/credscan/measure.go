@@ -2,6 +2,7 @@ package credscan
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -42,11 +43,31 @@ func versionConsistent(banner, installed string) bool {
 	if banner == "" || installed == "" {
 		return false
 	}
+	// Strip the dpkg epoch from BOTH sides first. A banner reports the upstream
+	// version with no packaging epoch ("10.2p1"), while dpkg carries one
+	// ("1:10.2p1-2ubuntu3.5"). Without removing it the upstream-prefix test below
+	// fails on the leading "1:" and a correct banner is judged WRONG — found on a
+	// real Ubuntu 26.04 host reading openssh (S39), and fixed before that host's
+	// version-extraction number was taken, because a comparator bug must not be
+	// carried through the comparator measurement it would corrupt.
+	banner, installed = stripEpoch(banner), stripEpoch(installed)
 	if banner == installed {
 		return true
 	}
 	// banner is a leading component of the installed version (upstream prefix).
 	return strings.HasPrefix(installed, banner)
+}
+
+// stripEpoch removes a leading dpkg epoch ("N:") from a version string. The epoch is
+// one or more digits before the first colon; anything else (no colon, or a
+// non-numeric prefix) is left untouched.
+func stripEpoch(v string) string {
+	if i := strings.IndexByte(v, ':'); i > 0 {
+		if _, err := strconv.Atoi(v[:i]); err == nil {
+			return v[i+1:]
+		}
+	}
+	return v
 }
 
 // ClassifyVersion fills each ServiceVersion's Verdict. absent when the banner gave

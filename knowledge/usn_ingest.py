@@ -45,7 +45,10 @@ MAX_FEED_BYTES = 64 * 1024 * 1024  # generous vs the ~real per-query size; refus
 MAX_NOTICES = 5000
 MAX_FIELD = 4096
 MAX_PKGS_PER_ADVISORY = 20000
-MAX_CVES_PER_ADVISORY = 512
+MAX_CVES_PER_ADVISORY = 4096  # raised from 512 (S39): current aggregate USNs
+# (e.g. resolute USN-8727-1 lists 547 CVEs) legitimately exceed 512. Raised
+# deliberately rather than dropping CVEs silently, which the 512 refusal itself
+# instructed. Still bounded so a malformed feed cannot be unbounded.
 
 # Past this age, matching against the feed is under-reporting, so it is STALE.
 # Stored in the data (knowledge_feed_status.staleness_threshold) so the API
@@ -214,9 +217,18 @@ ON CONFLICT DO NOTHING;
 
 -- Fixed packages: the matchable authority. comparator is 'dpkg' — USN versions
 -- are dpkg-format, and the Go matcher reads this column to know (ADR-062).
+-- DISTINCT ON collapses duplicate (advisory,release,package) rows to one BEFORE
+-- the insert. The source-only filter above was assumed to make these unique, but
+-- real jammy USNs list a source package twice for one release (pocket variants),
+-- and Postgres refuses an ON CONFLICT DO UPDATE that would touch the same key twice
+-- in one statement ("cannot affect row a second time"). One deterministic row per
+-- key (highest version string) is kept; the versions are near-always identical, so
+-- this only removes the crash, not real coverage (S39, found importing current USNs).
 INSERT INTO advisory_fixed_packages (advisory_id, distro_release, package_name, fixed_version, comparator)
-SELECT va.advisory_id, p.release, p.name, p.version, 'dpkg'::version_comparator
+SELECT DISTINCT ON (va.advisory_id, p.release, p.name)
+       va.advisory_id, p.release, p.name, p.version, 'dpkg'::version_comparator
 FROM _pkg p JOIN vendor_advisories va ON va.advisory_ref = p.ref
+ORDER BY va.advisory_id, p.release, p.name, p.version DESC
 ON CONFLICT (advisory_id, distro_release, package_name)
    DO UPDATE SET fixed_version = excluded.fixed_version, comparator = excluded.comparator;
 

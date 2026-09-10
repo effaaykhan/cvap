@@ -14,6 +14,7 @@
 10.20.0.0/16        # lab segment B  (across the lab firewall, for multi-vantage tests)
 192.168.93.0/24
 192.168.56.0/24     # host-only VMs
+192.168.93.138      # jammy VM (cvapscan), session 39 credentialed validation — REMOVE at session end
 # Reserved for documentation, never routed. Useful for fixtures.
 192.0.2.0/24
 198.51.100.0/24

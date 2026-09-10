@@ -24,8 +24,17 @@ type Report struct {
 	ReleaseVerdict ReleaseVerdict
 
 	// 3. Finding accuracy: unauthenticated findings vs credentialed truth.
-	Accuracy     Accuracy
-	TruthSkipped []string // fixes the truth could not judge (stated, not hidden)
+	// Two views (S39 decision): Accuracy is the raw whole-inventory comparison (the
+	// literal §6.2 — truth is advisories across every installed package). Exposed is
+	// the same comparison with the truth restricted to packages that back an observed
+	// open service, which is like-for-like with what an unauthenticated scan could
+	// have seen. ExposedProducts names the observed products that defined the subset,
+	// and ExposedPackages the count of installed packages in it.
+	Accuracy        Accuracy
+	Exposed         Accuracy
+	ExposedProducts []string
+	ExposedPackages int
+	TruthSkipped    []string // fixes the truth could not judge (stated, not hidden)
 }
 
 // Render produces the plain-text measurement report. It leads with the three
@@ -69,21 +78,14 @@ func (r Report) Render() string {
 	b.WriteString("\n")
 
 	// --- 3. Finding accuracy (the number this session exists for) ---
-	tp := len(r.Accuracy.TruePositive)
-	fp := len(r.Accuracy.FalsePositive)
-	fn := len(r.Accuracy.FalseNegative)
-	unauthTotal := tp + fp // everything the unauthenticated scan claimed
-	truthTotal := tp + fn  // everything the credentialed truth holds
 	b.WriteString("3. Finding accuracy (unauthenticated vs credentialed truth)\n")
-	fmt.Fprintf(&b, "   TP %d   FP %d   FN %d\n", tp, fp, fn)
-	fmt.Fprintf(&b, "   FP rate: %d / %d = %s of unauthenticated findings were false positives\n",
-		fp, unauthTotal, pct(fp, unauthTotal))
-	fmt.Fprintf(&b, "   FN rate: %d / %d = %s of credentialed-truth findings were missed\n",
-		fn, truthTotal, pct(fn, truthTotal))
-	fmt.Fprintf(&b, "   precision %s (TP/%d)   recall %s (TP/%d)\n",
-		pct(tp, unauthTotal), unauthTotal, pct(tp, truthTotal), truthTotal)
-	writeKeys(&b, "   FP (claimed, not in truth)", r.Accuracy.FalsePositive)
-	writeKeys(&b, "   FN (in truth, missed)     ", r.Accuracy.FalseNegative)
+	writeAccuracyBlock(&b, "3a. whole installed inventory (literal §6.2)", r.Accuracy)
+	exposedTitle := "3b. network-exposed packages only"
+	if len(r.ExposedProducts) > 0 {
+		exposedTitle += " (" + strings.Join(r.ExposedProducts, ", ") +
+			fmt.Sprintf("; %d installed pkgs)", r.ExposedPackages)
+	}
+	writeAccuracyBlock(&b, exposedTitle, r.Exposed)
 	if len(r.TruthSkipped) > 0 {
 		fmt.Fprintf(&b, "   truth could not judge %d candidate fix(es):\n", len(r.TruthSkipped))
 		skipped := append([]string(nil), r.TruthSkipped...)
@@ -97,6 +99,26 @@ func (r Report) Render() string {
 	b.WriteString("Nothing above is tuned against this sample this session: a banner-inference\n")
 	b.WriteString("error is a backlog finding, not a fix (§5.5, ADR-076).\n")
 	return b.String()
+}
+
+// writeAccuracyBlock renders one FP/FN view: raw counts, rates with denominators
+// stated, precision/recall, and the FP and FN lists.
+func writeAccuracyBlock(b *strings.Builder, title string, a Accuracy) {
+	tp := len(a.TruePositive)
+	fp := len(a.FalsePositive)
+	fn := len(a.FalseNegative)
+	unauthTotal := tp + fp // everything the unauthenticated scan claimed
+	truthTotal := tp + fn  // everything the credentialed truth holds
+	fmt.Fprintf(b, "   %s\n", title)
+	fmt.Fprintf(b, "     TP %d   FP %d   FN %d\n", tp, fp, fn)
+	fmt.Fprintf(b, "     FP rate: %d / %d = %s of unauthenticated findings were false positives\n",
+		fp, unauthTotal, pct(fp, unauthTotal))
+	fmt.Fprintf(b, "     FN rate: %d / %d = %s of credentialed-truth findings were missed\n",
+		fn, truthTotal, pct(fn, truthTotal))
+	fmt.Fprintf(b, "     precision %s (TP/%d)   recall %s (TP/%d)\n",
+		pct(tp, unauthTotal), unauthTotal, pct(tp, truthTotal), truthTotal)
+	writeKeys(b, "     FP (claimed, not in truth)", a.FalsePositive)
+	writeKeys(b, "     FN (in truth, missed)     ", a.FalseNegative)
 }
 
 // pct formats n/d as a percentage, stating "n/a" when the denominator is zero
