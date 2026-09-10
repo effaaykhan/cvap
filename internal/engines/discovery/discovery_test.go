@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"strconv"
@@ -433,5 +434,39 @@ func TestAnUnroutableTargetIsNotReportedAliveAndCostsNoBudget(t *testing.T) {
 		t.Errorf("the engine reported %d packet(s) sent for a target the kernel would not "+
 			"route to. Nothing left the machine, and the runtime reclaims rate allocation "+
 			"from this number.", sentTotal)
+	}
+}
+
+// The banner read must honour its budget, not a hardcoded 1s cap — a greeting that
+// arrives after 1s but within the budget MUST be captured. This is the ADR-083
+// regression: exim's SMTP 220 arrives ~4s in (client reverse-DNS), and the old 1s
+// cap dropped it non-deterministically, flipping release resolution between vote
+// tiers. Uses net.Pipe with a delayed write; the delay (1.2s) is past the old cap.
+func TestReadBannerCapturesGreetingAfterOldOneSecondCap(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	go func() {
+		time.Sleep(1200 * time.Millisecond) // past the old 1s cap, within the 2s budget
+		_, _ = server.Write([]byte("220 test ESMTP Exim 4.99.1"))
+	}()
+	got := readBanner(context.Background(), client, 2*time.Second, maxBannerBytes)
+	if !strings.Contains(string(got), "Exim") {
+		t.Fatalf("a greeting at 1.2s within a 2s budget must be captured (ADR-083); got %q", got)
+	}
+}
+
+// A genuinely silent port yields nil after the budget, and does not hang past it.
+func TestReadBannerSilentPortGivesUpAtBudget(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	start := time.Now()
+	got := readBanner(context.Background(), client, 150*time.Millisecond, maxBannerBytes)
+	if got != nil {
+		t.Fatalf("a silent conn must yield nil, got %q", got)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("readBanner waited %v, should give up near the 150ms budget", elapsed)
 	}
 }

@@ -285,6 +285,43 @@ type bannerPayload struct {
 // fleet. A probe may name a smaller bound; none may name a larger one.
 const maxBannerBytes = 8 << 10
 
+// maxBannerWait bounds the banner read — see readBanner. It is deliberately longer
+// than the 3s connect ceiling: greeting is a phase distinct from connecting, and a
+// common greeter delays it. Exim holds its SMTP 220 until a reverse-DNS lookup of
+// the connecting client completes — measured at ~4s in the lab, and variable with
+// DNS timing. The previous 1s cap caught that greeting only when it happened to be
+// fast and missed it otherwise, so the same host resolved on one vote or two between
+// scans (ADR-083). 5s covers the measured delay with margin. It is spent only on an
+// open GREETER port (bannerGreetingPorts) that stays silent — a Read returns the
+// instant bytes arrive, and non-greeter ports use shortBannerWait — so the ports that
+// can burn the full budget on one host are a handful, well under
+// MaxConcurrentPerTarget, which makes the wall-time cost bounded by the slowest port
+// in one concurrent batch rather than their sum. The scan-safety-auditor showed the
+// unqualified "slowest port" claim was false across the whole ~230-port set; gating
+// to greeter ports is what makes it true. Reliability/duration trade-off.
+const maxBannerWait = 5 * time.Second
+
+// shortBannerWait is the unsolicited-read budget for a port that is NOT expected to
+// volunteer a delayed greeting, and for the pre-read when a probe will follow. Keeps
+// non-greeter ports (HTTP, TLS, management) and the probe path fast — the pre-ADR-083
+// behaviour, retained everywhere except the greeter-port safe-mode case.
+const shortBannerWait = 1 * time.Second
+
+// bannerGreetingPorts are the ports where a service is expected to send an
+// UNSOLICITED banner on connect and may DELAY it — SMTP's client reverse-DNS pause
+// is the motivating case (ADR-083). Only these get the full maxBannerWait on the
+// unsolicited read; every other open-but-silent port gets shortBannerWait, so the
+// long budget is not burned across the ~230-port default set (scan-safety-auditor
+// Finding 1). A delayed greeter on a NON-standard port is read with the short budget
+// and may be missed — that edge is accepted against a multi-minute-per-segment scan.
+var bannerGreetingPorts = map[uint16]bool{
+	21: true, 22: true, 23: true, // FTP, SSH, Telnet
+	25: true, 465: true, 587: true, // SMTP
+	110: true, 995: true, // POP3
+	143: true, 993: true, // IMAP
+	3306: true, // MySQL server handshake
+}
+
 func scanTarget(ctx context.Context, cfg Config, t Target, ports []uint16, emit Emit, sent Sent) error {
 	limiter := enginerate.New(cfg.RatePPS, nil)
 	var packets uint32
@@ -441,7 +478,32 @@ func scanPort(ctx context.Context, cfg Config, taskID, address string, port uint
 	}, 1.0)}
 
 	// What the service volunteers, in both modes. Reading is not sending.
-	if b := readBanner(ctx, conn, cfg.ConnectTimeout, maxBannerBytes); len(b) > 0 {
+	//
+	// Budget for the unsolicited greeting read:
+	//   - a GREETER port with no probe pending: the full maxBannerWait — this is the
+	//     safe-mode case ADR-083 is about, where a delayed greeter (exim, ~4s) is the
+	//     only identification signal and must be captured reliably.
+	//   - everything else: short. A non-greeter port (HTTP, TLS, management — the
+	//     bulk of the ~230-port default set) never volunteers a banner, so spending
+	//     5s on each open one would add minutes per segment for nothing (the
+	//     scan-safety-auditor's Finding 1); and when a probe follows, the probe must
+	//     not wait behind a greeting that may never come — the probe's own response
+	//     read below gets the full budget.
+	probePending := false
+	for _, p := range cfg.Probes {
+		if probeApplies(p, port) {
+			probePending = true
+			break
+		}
+	}
+	unsolicitedBudget := shortBannerWait
+	if cfg.ConnectTimeout < unsolicitedBudget {
+		unsolicitedBudget = cfg.ConnectTimeout
+	}
+	if bannerGreetingPorts[port] && !probePending {
+		unsolicitedBudget = maxBannerWait
+	}
+	if b := readBanner(ctx, conn, unsolicitedBudget, maxBannerBytes); len(b) > 0 {
 		out = append(out, observation(taskID, "banner", bannerPayload{
 			Address: address, Port: port, Data: b, Solicited: false,
 			SafetyMode: cfg.SafetyMode,
@@ -461,7 +523,7 @@ func scanPort(ctx context.Context, cfg Config, taskID, address string, port uint
 		if limit <= 0 || limit > maxBannerBytes {
 			limit = maxBannerBytes
 		}
-		if b := readBanner(ctx, conn, cfg.ConnectTimeout, limit); len(b) > 0 {
+		if b := readBanner(ctx, conn, maxBannerWait, limit); len(b) > 0 {
 			out = append(out, observation(taskID, "banner", bannerPayload{
 				Address: address, Port: port, Data: b, Solicited: true, Probe: p.Name,
 				SafetyMode: cfg.SafetyMode,
@@ -475,21 +537,42 @@ func scanPort(ctx context.Context, cfg Config, taskID, address string, port uint
 	return out, false, established
 }
 
-// readBanner reads what is available, bounded in both bytes and time.
-func readBanner(ctx context.Context, conn net.Conn, timeout time.Duration, limit int) []byte {
-	if dl, ok := ctx.Deadline(); ok && dl.Before(time.Now().Add(timeout)) {
-		timeout = time.Until(dl)
+// readBanner reads what is available, bounded in both bytes and time. The budget is
+// the banner-read phase's own (maxBannerWait), NOT the connect timeout: a service
+// greets after its own pre-greeting work (exim's client reverse-DNS, ~4s), so capping
+// the read at the 1s-or-connect-timeout used to miss delayed greeters
+// non-deterministically and flip release resolution between vote tiers (ADR-083). A
+// Read returns the instant bytes arrive, so the budget is fully spent only on an open
+// port that never greets. Still clamped by the job's context deadline.
+func readBanner(ctx context.Context, conn net.Conn, budget time.Duration, limit int) []byte {
+	if dl, ok := ctx.Deadline(); ok {
+		if d := time.Until(dl); d < budget {
+			budget = d // never wait past a job deadline, if one is ever set
+		}
 	}
-	if timeout <= 0 {
+	if budget <= 0 {
 		return nil
 	}
-	// A short read deadline rather than the full connect timeout: a service that
-	// volunteers a banner does so immediately, and waiting the whole timeout on
-	// every silent port would make a scan take ports × timeout.
-	if timeout > time.Second {
-		timeout = time.Second
+	// Make the read cancellable. A plain conn.Read unblocks only on its deadline or
+	// on data, not on ctx cancel. Today Run is given context.Background(), whose
+	// Done() is nil, so this watcher is never started and costs nothing; the primary
+	// stop is the unhandled SIGTERM that terminates the engine process outright
+	// (enginehost). But if Run is ever given a cancellable ctx, this keeps a 5s
+	// greeter read from blocking cancellation for the whole budget — the
+	// scan-safety-auditor's latent-High, closed here rather than left for a future
+	// refactor to rediscover.
+	if done := ctx.Done(); done != nil {
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-done:
+				_ = conn.SetReadDeadline(time.Now()) // unblock the Read at once
+			case <-stop:
+			}
+		}()
 	}
-	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(budget)); err != nil {
 		return nil
 	}
 	buf := make([]byte, limit)
