@@ -169,6 +169,14 @@ type ToEngine struct {
 	// reading clampCeiling takes for an absent rate.
 	MaxProbesPerPort uint32 `json:"max_probes_per_port,omitempty"`
 
+	// Credentialed-host engine (KindJob): the SSH user to authenticate as, and the
+	// host keys to verify the target against. The engine authenticates over the agent
+	// socket the runtime passes as an extra FD (ADR-086) — never key material — and
+	// verifies the host key against KnownHosts, which the runtime supplies (it knows
+	// the target's key from enrollment/discovery); there is no in-engine TOFU.
+	CredUser   string `json:"cred_user,omitempty"`
+	KnownHosts string `json:"known_hosts,omitempty"`
+
 	// KindAuthorised: the runtime's answer to a KindAuthorise request.
 	Target    string `json:"target,omitempty"`
 	Permitted bool   `json:"permitted,omitempty"`

@@ -114,6 +114,25 @@ var exceptions = map[string][]string{
 	// field discards evidence already paid for in packets.
 	"cmd/cvap-engine-discovery": {"os", "reflect", "github.com/effaaykhan/cvap/internal/enginewire"},
 
+	// The credentialed-host engine (ADR-086/087/088). It opens net-to-target
+	// (ADR-047, like discovery) and speaks SSH, authenticating over the runtime's
+	// signing agent — never key material (ADR-027). It reuses internal/credscan for
+	// the SSH read and inventory parse (that package imports only internal/version +
+	// ssh + net, no store/control/scanpoint). It holds no credential and no scope.
+	"internal/engines/credhost": {
+		"net",
+		"golang.org/x/crypto/ssh",
+		"golang.org/x/crypto/ssh/agent",
+		"github.com/effaaykhan/cvap/internal/credscan",
+	},
+	// The shell: stdio pipes (os) and the agent socket FD (net.FileConn) plus the
+	// wire and its own logic package. Same single-import discipline as discovery's.
+	"cmd/cvap-engine-credhost": {
+		"os", "net",
+		"github.com/effaaykhan/cvap/internal/enginewire",
+		"github.com/effaaykhan/cvap/internal/engines/credhost",
+	},
+
 	// ========================================================================
 	// The second engine that may send packets, and the first that may speak TLS
 	// (ADR-048).
