@@ -1,6 +1,6 @@
 ---
 name: recurring-findings
-description: Recurring security defect classes found in CVAP reviews (41 classes), and the repo-specific constraints that shape acceptable fixes
+description: Recurring security defect classes found in CVAP reviews (57 classes), and the repo-specific constraints that shape acceptable fixes
 metadata:
   type: project
 ---
@@ -622,3 +622,438 @@ reader of that table and ask what the strongest claim any of them derives from a
 them is a trust root, the weak branch has to write somewhere the trust root does not read, or
 not write. And for any "conflicting evidence queues" rule, check whether the conflict test is
 gated on agreement existing.
+
+**43. A "counts once per pass" dedupe whose clock is swapped for a finer-grained one, so the
+unit the control is stated in stops existing.** ADR-094 gates the SSH trust root on
+`sightings >= 2` and states "two observations of one key in one sweep count once", enforced by
+`Record`'s `ON CONFLICT ... WHERE EXCLUDED.last_seen_at > asset_identity_keys.last_seen_at`.
+That holds while the caller passes the SWEEP clock (`c.now()`, one value per tenant per pass).
+A mid-review edit moved it to `h.seenAt` — the max `observed_at` of the ADDRESS GROUP — so one
+sweep now carries as many distinct timestamps as it has groups. Measured: one scan in which the
+attacker answers ssh+tls at the victim's address AND at its own (a minute apart in observation
+time) reaches `sightings = 2` on BOTH keys in a SINGLE sweep, merges the two hosts into one
+asset, and puts the attacker's fingerprint in `SSHHostKeyFingerprintsAt` for the victim's
+address. Zero persistence, one scan. The second, cheaper variant needs no merge: `ListUnresolved`
+is `ORDER BY observed_at LIMIT 500`, so when the 500-row cut falls inside a host's observations
+the same key is recorded in two consecutive sweeps — measured, sightings 2 from one scan.
+**Why:** "one sighting per sweep" and "one sighting per observation time" read as the same
+sentence, and the ADR says both in different paragraphs.
+**How to apply:** for any "at most once per X" rule implemented as a timestamp comparison, name
+the exact expression the timestamp comes from and count how many distinct values one X produces.
+If it is more than one, the control is stated in a unit the code does not have. And re-measure
+every claim of this shape after ANY change to the value's provenance, including one made by a
+concurrent agent mid-review.
+**Closed (S42, in the same ADR):** the occasion is now the SCAN, not a timestamp —
+`asset_identity_keys.last_seen_scan`, set from the observation's task via `Jobs.ScanIDForTask`,
+and `Record` bumps only when the scan is DIFFERENT and later and the verdict is not a merge. Both
+variants (cross-group and batch-cut) are one scan and count once; ADR-094 §1/§5 now *require*
+observation time for `last_seen_at`, so do not read "sweep clock" above as the remedy.
+
+**44. A counter that gates trust, incremented by the operation that consumes the trust.**
+`Record`'s conflict branch bumps `sightings` for a key the same asset already holds, from EVERY
+verdict — including the merge whose evidence is that very key, and without upgrading
+`provenance`. So an attach-grade key (inventory, withheld from the trust root) is promoted to
+trust material by being used as merge evidence: plant ssh+tls on a keyless asset at the victim's
+address (sighting 1, withheld), then present the same two keys at the attacker's OWN address; the
+merge bumps both to 2 and the attacker's fingerprint becomes the observed trust root at the
+victim's address — measured, `prov=attach sightings=2`, one asset holding both addresses. The
+attacker needs the victim's address for one sweep, not two, and the second "sighting" is
+manufactured on hardware they own. `ForAsset` (merge evidence) and `LiveByValue` were never given
+the provenance filter that `SSHHostKeyFingerprintsAt` got, so the strongest claim in the system —
+a merge, "the one decision that cannot be undone" — still reads ungraded keys.
+**Why:** the grading was added to the one reader the review named, and the other two readers feed
+back into it through the counter.
+**Partly closed (S42):** the promotion half is gone — a merge never bumps `sightings`
+(`EXCLUDED.provenance <> 'merge'`) and `provenance` is never upgraded on conflict — so the
+credential does not follow the merge. The merge itself on one-sighting attach-grade keys is still
+open and stated so in ADR-094: B40 (grade `ForAsset`/`LiveByValue` or `Candidate.Keys`).
+**How to apply:** when a field grades evidence, grep every reader (class 42) AND every writer of
+the grade itself. Ask which operations can increment the counter and whether any of them already
+depended on the thing the counter authorises.
+
+**45. A migration adding a NOT NULL column with no default breaks the hand-written INSERTs the
+Go store layer does not own — including the RLS gate's own fixture.** 0044 dropped the default on
+`provenance` and made `last_seen_at` NOT NULL. Every `Record` call site was updated; the four SQL
+seeds were not, and one of them is `internal/store/testdata/fixtures.sql`, loaded by
+`rls_test.sql` under `ON_ERROR_STOP=1` — so `make rls-test` (in `make ci` via `db-gates`, and a
+step in `.github/workflows/ci.yml`) aborts at the fixture, and the tenant-isolation sweep it
+exists to make non-vacuous never runs. Verified by replaying the fixture's exact INSERT: `null
+value in column "provenance" violates not-null constraint`. Fixed in-tree during the review.
+**How to apply:** on any migration adding a NOT NULL/defaultless column, `grep -rn "INSERT INTO
+<table>"` across `**/*.sql`, `test/`, `internal/**/testdata` and the load seeds — not just the Go
+store package. A gate whose fixture fails is a gate that stops asserting.
+
+**46. A grade assigned by the PATH the evidence took, when the attacker chooses the path.**
+ADR-094 grades an identity key by the verdict that recorded it: `merge`/`new_asset` are
+enrolment-grade (trust material at one sighting), `attach`/`unknown` are inventory until two
+sightings. The whole control assumes the attacker's key arrives on an ATTACH — planted at the
+victim's address. Measured: run the same attack in the other order and no attach is involved.
+The attacker's own host is discovered normally at its OWN address (new asset, keys graded
+`new_asset`, trust material at once); one appearance answering ssh+tls at a keyless victim's
+address then MERGES the victim's address onto the attacker's asset (`AssetAddresses.Open`
+closes the victim's hold), and `SSHHostKeyFingerprintsAt(victimIP, 22)` returns the attacker's
+fingerprint immediately — one scan at the victim's address, no graduation, no persistence. The
+ADR's closing claim ("the credential does not go to the attacker's machine until a second scan
+sees their key at the victim's address") is false in that order. A second, slower route exists
+too: attach at the victim's address (sighting 1), merge from the attacker's own address (no
+bump), then a SINGLE-key attach at the attacker's own address — one moderate key alone does not
+merge, so it attaches to the now-merged asset and bumps the counter on hardware the attacker
+owns.
+**Why:** the grade describes the last hop, and the attacker picks which hop that is. Grading one
+reader (the trust root) while the merge rule reads the same keys ungraded lets the merge carry a
+grade across addresses.
+**How to apply:** for any per-path grade, enumerate EVERY path that produces the good grade and
+ask which of them the attacker can walk on hardware they control. Then ask what carries the
+grade somewhere else — here, a merge moving an address is what moves the trust root.
+**Closed (S42):** the exemption was deleted — no verdict grade counts on one sighting; trust is two scans at the address in `asset_identity_key_sightings`.
+
+**47. A refusal that parks the evidence forever, with no reader for the parking.** ADR-094 §4/§5
+turn a same-service key contradiction at a held address into a QUEUE verdict, and `ListUnresolved`
+then skips any observation with a pending queue item. Nothing resolves an item (no API, no
+console, and `ResolutionQueue.PendingCount` has no caller in production code at all), so
+"waits for an operator" means "never". Measured: a host CVAP fingerprinted once (OpenSSH 8.9p1)
+that rotates its SSH host key — a reimage, or an attacker running `ssh-keygen -A` once — has
+every later ssh observation parked; after three more scans reporting 9.0/9.1/9.2p1 the `services`
+row still says 8.9p1 with the original `last_seen`, 3 observations unresolved, 4 queue rows,
+forever. Pre-change baseline, measured by restoring the old attach-with-skip behaviour: 9.2p1,
+0 unresolved, 0 queued. So the change converts "we record the service but not the key" into "we
+stop seeing the service", and the trigger is under the target's control.
+**Why:** the rule was justified by the address-handover case (a different host on a reused lease)
+but fires identically on key rotation of the SAME host, which is far more common; and "queued for
+an operator" was treated as a terminal state rather than a promise someone has to keep.
+**How to apply:** whenever a review says "do not guess, queue it", find the consumer of the queue
+in the SAME diff. If there is none, the refusal is a silent drop with extra steps — say so, and
+check what stops being collected while the item waits.
+
+**48. An exemption to a two-sighting rule, gated on a precondition that EXPIRES.** ADR-094 made
+the observed trust root ask for two distinct scans at an address — except for a `merge`/`new_asset`
+key at its own `first_seen_address`, which counts at once, on the reasoning that a new asset is an
+"enrolment moment". The precondition for that verdict is "no live holder of this address", and
+liveness is a 7-day window (`correlate.AddressWindow`, `AssetAddresses.CloseStale`, which keys on
+`valid_from` — `TouchLive` rewrites it as last-seen). So the exemption re-opens on a timer:
+measured, a healthy two-key host trusted at its address, quiet for 8 days, then ONE scan by whoever
+answers there → `SSHHostKeyFingerprintsAt` returns the newcomer's fingerprint, the previous
+occupant's key (still in `asset_identity_keys`, still `sightings=2` at that very address) is never
+consulted because its asset no longer holds the address, no queue item is raised, and the handover
+rule cannot fire because there is nothing live to contradict.
+**Why:** "we have never seen anything here" and "we have not looked here lately" are different
+statements, and only the first justifies trust-on-first-use. Aging is what makes `valid_to IS NULL`
+honest for inventory; reusing it as the precondition for an enrolment moment imports its forgetting.
+**How to apply:** for any "first time" exemption, find what makes the system believe it is the first
+time and ask whether that belief decays. If it is a liveness window, the exemption recurs every
+window. Prefer deleting the exemption (here: require two sightings always — the migration already
+imposes exactly that on every pre-existing key) over dating it.
+**Closed (S42):** `first_seen_address` no longer exists; the per-(key,address) sightings table replaced the scalar columns.
+**Re-measured (S42, final):** the exemption was DELETED rather than dated — no provenance carve-out,
+every key needs two scans at the address. Occupant trusted at an address, `asset_addresses.valid_from`
+aged 9 days, `CloseStale` closed the interval, the newcomer answering there became a NEW ASSET with
+`scans_seen=1` and `SSHHostKeyFingerprintsAt` returned `[]`; a second scan there returned its key,
+which is the ADR's stated and accepted cost. The previous occupant's key keeps `scans_seen=2` at that
+address but its asset no longer holds the address, so the join excludes it.
+
+**49. A per-scope counter kept as ONE (scope, count) pair on the row.** ADR-094 fixed a
+cross-address trust carry by adding `last_seen_address`/`sightings` to `asset_identity_keys` and
+requiring `last_seen_address = $ip`. One row per key value (the partial unique index), so the key
+counts at exactly one address at a time and a sighting elsewhere RESETS it. Measured on a legitimate
+dual-homed host whose sshd answers on both scanned addresses: trust material at at most one of them,
+ever; and when the two address groups' order alternates between scans (two jobs, two zones) it is
+trust material at NEITHER after six scans, flapping in and out as the row moves. Compounded by
+`Record`'s `EXCLUDED.last_seen_scan IS DISTINCT FROM ...` guard, which allows at most ONE update per
+scan per key, so the second address group in the same sweep never even moves the row. Pre-change the
+query returned any live key of the asset holding the address, so this is a REGRESSION, fails closed
+(credentialed jobs refuse), and contradicts the ADR's stated cost of "one more sweep per host".
+**Why:** the narrowing was correct — trust IS per address — but a scalar column can only remember
+one scope, so "counted per address" became "counted at the last address".
+**How to apply:** when a review narrows a trust check by a new dimension, ask what a subject with
+TWO legitimate values of that dimension does. If the state is a scalar on the parent row rather than
+a child table keyed by the dimension, the answer is usually "flaps, or never qualifies".
+**Closed (S42):** the scalar columns were replaced by `asset_identity_key_sightings` (one row per key and address), so a dual-homed host counts at each address.
+**Re-measured (S42, final):** a host answering ssh+tls at two addresses is trust material at BOTH
+after two scans, in both group orders and with the order alternating between scans — `scans_seen`
+reached 4 at each address over four scans, one asset, no flapping. The per-scan guard is now on the
+(key,address) row, so two address groups in one sweep each move their own row.
+
+**50. Parking keyed on the evidence that caused the refusal, while its siblings walk free.**
+ADR-094 §4/§5 queue an address handover and skip re-listing "the observation" — but `Enqueue` writes
+one row per (observation, KEY) and the weak `ip_window` key carries `ObservationID = uuid.Nil`, so
+it lands with `observation_id` NULL. `ListUnresolved`'s anti-join matches on `observation_id`, so
+only the KEY-BEARING observations are parked. Measured: a newcomer on a reused lease presenting a
+contradicting ssh key on 22 plus an ordinary keyless service on 8080 has the ssh observation parked
+and the 8080 observation attached to the PREVIOUS OCCUPANT's asset one sweep later, deriving a
+service row (and findings) on the wrong host — the interleaving the queue verdict exists to prevent.
+It also falsifies the ADR's B41 text, "nothing derives a service or a finding from a parked
+observation": nothing derives from the parked one, and its siblings derive as usual.
+**How to apply:** a host group is the unit of the DECISION but the queue is keyed by observation and
+key. Whenever a verdict is meant to hold a whole group, check that every member of the group is
+actually held, including the ones that contributed no key.
+**Closed (S42, measured):** the queue branch now skips keys with `ObservationID == uuid.Nil` and
+enqueues one `ip_window` item per REMAINING observation in the group, carrying that observation's id.
+Measured: a newcomer with a contradicting ssh key on 22 plus a keyless service on 8080 parks BOTH
+observations (2 queue items, 2 unresolved) and they stay parked across four further sweeps; no 8080
+service row ever lands on the occupant's asset. The dedup (`NOT EXISTS ... observation_id IS NOT
+DISTINCT FROM`) keeps the item count flat per sweep.
+
+**51. A refusal rule justified by a RARE adversarial event that fires on a ROUTINE scheduled one.**
+ADR-094 §4 turns "the asset holds this address and a same-service moderate key contradicts the one it
+holds" into a QUEUE verdict, and the ADR describes the false-positive case as "a reimage or
+`ssh-keygen -A`" (B41) — rare, adversarial-adjacent. The rule does not read key TYPE: a
+`service_cert_fp` renewal is the same shape. Measured on the dev DB: a web host with a cert on 443 and
+an ordinary keyless service on 80, scanned twice, then re-scanned after an ACME renewal — verdict
+`queue` with the ADR-094 handover reason (not the pre-existing ADR-007 "not outvoted" one, confirmed
+from `asset_resolution_queue.conflict_reason` and from `domain.Resolve` called directly), an item for
+the cert observation AND an `ip_window` item for the keyless port-80 sibling, and after three further
+scans the `services` rows are still the pre-renewal ones. Pre-change the same inputs had
+`agreeing == []`, so the not-outvoted guard could not fire and the candidate fell through to
+`attachable = append(...)` — an attach, services updating, key simply not recorded. So it is a
+regression whose trigger is a 60-90 day cron on every TLS host in the estate, not a reimage. With B39
+open (no resolver) the host is gone from the inventory permanently: stale findings stay open, new ones
+are never raised, and the only signals are a WARN and Health's unresolved-observation count.
+**Why:** the rule was designed against one key type (ssh host key, which really is rare to rotate) and
+applied to the strength class, which includes the one credential in the estate that is *designed* to
+rotate on a schedule.
+**How to apply:** for any refusal keyed on "this evidence changed", enumerate the legitimate reasons
+that value changes and their RATE. If one of them is automated and scheduled, the refusal is a
+scheduled outage of whatever it gates. Ask it of every member of the class the rule matches on, not
+of the example that motivated it.
+**Half-closed (S42 final), and the half that is open is the general one.** The fix carves the
+certificate out INSIDE the attach branch (`contradictsHostKey` routes only an ssh conflict to
+`contested`; a cert conflict attaches and rides out in `Verdict.Contradicted` unrecorded). That
+branch is reached only when `len(s.agreeing) == 0`. A host with ANY other agreeing moderate key —
+an ssh+TLS Linux server, the ordinary shape — hits the older ADR-007 not-outvoted guard first
+(`len(agreeing)>0 && maxStrength(conflicts) >= maxStrength(agreeing)`, 2 >= 2) and is still queued.
+Measured both ways in one run: `domain.Resolve` returns `attach` for a TLS-only host and `queue` for
+the same renewal beside a steady ssh key, and end-to-end the ssh+TLS host parked 8 observations / 8
+queue items over four scans with `services` frozen at the pre-renewal versions. Not a regression
+(ADR-007's guard predates the diff) but the ADR's §4 sentence "a renewed certificate attaches — the
+same host" is false for most of the estate.
+**How to apply (added):** when a carve-out is added to fix a measured case, find the FIRST guard in
+the decision that can claim the same inputs. A carve-out in a later branch cannot reach anything an
+earlier branch already matched — construct the variant that reaches the earlier guard and measure it.
+
+**52. A counter that gates trust and only counts up, beside a relationship that expires.**
+ADR-094 counts sightings per (key, address) in `asset_identity_key_sightings` and never decays them,
+while everything around the count ages: `asset_addresses` intervals close after `AddressWindow`
+(7 days) and `ip_window` is meaningless outside it. Measured: an attacker answers ssh+tls at a
+victim's address for two scans (the ADR's accepted cost) and is trust material there; the address
+ages out and a legitimate KEYLESS host holds it for two scans (trust root correctly empty); the
+attacker returns for ONE scan — the two moderate keys merge back onto their old asset, `Open` takes
+the address off the keyless occupant, `scans_seen` goes 2 -> 3, and `SSHHostKeyFingerprintsAt`
+returns the attacker's fingerprint again after a single scan, months later, with no queue item raised
+(a keyless occupant contradicts nothing). So the two-scan cost is paid ONCE per address, forever.
+**Why:** the count is evidence about a moment, stored as a permanent property of a pair whose other
+half is explicitly time-bounded.
+**How to apply:** when a control is "N occurrences at scope S", check whether S itself expires. If it
+does, the occurrences must expire with it — compare `last_seen_at` against the same window that
+governs the scope, or reset the row when the scope relationship is closed.
+**CLOSED (S42, final re-measure).** `Record`'s `DO UPDATE` now resets: `scans_seen = CASE WHEN
+<row>.last_seen_at < EXCLUDED.last_seen_at - $9::interval THEN 1 ELSE ... + 1 END` with
+`store.SightingWindow` (7d, `'168h0m0s'::interval` parses as 168:00:00 — checked). Measured end to
+end through `SweepOnce`: attacker pays two scans, 60 days pass, a keyless host holds the address for
+two scans (trust empty), the attacker returns for ONE scan -> merge back, `scans_seen` 2->1, trust
+`[]`; a SECOND returning scan -> `scans_seen` 2, trust restored. The cost is charged again. Backdating
+cannot evade it (ingest bounds `observed_at` to [now-90d, now+1h]; landing inside the 7d gap keeps
+`last_seen_at` old, which the read filter then rejects). The other edge is real and DOCUMENTED in
+ADR-094 §2: an estate fingerprinted less often than every 7 days can never reach 2 — measured, every
+sighting restarts — which fails closed onto the operator pin.
+**The prior (superseded) state of this entry:**
+`SSHHostKeyFingerprintsAt` gained `s.last_seen_at >= now() - within` (`store.SightingWindow` = 7d),
+but `Record`'s `DO UPDATE` is still `scans_seen = scans_seen + 1` with no reset, so the control the
+code actually implements is "at least two sightings EVER, and the most recent one inside the window"
+— and a single returning scan satisfies both. Measured end-to-end through `SweepOnce`: attacker pays
+two scans at a keyless victim's address (trusted), 60 days pass, the interval is closed by
+`CloseStale`, a legitimate keyless host holds it for two scans (trust root correctly empty), the
+attacker returns for ONE scan → merge back onto their own asset, `Open` takes the address off the
+occupant, `scans_seen` 2→3, `last_seen_at` = now, and the fingerprint is trust material again. Also
+pinned at the store layer in 30 ms with four `Record` calls. Fix shape: make the update decay —
+`scans_seen = CASE WHEN <row>.last_seen_at < EXCLUDED.last_seen_at - <window> THEN 1 ELSE
+<row>.scans_seen + 1 END` — or delete the sighting when `CloseStale` closes the interval.
+**How to apply (sharpened):** "N occurrences at a scope that expires" needs the occurrences to
+expire too. A recency predicate on the LATEST occurrence is not decay: it re-arms on one event.
+Write the check as "N occurrences inside the window", and test it by continuing the scenario past
+the point where the window has lapsed rather than stopping at the lapse.
+
+**53. A scope filter read from a field written ONCE, on a table whose upsert is DO NOTHING.**
+`SSHHostKeyFingerprintsAt` scopes the trust root to the dialled port with
+`k.merge_evidence_payload -> 'port' = to_jsonb($3::int)`, and the ADR states the property as "was
+observed on the port the engine dials". `Record`'s insert is `ON CONFLICT ... DO NOTHING`, so the
+payload is whatever the FIRST observation that recorded the key carried and is never updated, while
+the sighting count is NOT port-scoped (it bumps from an observation on any port at that address).
+Measured: a host serving the same host key on 2222 and 22, with the 2222 observation earlier in the
+group, stamps the key row `port=2222` — after two scans `trust@2222` returns the key and `trust@22`
+returns `[]`, so a credentialed job against that host is refused forever with "no observed ssh host
+key", although every scan saw the key on 22. Fails closed, so availability not exposure; the defect
+is that the query asserts "was FIRST RECORDED from this port", not what the ADR claims.
+**How to apply:** whenever a filter reads a copied payload field, find the write and check whether it
+can ever be corrected. If the write is `DO NOTHING`/insert-only, the filter is asserting a property of
+the first sighting, not of the subject — say which one the control needs.
+**Closed (S42 final):** the port moved into the sighting's PRIMARY KEY
+(`asset_identity_key_sightings (tenant, key, address, port)`), `Record` takes it from the key's
+SOURCE (`portOf("22/tcp")`, from `keysFrom`'s `fmt.Sprintf("%d/%s", port, proto)`) and the query
+filters `s.port = $3`; the payload filter is gone. Measured: one key served on 2222 (observed first,
+so it still stamps the key row's payload `port=2222`) and on 22 is trust material on BOTH after two
+scans. No inflation through the new dimension — one scan serving one key on five ports plus a
+duplicate 22 observation plus a 22/udp twin leaves every row at `scans_seen=1` (the
+`EXCLUDED.last_seen_scan IS DISTINCT FROM` guard is per row, and 22/udp maps to the same row as
+22/tcp). `Record` with port 0, -1, 65536 or 70000 inserts the key and no sighting, no constraint
+violation.
+
+**54. A test that asserts the PRECONDITION of its claim and stops one line short of the claim.**
+`TestAnObservedKeyIsTrustMaterialOnlyAfterTwoScansAtTheAddress` documents, in its own doc comment,
+"a sighting older than the address window no longer counts: the two-scan cost is not a one-time
+payment". The body ages the sighting past the window, asserts the trust root is empty — true — and
+ends. It never performs the RETURN that the sentence is about. One more `record(...)` with a fresh
+scan id and a re-read would have failed: `scans_seen` 2→3, trust restored. The whole finding (class
+52, still open) lives in the gap between the last assertion and the last clause of the comment.
+**Why:** the aged state is easy to construct and easy to assert; the claim is about what happens
+NEXT, which needs the scenario continued past the interesting moment.
+**How to apply:** read every test's doc comment as a list of claims and, for each, find the
+assertion that would be false if the claim were false. Watch specifically for claims phrased as a
+NARRATIVE ("…left, and returned is not trusted on one scan") against a test that stops at the
+middle clause. Same shape as class 9, one level up: there the guard could not fire; here the
+assertion is real but is not the claim's.
+
+**55. One relation named two ways: the DECISION compares on the scope a value was FIRST
+recorded under, the CONTROL reads the scope it is seen under NOW.** ADR-094 scopes the ssh trust
+root to the port of the SIGHTING (`asset_identity_key_sightings.port`, the port seen on this scan)
+but `domain.compare` decides "same service, so this is a contradiction" from `ForAsset`'s `Source`,
+which is derived from `merge_evidence_payload->>'port'` — the port of the observation that FIRST
+recorded the key, never updated (`ON CONFLICT DO NOTHING`). When the two disagree the handover rule
+silently does not apply to the port the credentialed engine dials. Measured: a host serving one key
+on 2222 and 22 stamps its key row `port=2222`; a different host then takes the address and answers
+22 only, with its own key — no conflict (different `Source`), no queue item, attach, key recorded,
+and after two scans `SSHHostKeyFingerprintsAt(addr, 22)` returns BOTH fingerprints, so
+`dispatch.trustMaterial` writes two known_hosts lines and the credentialed engine accepts either
+host. ADR-094 §2 names the seam and calls its consequence inventory damage; the consequence is a
+trust root.
+**Why:** a scope was narrowed in the read path (sightings, per port-now) without narrowing the same
+scope in the write/decide path (the key row's first-seen payload), so one word — "service" — means
+two different things three files apart.
+**How to apply:** when a control is scoped by X, grep every OTHER comparison that claims to be
+"same X" and check it derives X from the same place. If one reads a copied payload and the other
+reads live state, construct the subject where they differ (here: one key on two ports) and measure.
+Fix shapes: return one candidate key per SIGHTING so `compare` sees the port under consideration;
+and fail closed when more than one distinct fingerprint qualifies for one (address, port) — two
+host keys at one address and port IS the handover signature.
+**Backstopped, not fixed (S42 final, measured).** The second fix shape shipped:
+`dispatch.trustMaterial` refuses at `len(fps) > 1` ("distinct ssh host keys qualify"), audited as
+`job.credential_refused` and replayed in a fresh `db.Write` if the pass rolls back. Re-measured: a
+host serving one key on 2222 (observed first, so the key row is stamped 2222) and on 22, then a
+newcomer answering 22 with its own key, still records the newcomer's key on the occupant's asset
+with no queue item, and `SSHHostKeyFingerprintsAt(addr,22)` returns BOTH after two scans each — the
+refusal is what stops the credential, not the resolver. Root cause (compare reads the first-seen
+payload port) open as ADR-094 B42. False-refusal risk checked and low: a legitimate rekey at the
+same source is a contradiction and parks instead, and a key seen only on 2222 has no sighting at 22.
+
+**56. A carve-out that removes a refusal also removes whatever ELSE that refusal was holding up.**
+ADR-094 §4 forgives a contradicting CERTIFICATE at the asset's own address (a renewal), and the
+S42-final fix moved the forgiveness ahead of ADR-007's not-outvoted guard so the common host (steady
+sshd + renewed cert) stops parking. Correct for the renewal — and it deleted the second-scan parking
+that was containing a handover. Measured end to end: a TLS-only occupant's address is taken by a
+host that presents its own certificate on 443 (a same-service contradiction) and its own sshd on 22;
+scan 1 attaches (nothing agrees, the cert conflict is cleared) and records the newcomer's host key on
+the OCCUPANT's asset with provenance `attach`; scan 2 used to be contested — the newcomer's own key
+now agreed, the stale cert still conflicted, 2>=2 — and now attaches as well, so `scans_seen` reaches
+2 and `SSHHostKeyFingerprintsAt(victim, 22)` returns the newcomer's key. Zero queue items, and zero
+log lines, because the same diff deleted the WARN that `contradictsHeld` used to emit. The credential
+for the occupant is then handed to whoever took the lease.
+**Why:** the guard being relaxed was load-bearing for a different scenario than the one being fixed;
+"nothing agrees" and "everything agrees because I planted it last scan" are the same branch one scan
+apart.
+**How to apply:** for any refusal being relaxed, list every scenario that currently REACHES it, not
+just the false positive that motivated the change — and for a rule applied repeatedly (a sweep), play
+the scenario forward TWO iterations, because an attacker's first attach changes what agrees on the
+second. Cheap containment when the decision genuinely cannot tell the two apart: let the attach stand
+for inventory but refuse to MINT identity from it — on `DecisionAttach` with a non-empty
+`Verdict.Contradicted`, skip the key-recording loop entirely. It costs the renewal case nothing (the
+contradicted certificate is already skipped) and denies the handover its trust root.
+**Closed (S42 final, measured), with the containment taken CONDITIONALLY — see class 57.** The
+recommended skip shipped gated on corroboration: an attach with `len(Contradicted) > 0 &&
+len(Corroborated) == 0` records nothing and logs a WARN. Re-measured on the exact scenario: TLS-only
+occupant, newcomer with a new cert on 443 AND its own sshd on 22, two scans — one key on the asset
+(the occupant's cert), `SSHHostKeyFingerprintsAt(victim,22)` empty, one asset, ZERO queue items,
+zero unresolved. Two residuals worth carrying: (a) the same attacker who simply does not serve TLS
+presents no contradiction at all, so its key is recorded on scan 1 and is the occupant's trust root
+after scan 2 — measured, same two scans, so the fix removes one of two equal-cost routes and the
+credential outcome is unchanged (that route is ADR-094's stated, accepted cost); (b) the detection
+is filed in a WARN only — no queue item, no audit, no health counter — and the newcomer's services
+still attach to the occupant. Do NOT "just queue it": the uncorroborated shape is exactly what a
+TLS-ONLY host's ordinary ACME renewal looks like (nothing else can agree), so queueing would park
+every such host, which is class 51 again.
+
+**57. A refusal relaxed by "corroboration", where the attacker supplies the corroboration — one
+scan earlier, or by echoing a public value.** ADR-094 §4's fix for class 56 records a contradicted
+key (a renewed certificate) when something else AGREED with the asset, and retires the held one:
+`domain.Resolve` fills `Verdict.Corroborated` from `s.agreeing`, `correlate.resolveHost` does
+`Retire` + `Record`. Both routes to that agreement are open to the attacker. (1) MINT IT: a newcomer
+at a TLS-only occupant's address that presents ONLY its sshd on scan 1 contradicts nothing, so its
+key is recorded (`provenance=attach`); on scan 2 it presents the same key plus its own certificate,
+its own planted key is the corroboration, the occupant's certificate is RETIRED and the attacker's
+recorded — then one scan of the attacker's own host at its OWN address merges the two assets
+(measured: 1 asset holding both addresses, 0 queue items, 0 unresolved). Under HEAD the attacker's
+cert was skipped by `contradictsHeld`, so it never got a second key on the victim's asset and the
+merge could not happen: newly permitted, and it widens ADR-094's already-open B40 (planted-key
+merge) from keyless victims to every host whose only identity is a certificate. (2) ECHO IT: an
+`ssh_hostkey` observation proves nothing — `internal/engines/fingerprint/ssh.go` abandons the
+exchange after `SSH_MSG_KEX_ECDH_REPLY` and hashes the host-key blob, with no signature check ("an
+exchange hash nothing computes"), and a host key is a public value anyone who has scanned the victim
+holds. So replaying the victim's real host key gives corroboration on scan 1, and an
+"established key" strengthening (require ≥2 sightings at this address) does not close that route.
+Note the inversion: the key TRUSTED as corroboration (ssh) is the unverifiable one, and the key
+treated as the CONTRADICTION (a certificate) is the one whose value does prove possession, because
+the TLS probe completes a handshake.
+**Why:** "something else agreed" reads as independent evidence, but agreement is computed against
+rows the same attach loop wrote last scan, and against a value the target merely asserts.
+**How to apply:** whenever a rule is relaxed "only when X corroborates", ask who wrote X and what X
+proves. Trace X's provenance to the verdict that recorded it (if an attach can write X, one extra
+scan buys the relaxation) and to the protocol that observed it (if the probe never verifies
+possession, X is a public value, not a secret). Fix shapes, in order: require the corroborating key
+to be established at that address (≥2 sightings, the same bar the trust root uses) — closes (1) at
+a cost of zero to a legitimately scanned host; and state in the ADR, in the same register as "two
+sightings verify nothing", that corroboration by an ssh host key is an echo, not a proof.
+
+**Measured clean in the S42 ADR-094 re-review (do not re-derive).** Sightings cannot be inflated by:
+the same scan swept twice (the batch cut — `last_seen_scan IS DISTINCT FROM` blocks it); two
+observations of one key in one group (same scan, and a second scan in the same group is blocked by
+`EXCLUDED.last_seen_at > ...`, since every Record in a group passes `h.seenAt`); `uuid.Nil` scan or
+empty address (both return before the sighting insert); a key another asset holds live (the sighting
+SELECT is qualified by `k.asset_id = $2`, and the key insert is DO NOTHING). A scan point cannot
+forge the occasion: `IngestService.tasksBelongToJob` rejects a chunk whose observation names a task
+outside the submitted job, so the scan id derived by `Jobs.ScanIDForTask` is the scan of the job the
+scan point holds a lease on. C1/H1 both fail at the victim: whichever order the attacker enrols at
+their own address and spoofs at the victim's, `SSHHostKeyFingerprintsAt(victim, 22)` is empty after
+one scan at the victim, and later scans at the attacker's OWN address raise only the own-address
+count. Tenancy holds: two tenants with the same RFC1918 address and different keys each see exactly
+one sightings row under an unpredicated SELECT. `ListUnresolved`'s new anti-join does not starve the
+500-row batch (the LIMIT applies after the filter) and uses
+`asset_resolution_queue_pending_obs_idx` as an index-only scan. `refuseCredentialedJob`'s audit event
+IS replayed in a fresh `db.Write` when the assignment pass rolls back (`dispatch.go`, the `refusals`
+slice), which is class 31 applied correctly.
+**Re-confirmed in the S42 FINAL pass (after the cert carve-out, the port key and the window):**
+C1/H1 (one scan at the victim = `scans_seen=1`, trust empty; two = trusted, the stated cost); the
+dual-homed host (ssh+tls at two addresses, four scans with the group order alternating —
+`scans_seen=4` at each address, one asset, trusted at both); the keyless sibling (an ssh handover
+parks 2 observations with 2 queue items, no new key, no service row for the newcomer's port, stable
+across three further sweeps); the queue branch has no error path after `Enqueue` (it returns nil
+immediately — refusal durability OK).
+**One claim from that pass is now FALSE and the falsification is class 56.** "The cert-takeover
+variant self-parks — a newcomer bringing a contradicting cert AND a new sshd attaches on scan 1 and
+is contested by ADR-007 on scan 2, because its own key now agrees" held only while the cert carve-out
+sat INSIDE the attach branch. Moving it ahead of the not-outvoted guard (the S42-final fix for class
+51) removed the scan-2 parking, and the newcomer now attaches twice and reaches the trust root.
+Re-measure any "it self-corrects on the next scan" conclusion whenever the guard that did the
+self-correcting is reordered.
+
+**Re-measured clean in the S42 THIRD pass (the corroboration fix), do not re-derive.** (a) The
+cert-takeover of class 56 records nothing and reaches no trust root (above). (b) The renewal path
+works end to end on BOTH verdicts: steady ssh + renewed cert at the held address retires the old
+certificate, records the new one, 0 queued / 0 unresolved, and the host's next DHCP move merges on
+ssh + the NEW certificate (1 asset) — and a host with a second steady cert on 8443, which reaches
+the MERGE branch instead of the attach branch, retires and replaces the same way (`Verdict` carries
+`Contradicted`/`Corroborated` on `DecisionMerge` too; that was added mid-review). (c)
+`AssetIdentityKeys.Retire` is correctly scoped: `tenant_id`+`asset_id`+`key_type`+
+`merge_evidence_payload->'port'`, measured not to touch another asset's key of the same type and
+port, nor the same asset's key on another port; it is only ever called for `KeyServiceCert`
+(the carve-out is `k.Type == KeyServiceCert`), so no ssh key can be retired by it. A key whose
+payload carries no port is never retired — unreachable from correlate, which always has one.
+A retired key is not tombstoned: `Record`'s `ON CONFLICT ... WHERE valid_to IS NULL` inserts a new
+row, so a victim's retired certificate returns as a fresh row the next time it is observed.

@@ -25,3 +25,10 @@ var HostKeyPreference = []string{
 	"ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
 	"ssh-rsa", "ssh-dss",
 }
+
+// DefaultPort is the port the credentialed engine dials when a job names none,
+// and therefore the SERVICE whose observed key Core composes into known_hosts
+// (ADR-094): a key observed on another port is not trust material for this one.
+// One constant, because the engine and the trust query must agree on it for the
+// same reason they must agree on HostKeyPreference.
+const DefaultPort = 22

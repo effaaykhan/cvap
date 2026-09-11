@@ -21,7 +21,7 @@ import (
 // Mutations, declared beside the tests that must kill them.
 //
 // mutate:subject internal/domain/identity.go
-// mutate:test    ./internal/domain/ -run TestOneStrongKey|TestTwoModerate|TestAModerateAnd|TestWeakEvidence|TestADisagreement|TestTwoQualifying|TestAnUnknownKeyType|TestTheDHCPCase
+// mutate:test    ./internal/domain/ -run TestOneStrongKey|TestTwoModerate|TestAModerateAnd|TestWeakEvidence|TestADisagreement|TestTwoQualifying|TestAnUnknownKeyType|TestTheDHCPCase|TestAnAddressHandover
 //
 // mutate:case    independence is counted by key TYPE rather than by service
 // mutate:old     moderate[k.Source] = true
@@ -32,6 +32,14 @@ import (
 // from the SAME service look like two facts and are one. The first attempt at
 // this mutation declared an unused variable and changed no behaviour, which
 // `make mutate` reported rather than counting as killed.
+//
+// mutate:case    an address handover attaches instead of queuing (ADR-094)
+// mutate:old     			if len(s.conflicts) > 0 {
+// mutate:new     			if false {
+//
+// mutate:case    a renewed certificate at the held address stays a contradiction (ADR-094)
+// mutate:old     			if len(certs) > 0 {
+// mutate:new     			if false {
 //
 // mutate:case    a disagreement at equal strength is outvoted by agreement
 // mutate:old     if len(s.agreeing) > 0 && maxStrength(s.conflicts) >= maxStrength(s.agreeing) {
@@ -50,8 +58,8 @@ import (
 // mutate:new     if false {
 //
 // mutate:case    an attach does not compare the address it is attaching to
-// mutate:old     if observedAddress != "" && c.HeldAddress == observedAddress &&
-// mutate:new     if observedAddress != "" &&
+// mutate:old     		atHeldAddress := observedAddress != "" && c.HeldAddress == observedAddress &&
+// mutate:new     		atHeldAddress := observedAddress != "" &&
 //
 // That was the original form. It attaches an observation of one address to an
 // asset holding another, on the strength of a timestamp the caller filled in — a
@@ -215,6 +223,134 @@ func TestTwoQualifyingCandidatesGoToTheQueue(t *testing.T) {
 	}
 	if len(got.Candidates) != 2 {
 		t.Errorf("candidates = %v, want both offered", got.Candidates)
+	}
+}
+
+// TestAnAddressHandoverIsQueuedNotAttached.
+//
+// A different host on a reused address: the candidate holds the address inside
+// the window (weak agreement, which is not stored as a key and so never counts
+// as agreement), and its SSH host key from the same service contradicts the
+// observed one. Nothing agrees, so the not-outvoted guard above cannot fire,
+// and before ADR-094 this fell through to ATTACH — the newcomer's observations
+// and findings interleaved with the previous occupant's, and its key was
+// recorded on the occupant's asset. A contradiction at the held address is an
+// operator's call. A contradiction with no address tie is unchanged: a new
+// asset (TestAnUnknownKeyTypeIsNotEvidence's second case).
+func TestAnAddressHandoverIsQueuedNotAttached(t *testing.T) {
+	observed := []IdentityKey{
+		key(KeySSHHostKey, "SHA256:newcomer", "22/tcp"),
+		key(KeyIPWindow, "10.10.0.11", "net"),
+	}
+	// What the store actually hands the resolver: the asset's RECORDED keys.
+	// Weak keys are never recorded (the address lives in asset_addresses), so
+	// nothing here can agree — which is exactly why the not-outvoted guard,
+	// which needs an agreement, could not catch this shape. A held ip_window
+	// key in this fixture would make that older guard fire and prove nothing.
+	held := []IdentityKey{
+		key(KeySSHHostKey, "SHA256:occupant", "22/tcp"), // same source, other value
+	}
+	got := Resolve(observed, []Candidate{{AssetID: assetA, Keys: held,
+		HeldAddress: "10.10.0.11", AddressLastSeen: at.Add(-time.Minute)}}, at, window)
+	if got.Decision != DecisionQueue {
+		t.Fatalf("decision = %v (%s), want queue: the address says this asset and the "+
+			"host key says another host", got.Decision, got.Reason)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0] != assetA {
+		t.Errorf("candidates = %v, want the contested asset offered to an operator", got.Candidates)
+	}
+
+	// A renewed CERTIFICATE at the held address is not a handover: it attaches
+	// (a renewal is the same host, and every TLS host renews on a schedule),
+	// and the contradicting certificate is carried out so the caller does not
+	// record it — the old one stays the asset's, until a rule retires it.
+	got = Resolve(
+		[]IdentityKey{key(KeyServiceCert, "SHA256:renewed", "443/tcp"), key(KeyIPWindow, "10.10.0.11", "net")},
+		[]Candidate{{AssetID: assetA, Keys: []IdentityKey{key(KeyServiceCert, "SHA256:expired", "443/tcp")},
+			HeldAddress: "10.10.0.11", AddressLastSeen: at.Add(-time.Minute)}}, at, window)
+	if got.Decision != DecisionAttach {
+		t.Fatalf("decision = %v (%s), want attach: a renewed certificate is not a different host", got.Decision, got.Reason)
+	}
+	if len(got.Contradicted) != 1 || got.Contradicted[0].Value != "SHA256:renewed" {
+		t.Errorf("contradicted = %v, want the renewed certificate carried out, unrecorded", got.Contradicted)
+	}
+	if len(got.Corroborated) != 0 {
+		t.Errorf("corroborated = %v, want none: nothing but the address ties this to the asset", got.Corroborated)
+	}
+	// The common host: a steady SSH key AND a renewed certificate. The
+	// agreeing key would otherwise make the renewed certificate an
+	// equal-strength contradiction for the not-outvoted guard, and every Linux
+	// web server would park at its next renewal. The certificate is filtered
+	// before that guard at the held address; the ssh agreement alone does not
+	// merge (one moderate key), so this attaches with the certificate carried
+	// out.
+	got = Resolve(
+		[]IdentityKey{
+			key(KeySSHHostKey, "SHA256:steady", "22/tcp"),
+			key(KeyServiceCert, "SHA256:renewed", "443/tcp"),
+			key(KeyIPWindow, "10.10.0.11", "net"),
+		},
+		[]Candidate{{AssetID: assetA, Keys: []IdentityKey{
+			key(KeySSHHostKey, "SHA256:steady", "22/tcp"),
+			key(KeyServiceCert, "SHA256:expired", "443/tcp"),
+		}, HeldAddress: "10.10.0.11", AddressLastSeen: at.Add(-time.Minute)}}, at, window)
+	if got.Decision != DecisionAttach {
+		t.Fatalf("decision = %v (%s), want attach: a steady host key and a renewed certificate is the same host", got.Decision, got.Reason)
+	}
+	if len(got.Contradicted) != 1 || got.Contradicted[0].Value != "SHA256:renewed" {
+		t.Errorf("contradicted = %v, want the renewed certificate carried out", got.Contradicted)
+	}
+	if len(got.Corroborated) != 1 || got.Corroborated[0].Value != "SHA256:steady" {
+		t.Errorf("corroborated = %v, want the steady host key: it is what makes the contradiction a renewal", got.Corroborated)
+	}
+	// Two independent agreeing keys plus a renewed certificate at the held
+	// address MERGE (ADR-007), and the merge carries the renewal out the same
+	// way an attach does — otherwise the held certificate would never be
+	// retired on that path.
+	got = Resolve(
+		[]IdentityKey{
+			key(KeySSHHostKey, "SHA256:steady", "22/tcp"),
+			key(KeyServiceCert, "SHA256:steady-cert", "8443/tcp"),
+			key(KeyServiceCert, "SHA256:renewed", "443/tcp"),
+			key(KeyIPWindow, "10.10.0.11", "net"),
+		},
+		[]Candidate{{AssetID: assetA, Keys: []IdentityKey{
+			key(KeySSHHostKey, "SHA256:steady", "22/tcp"),
+			key(KeyServiceCert, "SHA256:steady-cert", "8443/tcp"),
+			key(KeyServiceCert, "SHA256:expired", "443/tcp"),
+		}, HeldAddress: "10.10.0.11", AddressLastSeen: at.Add(-time.Minute)}}, at, window)
+	if got.Decision != DecisionMerge {
+		t.Fatalf("decision = %v (%s), want merge: two independent keys agree at the held address", got.Decision, got.Reason)
+	}
+	if len(got.Contradicted) != 1 || got.Contradicted[0].Value != "SHA256:renewed" || len(got.Corroborated) != 2 {
+		t.Errorf("merge carried contradicted=%v corroborated=%v, want the renewed certificate and both agreeing keys", got.Contradicted, got.Corroborated)
+	}
+
+	// At a DIFFERENT address, a changed certificate beside an agreeing key is
+	// still the ADR-007 contested case: queue.
+	got = Resolve(
+		[]IdentityKey{
+			key(KeySSHHostKey, "SHA256:steady", "22/tcp"),
+			key(KeyServiceCert, "SHA256:other", "443/tcp"),
+			key(KeyIPWindow, "10.10.0.99", "net"),
+		},
+		[]Candidate{{AssetID: assetA, Keys: []IdentityKey{
+			key(KeySSHHostKey, "SHA256:steady", "22/tcp"),
+			key(KeyServiceCert, "SHA256:expired", "443/tcp"),
+		}, HeldAddress: "10.10.0.11", AddressLastSeen: at.Add(-time.Minute)}}, at, window)
+	if got.Decision != DecisionQueue {
+		t.Errorf("decision = %v (%s), want queue: at another address a changed certificate is not a renewal we can see", got.Decision, got.Reason)
+	}
+
+	// The same newcomer key with NO contradiction — the occupant holds no key
+	// of that type — still attaches: nothing disagrees, and the attach records
+	// the key at attach provenance (ADR-094), which the store keeps out of the
+	// trust root until seen again.
+	got = Resolve(observed, []Candidate{{AssetID: assetA,
+		Keys:        nil,
+		HeldAddress: "10.10.0.11", AddressLastSeen: at.Add(-time.Minute)}}, at, window)
+	if got.Decision != DecisionAttach {
+		t.Errorf("decision = %v (%s), want attach when nothing contradicts", got.Decision, got.Reason)
 	}
 }
 

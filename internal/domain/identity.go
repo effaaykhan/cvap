@@ -226,6 +226,21 @@ type Verdict struct {
 	// Candidates is what a queued decision offers an operator to choose between.
 	Candidates []uuid.UUID
 
+	// Contradicted are observed keys an ATTACH must not simply record
+	// (ADR-094): a key of a type that rotates on a schedule (a certificate)
+	// which differs from the one the asset holds from the same service. The
+	// attach stands — a renewed certificate is the same host — and what the
+	// caller does with the new value depends on Corroborated.
+	Contradicted []IdentityKey
+
+	// Corroborated are the observed keys that AGREED with the attached asset
+	// (its steady SSH host key, say) on an attach that also carries a
+	// Contradicted key. With corroboration the contradiction is a renewal:
+	// the old key is retired and the new one recorded. Without it — nothing
+	// in common with the asset but the address — it is a different host
+	// wearing the address, and the caller records nothing at all.
+	Corroborated []IdentityKey
+
 	// Reason is read by a human deciding a judgement call. Free text on purpose.
 	Reason string
 }
@@ -281,6 +296,8 @@ func Resolve(observed []IdentityKey, candidates []Candidate, now time.Time, wind
 		}
 	}
 
+	contradicted := map[uuid.UUID][]IdentityKey{}
+	corroborated := map[uuid.UUID][]IdentityKey{}
 	for _, c := range candidates {
 		s := scored{c: c}
 		s.agreeing, s.conflicts = compare(observed, c.Keys)
@@ -294,6 +311,42 @@ func Resolve(observed []IdentityKey, candidates []Candidate, now time.Time, wind
 		// us something that matters more than a hundred agreeing addresses. The
 		// alternative — letting weight of agreement carry the decision — is how
 		// a merge happens for reasons nobody can reconstruct afterwards.
+		//
+		// One class of contradiction is filtered out BEFORE that guard, and only
+		// for the candidate that holds this address: a different CERTIFICATE
+		// from the same service. A certificate renews on a schedule (ACME, every
+		// 60–90 days, on every TLS host) and an SSH host key does not, so at the
+		// host's own address a changed certificate is a renewal, not a
+		// different host — and the review measured that leaving it in the
+		// conflict set parked every Linux web server (steady sshd, renewed
+		// cert: agreeing ssh, conflicting cert, contested) at its next renewal,
+		// forever. The certificate is not discarded: it travels out as
+		// Contradicted, and the caller retires the held one and records it
+		// when the attach is corroborated by an ESTABLISHED key, or records
+		// nothing when it is not. A contradicting certificate at a
+		// DIFFERENT address is left in the set — that candidate was found by a
+		// key, and a changed certificate there is not a renewal we can see.
+		atHeldAddress := observedAddress != "" && c.HeldAddress == observedAddress &&
+			holdsAddressInWindow(c, now, window)
+		if atHeldAddress {
+			var certs, rest []IdentityKey
+			for _, k := range s.conflicts {
+				if k.Type == KeyServiceCert {
+					certs = append(certs, k)
+				} else {
+					rest = append(rest, k)
+				}
+			}
+			// Certificates only — named, not "everything that is not an SSH
+			// key": a key type this build cannot produce yet (a DMI UUID, an
+			// OS-fingerprint key) that contradicts at the held address must
+			// still reach the guard below, or a merge could go through on a
+			// contradiction nobody carried out.
+			if len(certs) > 0 {
+				contradicted[c.AssetID] = certs
+				s.conflicts = rest
+			}
+		}
 		if len(s.agreeing) > 0 && maxStrength(s.conflicts) >= maxStrength(s.agreeing) {
 			contested = append(contested, s)
 			continue
@@ -310,23 +363,53 @@ func Resolve(observed []IdentityKey, candidates []Candidate, now time.Time, wind
 		// observation carried an address at all — which attaches an observation
 		// of 10.10.0.77 to an asset holding 10.10.0.11, on the strength of a
 		// field the caller filled in. A test fixture made exactly that mistake.
-		if observedAddress != "" && c.HeldAddress == observedAddress &&
-			holdsAddressInWindow(c, now, window) {
+		if atHeldAddress {
+			// ============================================================
+			// Address handover: the address says "this asset", a key says
+			// "a different host". That is not an attach (ADR-094).
+			// ============================================================
+			//
+			// The guard above fires only when something AGREES, so a
+			// newcomer on a reused lease — nothing in common with the asset
+			// but the address, and a moderate key from the same service that
+			// contradicts the one the asset holds — fell through to attach,
+			// and its findings interleaved with the previous occupant's. The
+			// contradiction is the stronger fact: the address is weak
+			// evidence and the key is moderate, and one moderate key alone
+			// decides nothing (ADR-007), so this is an operator's call, not
+			// a guess in either direction. A contradiction with NO address
+			// tie is unchanged: that candidate was never attachable, and a
+			// different host at a different address is a new asset.
+			if len(s.conflicts) > 0 {
+				s.why = "address handover"
+				contested = append(contested, s)
+				continue
+			}
+			// Certificate contradictions were moved to Contradicted above;
+			// nothing else contradicts. The attach stands.
+			corroborated[c.AssetID] = moderateOrStronger(s.agreeing)
 			attachable = append(attachable, c)
 		}
 	}
 
 	switch {
 	case len(contested) > 0:
+		reason := fmt.Sprintf(
+			"evidence agrees with asset %s at strength %d and contradicts it at strength %d; "+
+				"a disagreement at equal or higher strength is not outvoted (ADR-007)",
+			contested[0].c.AssetID, maxStrength(contested[0].agreeing),
+			maxStrength(contested[0].conflicts))
+		if contested[0].why == "address handover" {
+			reason = fmt.Sprintf(
+				"asset %s holds this address but a key at strength %d contradicts the one it holds "+
+					"from the same service; a different host on a reused address is not an attach (ADR-094)",
+				contested[0].c.AssetID, maxStrength(contested[0].conflicts))
+		}
 		return Verdict{
 			Decision:   DecisionQueue,
 			Candidates: scoredIDs(contested),
 			Agreeing:   contested[0].agreeing,
-			Reason: fmt.Sprintf(
-				"evidence agrees with asset %s at strength %d and contradicts it at strength %d; "+
-					"a disagreement at equal or higher strength is not outvoted (ADR-007)",
-				contested[0].c.AssetID, maxStrength(contested[0].agreeing),
-				maxStrength(contested[0].conflicts)),
+			Reason:     reason,
 		}
 
 	case len(qualified) > 1:
@@ -343,7 +426,13 @@ func Resolve(observed []IdentityKey, candidates []Candidate, now time.Time, wind
 			Decision: DecisionMerge,
 			AssetID:  qualified[0].c.AssetID,
 			Agreeing: qualified[0].agreeing,
-			Reason:   qualified[0].why,
+			// A merge at the held address can carry a renewed certificate
+			// too (the filter above runs before the guard): the agreeing keys
+			// ARE the corroboration, and the caller retires and replaces the
+			// held certificate exactly as on a corroborated attach.
+			Contradicted: contradicted[qualified[0].c.AssetID],
+			Corroborated: moderateOrStronger(qualified[0].agreeing),
+			Reason:       qualified[0].why,
 		}
 
 	case len(attachable) > 1:
@@ -359,8 +448,10 @@ func Resolve(observed []IdentityKey, candidates []Candidate, now time.Time, wind
 
 	case len(attachable) == 1:
 		return Verdict{
-			Decision: DecisionAttach,
-			AssetID:  attachable[0].AssetID,
+			Decision:     DecisionAttach,
+			AssetID:      attachable[0].AssetID,
+			Contradicted: contradicted[attachable[0].AssetID],
+			Corroborated: corroborated[attachable[0].AssetID],
 			Reason: fmt.Sprintf(
 				"the asset holds this address and was seen at it within %s; weak evidence "+
 					"attaches an observation and never merges identity (ADR-007)", window),
@@ -445,6 +536,20 @@ func dedupe(in []IdentityKey) []IdentityKey {
 		}
 		seen[id] = true
 		out = append(out, k)
+	}
+	return out
+}
+
+// moderateOrStronger keeps the keys that can corroborate: a weak key is the
+// address, and the address must never corroborate a contradiction at itself.
+// Weak keys are not recorded today, so this is a guard against the convention
+// rather than a live filter.
+func moderateOrStronger(keys []IdentityKey) []IdentityKey {
+	var out []IdentityKey
+	for _, k := range keys {
+		if k.Type.Strength() >= 2 {
+			out = append(out, k)
+		}
 	}
 	return out
 }

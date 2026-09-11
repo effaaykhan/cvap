@@ -32,6 +32,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/effaaykhan/cvap/internal/credscan"
+	"github.com/effaaykhan/cvap/internal/sshalgo"
 )
 
 // Target is one resolved, pre-authorised host. Its own type so the engine cannot
@@ -46,8 +47,12 @@ type Config struct {
 	Targets    []Target
 	User       string
 	KnownHosts string // host-key lines the runtime supplies; verified in-memory
-	Port       int
-	Timeout    time.Duration
+	// Port is never set by any job today, so sshalgo.DefaultPort is what this
+	// engine dials AND what Core scopes the observed trust root to (ADR-094).
+	// Setting it without teaching dispatch to compose known_hosts for the same
+	// port makes verification fail closed against the wrong service's key.
+	Port    int
+	Timeout time.Duration
 }
 
 // Observation is what the engine emits (mirrors the discovery/fingerprint shape).
@@ -92,7 +97,7 @@ func Run(ctx context.Context, cfg Config, agentConn net.Conn, emit Emit) error {
 	}
 	port := cfg.Port
 	if port == 0 {
-		port = 22
+		port = sshalgo.DefaultPort
 	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {

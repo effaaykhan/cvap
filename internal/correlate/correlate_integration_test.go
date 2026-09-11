@@ -99,6 +99,25 @@ func seed(t *testing.T, db *store.DB, label string) seeded {
 	return s
 }
 
+// nextScan gives the seed a NEW scan (job, task, submission) to observe under.
+// A sighting's occasion is the scan (ADR-094), so a test that needs "seen on
+// two distinct scans" must actually produce two.
+func (s *seeded) nextScan(t *testing.T, db *store.DB) {
+	t.Helper()
+	s.subID = "sub-" + uuid.NewString()
+	if err := db.Write(context.Background(), s.tenant, func(ctx context.Context, c *store.Conn) error {
+		jobID, taskID, err := seedJobAndTask(ctx, c, s.spID)
+		if err != nil {
+			return err
+		}
+		s.taskID = taskID
+		_, err = (store.Submissions{}).Begin(ctx, c, s.subID, jobID, 1, store.SubmitAccepted, false, "")
+		return err
+	}); err != nil {
+		t.Fatalf("next scan: %v", err)
+	}
+}
+
 // observe writes one accepted `service` observation, the way ingest would.
 func (s seeded) observe(t *testing.T, db *store.DB, at time.Time, payload map[string]any) {
 	t.Helper()
@@ -539,21 +558,79 @@ func TestAnExistingAssetGainsTheKeysItIsLaterSeenWith(t *testing.T) {
 	}
 
 	// Address handover: a DIFFERENT host key from the same service at the same
-	// address. Nothing agrees and one moderate key decides nothing (ADR-007),
-	// so this attaches — and the attach must NOT record the newcomer's key,
-	// or the asset holds two hosts' SSH keys and ADR-091's observed-trust set
-	// for the address accepts either (B37 is the domain decision on the shape).
+	// address. Nothing agrees, the address says "this asset" and the key says
+	// "another host", so domain.Resolve QUEUES it (ADR-094) — no attach, no
+	// key recorded, the observation left unresolved for an operator. Before
+	// ADR-094 this attached and the asset ended up holding two hosts' keys,
+	// which ADR-091's observed-trust set for the address would both accept.
 	handover := second.Add(10 * time.Minute)
 	s.observe(t, db, handover, sshService("10.10.0.20", 22, "SHA256:HANDOVERHANDOVERHANDOVERHANDOVERHANDOVER"))
+	// ...and the newcomer answers on a keyless port too. That observation must
+	// be parked WITH the contested one: left alone it re-groups next sweep,
+	// finds only the address, attaches, and writes the newcomer's service onto
+	// the occupant's asset through the back door.
+	s.observe(t, db, handover, map[string]any{
+		"address": "10.10.0.20", "port": 8080, "protocol": "tcp", "service": "http",
+		"method": "banner", "solicited": false, "safety_mode": "safe",
+	})
 	if err := c.SweepOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if got := assetCount(t, db, s.tenant); got != 1 {
-		t.Fatalf("%d assets after the handover sighting, want 1 (it attaches; the domain rule is B37)", got)
+		t.Fatalf("%d assets after the handover sighting, want 1 (queued, not a new asset)", got)
 	}
 	if keys := moderateKeys(); keys != 2 {
-		t.Fatalf("%d moderate keys after a contradicting key attached by address, want 2 — "+
-			"a contradicting key must not be recorded on attach", keys)
+		t.Fatalf("%d moderate keys after a contradicting key at the held address, want 2 — "+
+			"a handover must not record the newcomer's key on the asset", keys)
+	}
+	var queued, unresolved int
+	if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
+		if err := c.QueryRow(ctx, `SELECT count(*) FROM asset_resolution_queue WHERE tenant_id = $1 AND resolved_at IS NULL`,
+			c.Tenant().UUID()).Scan(&queued); err != nil {
+			return err
+		}
+		return c.QueryRow(ctx, `SELECT count(*) FROM observations WHERE tenant_id = $1 AND asset_id IS NULL AND ingest_state = 'accepted'`,
+			c.Tenant().UUID()).Scan(&unresolved)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if queued < 2 || unresolved != 2 {
+		t.Fatalf("handover: %d queue items, %d unresolved observations; want an item per observation and both parked", queued, unresolved)
+	}
+	// The queued observation WAITS for its adjudication: another sweep raises
+	// no second item, and the occupant's next sighting at the address is not
+	// contested by the parked newcomer — the address is not frozen.
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.observe(t, db, handover.Add(5*time.Minute), sshService("10.10.0.20", 22, hostKey))
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var queuedAgain, unresolvedAgain int
+	if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
+		if err := c.QueryRow(ctx, `SELECT count(*) FROM asset_resolution_queue WHERE tenant_id = $1 AND resolved_at IS NULL`,
+			c.Tenant().UUID()).Scan(&queuedAgain); err != nil {
+			return err
+		}
+		return c.QueryRow(ctx, `SELECT count(*) FROM observations WHERE tenant_id = $1 AND asset_id IS NULL AND ingest_state = 'accepted'`,
+			c.Tenant().UUID()).Scan(&unresolvedAgain)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if queuedAgain != queued || unresolvedAgain != 2 {
+		t.Fatalf("after two more sweeps: %d queue items (was %d), %d unresolved (want 2): a parked handover must not "+
+			"re-queue every sweep nor contest the occupant's later sightings", queuedAgain, queued, unresolvedAgain)
+	}
+	var backdoor int
+	if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
+		return c.QueryRow(ctx, `SELECT count(*) FROM services WHERE tenant_id = $1 AND port = 8080`,
+			c.Tenant().UUID()).Scan(&backdoor)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if backdoor != 0 {
+		t.Fatalf("the newcomer's keyless service was written onto the occupant's asset (%d rows on 8080); the whole group must be parked", backdoor)
 	}
 
 	// And now the host moves: the keys recorded on attach are what carry the
@@ -566,5 +643,180 @@ func TestAnExistingAssetGainsTheKeysItIsLaterSeenWith(t *testing.T) {
 	}
 	if got := assetCount(t, db, s.tenant); got != 1 {
 		t.Fatalf("%d assets after the address change, want 1", got)
+	}
+}
+
+// ADR-094: an attach that carries a contradiction records nothing unless
+// something else agreed. A different host wearing a TLS-only occupant's
+// address — a new certificate on 443 and its own sshd on 22 — must not ride
+// the forgiven certificate in: its host key must not land on the occupant's
+// asset, or two scans later it is the occupant's trust root.
+func TestAnUncorroboratedContradictionRecordsNoKey(t *testing.T) {
+	db := testDB(t)
+	s := seed(t, db, "uncorroborated")
+	c := correlate.New(db, quietLogger())
+	ctx := context.Background()
+	first := time.Now().UTC().Add(-2 * time.Hour)
+
+	// The occupant: TLS only.
+	s.observe(t, db, first, tlsService("10.10.0.30", 443, "SHA256:OCCUPANTCERTOCCUPANTCERTOCCUPANTCERTOCC"))
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	keys := func() int {
+		t.Helper()
+		var n int
+		if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
+			return c.QueryRow(ctx, `SELECT count(*) FROM asset_identity_keys WHERE tenant_id = $1 AND valid_to IS NULL AND strength >= 2`,
+				c.Tenant().UUID()).Scan(&n)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if got := keys(); got != 1 {
+		t.Fatalf("%d keys after the occupant, want 1", got)
+	}
+	// The newcomer at the same address: a different certificate and an sshd,
+	// on two distinct scans, so a recorded key would have two sightings.
+	for i := 1; i <= 2; i++ {
+		s.nextScan(t, db)
+		at := first.Add(time.Duration(i) * 30 * time.Minute)
+		s.observe(t, db, at, tlsService("10.10.0.30", 443, "SHA256:NEWCOMERCERTNEWCOMERCERTNEWCOMERCERTNEWC"))
+		s.observe(t, db, at, sshService("10.10.0.30", 22, "SHA256:NEWCOMERSSHNEWCOMERSSHNEWCOMERSSHNEWCOME"))
+		if err := c.SweepOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := keys(); got != 1 {
+		t.Fatalf("%d live keys after an uncorroborated contradicted attach, want 1: the newcomer's host key must not land on the occupant", got)
+	}
+	var fps []string
+	if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
+		var err error
+		fps, err = (store.AssetIdentityKeys{}).SSHHostKeyFingerprintsAt(ctx, c, "10.10.0.30", 22, store.SightingWindow)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fps) != 0 {
+		t.Fatalf("trust root at the occupant's address = %v, want none", fps)
+	}
+}
+
+// ADR-094: a corroborated contradiction is a renewal. A host with a steady SSH
+// key whose certificate changes keeps attaching, the old certificate is
+// retired, the new one recorded — so the renewal survives the host's next
+// address change (the new certificate carries the merge with the host key).
+func TestACorroboratedRenewalRetiresTheOldCertificate(t *testing.T) {
+	db := testDB(t)
+	s := seed(t, db, "renewal")
+	c := correlate.New(db, quietLogger())
+	ctx := context.Background()
+	first := time.Now().UTC().Add(-2 * time.Hour)
+	const (
+		hostKey = "SHA256:STEADYSTEADYSTEADYSTEADYSTEADYSTEADYSTEA"
+		oldCert = "SHA256:OLDCERTOLDCERTOLDCERTOLDCERTOLDCERTOLDCE"
+		newCert = "SHA256:NEWCERTNEWCERTNEWCERTNEWCERTNEWCERTNEWCE"
+	)
+	s.observe(t, db, first, sshService("10.10.0.40", 22, hostKey))
+	s.observe(t, db, first, tlsService("10.10.0.40", 443, oldCert))
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A second scan establishes the host key at the address: corroboration
+	// must itself be established (two distinct scans), or a key planted on
+	// one scan would corroborate its planter's certificate the next.
+	s.nextScan(t, db)
+	s.observe(t, db, first.Add(15*time.Minute), sshService("10.10.0.40", 22, hostKey))
+	s.observe(t, db, first.Add(15*time.Minute), tlsService("10.10.0.40", 443, oldCert))
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Renewal, on a third scan.
+	s.nextScan(t, db)
+	second := first.Add(30 * time.Minute)
+	s.observe(t, db, second, sshService("10.10.0.40", 22, hostKey))
+	s.observe(t, db, second, tlsService("10.10.0.40", 443, newCert))
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	live := func(value string) bool {
+		t.Helper()
+		var n int
+		if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
+			return c.QueryRow(ctx, `SELECT count(*) FROM asset_identity_keys WHERE tenant_id = $1 AND key_value = $2 AND valid_to IS NULL`,
+				c.Tenant().UUID(), value).Scan(&n)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
+	}
+	if got := assetCount(t, db, s.tenant); got != 1 {
+		t.Fatalf("%d assets after a renewal, want 1", got)
+	}
+	if live(oldCert) || !live(newCert) {
+		t.Fatalf("after a corroborated renewal: old live=%v new live=%v, want old retired and new recorded", live(oldCert), live(newCert))
+	}
+	// The host moves: the steady key and the NEW certificate carry the merge.
+	s.nextScan(t, db)
+	third := second.Add(30 * time.Minute)
+	s.observe(t, db, third, sshService("10.10.0.41", 22, hostKey))
+	s.observe(t, db, third, tlsService("10.10.0.41", 443, newCert))
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := assetCount(t, db, s.tenant); got != 1 {
+		t.Fatalf("%d assets after the move, want 1: the renewed certificate must be merge evidence", got)
+	}
+}
+
+// ADR-094: corroboration must be ESTABLISHED. A newcomer that plants its host
+// key on one scan (no TLS, so nothing contradicts) and presents that key plus
+// its own certificate on the next must not corroborate its own certificate
+// with the key it planted: the occupant's certificate stays, the newcomer's
+// is not recorded.
+func TestAPlantedKeyCannotCorroborateItsPlantersCertificate(t *testing.T) {
+	db := testDB(t)
+	s := seed(t, db, "planted")
+	c := correlate.New(db, quietLogger())
+	ctx := context.Background()
+	first := time.Now().UTC().Add(-2 * time.Hour)
+	const (
+		occupantCert = "SHA256:OCCUPANTCERTOCCUPANTCERTOCCUPANTCERTOCC"
+		plantedSSH   = "SHA256:PLANTEDSSHPLANTEDSSHPLANTEDSSHPLANTEDSS"
+		newcomerCert = "SHA256:NEWCOMERCERTNEWCOMERCERTNEWCOMERCERTNEWC"
+	)
+	s.observe(t, db, first, tlsService("10.10.0.50", 443, occupantCert))
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Scan 1: the plant — an sshd only, contradicting nothing.
+	s.nextScan(t, db)
+	s.observe(t, db, first.Add(30*time.Minute), sshService("10.10.0.50", 22, plantedSSH))
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Scan 2: the planted key "agrees"; the newcomer's certificate contradicts.
+	s.nextScan(t, db)
+	s.observe(t, db, first.Add(60*time.Minute), sshService("10.10.0.50", 22, plantedSSH))
+	s.observe(t, db, first.Add(60*time.Minute), tlsService("10.10.0.50", 443, newcomerCert))
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	live := func(value string) bool {
+		t.Helper()
+		var n int
+		if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
+			return c.QueryRow(ctx, `SELECT count(*) FROM asset_identity_keys WHERE tenant_id = $1 AND key_value = $2 AND valid_to IS NULL`,
+				c.Tenant().UUID(), value).Scan(&n)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
+	}
+	if !live(occupantCert) || live(newcomerCert) {
+		t.Fatalf("occupant cert live=%v newcomer cert live=%v; a key planted one scan earlier must not corroborate its planter's certificate",
+			live(occupantCert), live(newcomerCert))
 	}
 }

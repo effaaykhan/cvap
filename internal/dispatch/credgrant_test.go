@@ -22,10 +22,18 @@ import (
 
 // hostJobSeed controls what a credentialed-host job is seeded with.
 type hostJobSeed struct {
-	profile      bool   // authorise an ssh profile on the policy at all
-	username     string // profile username ("" = none)
-	knownHosts   string // operator-pinned lines ("" = none)
-	observedKey  string // an ssh_hostkey fingerprint on the asset at the target ("" = none)
+	profile     bool   // authorise an ssh profile on the policy at all
+	username    string // profile username ("" = none)
+	knownHosts  string // operator-pinned lines ("" = none)
+	observedKey string // an ssh_hostkey fingerprint on the asset at the target ("" = none)
+	// seenOnce records observedKey with ONE sighting at the target: inventory,
+	// not trust material (ADR-094). Default is two. Provenance is held constant
+	// (new_asset) so the sighting count is the only thing that varies — it is
+	// the count, not the verdict that recorded the key, that decides trust.
+	seenOnce bool
+	// secondKey seeds a SECOND distinct host key at the target with two
+	// sightings on 22: the handover signature, which must refuse (ADR-094).
+	secondKey    string
 	secretRef    string
 	target       string
 	reassignSafe bool
@@ -112,9 +120,29 @@ func seedHostJob(t *testing.T, db *store.DB, tenant store.TenantID, seed hostJob
 				return err
 			}
 			if _, err := c.Exec(ctx,
-				`INSERT INTO asset_identity_keys (tenant_id, asset_id, key_type, key_value, strength)
-				 VALUES ($1,$2,'ssh_hostkey',$3,2)`, tid, assetID, seed.observedKey); err != nil {
+				`WITH k AS (
+				   INSERT INTO asset_identity_keys (tenant_id, asset_id, key_type, key_value, strength, provenance,
+				                                    merge_evidence_observation, merge_evidence_payload)
+				   VALUES ($1,$2,'ssh_hostkey',$3,2,'new_asset',
+				           gen_random_uuid(), '{"port":22,"protocol":"tcp"}'::jsonb)
+				   RETURNING identity_key_id)
+				 INSERT INTO asset_identity_key_sightings (tenant_id, identity_key_id, address, port, scans_seen, last_seen_scan, last_seen_at)
+				 SELECT $1, identity_key_id, $5::inet, 22, CASE WHEN $4::bool THEN 1 ELSE 2 END, gen_random_uuid(), now() FROM k`,
+				tid, assetID, seed.observedKey, seed.seenOnce, seed.target); err != nil {
 				return err
+			}
+			if seed.secondKey != "" {
+				if _, err := c.Exec(ctx,
+					`WITH k AS (
+					   INSERT INTO asset_identity_keys (tenant_id, asset_id, key_type, key_value, strength, provenance,
+					                                    merge_evidence_observation, merge_evidence_payload)
+					   VALUES ($1,$2,'ssh_hostkey',$3,2,'attach',gen_random_uuid(),'{"port":22,"protocol":"tcp"}'::jsonb)
+					   RETURNING identity_key_id)
+					 INSERT INTO asset_identity_key_sightings (tenant_id, identity_key_id, address, port, scans_seen, last_seen_scan, last_seen_at)
+					 SELECT $1, identity_key_id, $4::inet, 22, 2, gen_random_uuid(), now() FROM k`,
+					tid, assetID, seed.secondKey, seed.target); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -382,6 +410,15 @@ func TestHostJobIsRefusedRatherThanDispatchedUncredentialed(t *testing.T) {
 		{"no ssh profile authorised", hostJobSeed{profile: false, observedKey: seedFingerprint}, true, "authorises no ssh credential profile"},
 		{"profile without a username", hostJobSeed{profile: true, observedKey: seedFingerprint}, true, "has no username"},
 		{"no observed key and no operator pin", hostJobSeed{profile: true, username: "lab"}, true, "trust-on-first-use is not permitted"},
+		// ADR-094: a key is trust material at an address only once two distinct
+		// scans have seen it there. One sighting is trust-on-first-use by another
+		// name, and the refusal is the same one — from Core's side there is no
+		// observed key.
+		// ADR-094: two distinct host keys both qualifying at one address and port
+		// is the handover signature; whichever machine answers would be accepted.
+		{"two host keys qualify at the target", hostJobSeed{profile: true, username: "lab", observedKey: seedFingerprint,
+			secondKey: "SHA256:" + strings.Repeat("B", 43)}, true, "distinct ssh host keys qualify"},
+		{"key seen once at the target", hostJobSeed{profile: true, username: "lab", observedKey: seedFingerprint, seenOnce: true}, true, "trust-on-first-use is not permitted"},
 		{"no secret resolver configured", hostJobSeed{profile: true, username: "lab", observedKey: seedFingerprint}, false, "no secret resolver configured"},
 		{"operator pin does not cover the target", hostJobSeed{profile: true, username: "lab", observedKey: seedFingerprint,
 			knownHosts: "10.0.0.1 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBjx8vfRme9HSuAOm1/KN4LFQIKzNY9OBoETspqHOxwx other\n"}, true, "has no line for task"},

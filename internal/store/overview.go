@@ -253,6 +253,12 @@ func (Findings) Stats(ctx context.Context, c *Conn, since, now time.Time, days i
 
 // CountUnresolved counts accepted observations correlation has not attached to
 // an asset, inside a window (observations is partitioned by observed_at).
+//
+// Deliberately WITHOUT ListUnresolved's queue anti-join (ADR-094): an
+// observation parked behind a pending resolution item is still uncorrelated
+// and must stay counted. This is the one number on Health that moves when a
+// host rotates its key and is parked (B41), so "make it consistent with
+// ListUnresolved" would delete the only signal of that until B39 lands.
 func (Observations) CountUnresolved(ctx context.Context, c *Conn, since, until time.Time) (int64, error) {
 	const q = `
 		SELECT count(*) FROM observations

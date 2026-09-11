@@ -58,6 +58,12 @@ The first task of the session is to write this up as the placement ADR, then bui
 Session 40 built and proved the security core (the agent/signing proxy, ADR-086), the credentialed
 matching (exact-version, EVR-correct after the B26 fix), rpm-in-situ, and the per-host FP numbers
 (0% credentialed; .146 OpenSSH 16 to 0) — but via the cvap-credscan instrument, not the fleet path.
+
+**Restated after S42 (ADR-093/094):** the fleet path ran and the sixteen closed through it, but ground
+truth on the hosts found 551 false kernel findings on `.146` — a stale ABI's packages collapse to the
+source name `linux` and the matcher cannot see which kernel runs (B36). The headline is **0% credentialed
+FP on the measured set with the kernel class excluded and named**; it is 0% only for packages whose
+installed version is unambiguous, and B36 sits ahead of anything that consumes credentialed findings.
 The fleet engine increment remains: cvap-engine-credhost emitting package observations,
 credential-grant delivery through dispatch, and correlation consuming those observations to activate
 ADR-077's dormant precedence and drive the supersession lifecycle.

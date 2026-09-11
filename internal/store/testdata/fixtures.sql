@@ -168,9 +168,16 @@ BEGIN
         VALUES (p_tenant, v_asset, '192.0.2.5', '02:00:00:00:00:01');
 
     INSERT INTO asset_identity_keys (tenant_id, asset_id, key_type, key_value, strength,
-                                     merge_evidence_observation, merge_evidence_payload)
+                                     merge_evidence_observation, merge_evidence_payload,
+                                     provenance)
         VALUES (p_tenant, v_asset, 'ssh_hostkey', 'SHA256:fixture-' || p_tag, 2,
-                v_obs, '{"copied_at_merge":true}'::jsonb);
+                v_obs, '{"copied_at_merge":true}'::jsonb, 'new_asset');
+
+    -- ADR-094: the sightings table is tenant-scoped too; one row so the RLS
+    -- sweep sees it populated.
+    INSERT INTO asset_identity_key_sightings (tenant_id, identity_key_id, address, port, scans_seen, last_seen_scan, last_seen_at)
+        SELECT p_tenant, identity_key_id, '192.0.2.5', 22, 2, gen_random_uuid(), now()
+          FROM asset_identity_keys WHERE tenant_id = p_tenant AND asset_id = v_asset;
 
     INSERT INTO services (tenant_id, asset_id, port, protocol, service_name, product, version, version_confidence)
         VALUES (p_tenant, v_asset, 22, 'tcp', 'ssh', 'OpenSSH', '8.9p1', 0.900);

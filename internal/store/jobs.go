@@ -532,6 +532,20 @@ func (Jobs) ReconcileTasksWithResults(ctx context.Context, c *Conn, jobID uuid.U
 	return mapError(err)
 }
 
+// ScanIDForTask names the scan a task belongs to — the OCCASION an identity
+// key sighting is counted on (ADR-094).
+func (Jobs) ScanIDForTask(ctx context.Context, c *Conn, taskID uuid.UUID) (uuid.UUID, error) {
+	const q = `
+		SELECT j.scan_id FROM scan_tasks t
+		  JOIN scan_jobs j ON j.tenant_id = t.tenant_id AND j.job_id = t.job_id
+		 WHERE t.tenant_id = $1 AND t.task_id = $2`
+	var id uuid.UUID
+	if err := c.QueryRow(ctx, q, c.Tenant().UUID(), taskID).Scan(&id); err != nil {
+		return uuid.Nil, mapError(err)
+	}
+	return id, nil
+}
+
 // MaxAttempts bounds how often one job may be re-queued.
 //
 // attempt was incremented and never read, so a reassign_safe job that kept

@@ -13,8 +13,10 @@
 //   - operator: lines pinned on the credential profile (migration 0042). A trust
 //     root the operator chose, independent of what discovery saw.
 //   - observed: the SHA256 fingerprint discovery captured for the target
-//     (asset_identity_keys, key_type = 'ssh_hostkey'). What CVAP itself has seen
-//     the host present, unauthenticated, on an earlier scan.
+//     (asset_identity_keys, key_type = 'ssh_hostkey'), seen at that address on
+//     TWO DISTINCT earlier scans and on the port the engine dials (ADR-094,
+//     asset_identity_key_sightings). What CVAP itself has seen the host present,
+//     unauthenticated — twice, not once.
 //
 // Trust-on-first-use is not a source. A job with no material from either source
 // is refused before an engine exists, and the engine refuses again if handed

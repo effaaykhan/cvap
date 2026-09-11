@@ -29,7 +29,7 @@ Rules:
   finding status, not by time.
 - Large evidence goes to the object store; the row holds a summary and a pointer (ADR-015).
 
-Eighteen tables in the schema are not drawn in the v2 ERD. They are required, and ADR-029
+Nineteen tables in the schema are not drawn in the v2 ERD. They are required, and ADR-029
 records why, so they do not read as inventions when you diff schema against diagram:
 `result_submissions` (ADR-026's idempotency ledger — `observations.submission_id` has no FK
 target without it), `asset_resolution_queue` (ADR-007's unresolved merge queue),
@@ -42,7 +42,9 @@ target without it), `asset_resolution_queue` (ADR-007's unresolved merge queue),
 (the product→package map for release resolution, migration 0035 — recorded in ADR-064),
 `release_coverage` (per-release advisory coverage window, migration 0036 — the sixteenth,
 recorded in ADR-067), and `kev`/`epss` (the CISA KEV and FIRST EPSS risk feeds, migration 0037 —
-the seventeenth and eighteenth, recorded in ADR-069).
+the seventeenth and eighteenth, recorded in ADR-069), and `asset_identity_key_sightings` (distinct
+scans that saw an identity key at an address — the ADR-091 observed trust root's count, migration
+0044 — the nineteenth, recorded in ADR-094).
 
 That list is ADR-029's to hold, not this file's — a tenth table belongs in the ADR, and this
 paragraph should be updated from it rather than the other way round. It said "four" for two

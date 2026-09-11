@@ -15,6 +15,7 @@ import (
 	scanpointv1 "github.com/effaaykhan/cvap/gen/cybersentinel/scanpoint/v1"
 	"github.com/effaaykhan/cvap/internal/credsource"
 	"github.com/effaaykhan/cvap/internal/hostkeytrust"
+	"github.com/effaaykhan/cvap/internal/sshalgo"
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
@@ -233,13 +234,24 @@ func (s *Service) trustMaterial(ctx context.Context, c *store.Conn, profile *sto
 			return "", "", fmt.Errorf("%w: task %s target %q is not an address, and no operator-pinned known_hosts covers it",
 				errCredentialRefused, t.ID, t.TaskTarget)
 		}
-		fps, err := (store.AssetIdentityKeys{}).SSHHostKeyFingerprintsAt(ctx, c, addr.String())
+		// The port the engine dials. No job names one today (credhost's
+		// Config.Port is never set), so this constant IS the engine's port;
+		// the day an assignment carries a port, this must follow it or the
+		// verification fails closed against the wrong service's key (ADR-094).
+		fps, err := (store.AssetIdentityKeys{}).SSHHostKeyFingerprintsAt(ctx, c, addr.String(), sshalgo.DefaultPort, store.SightingWindow)
 		if err != nil {
 			return "", "", err
 		}
 		if len(fps) == 0 {
-			return "", "", fmt.Errorf("%w: no observed ssh host key for task %s target %q and no operator-pinned known_hosts; trust-on-first-use is not permitted",
+			return "", "", fmt.Errorf("%w: no ssh host key seen at task %s target %q on two distinct scans (ADR-094) and no operator-pinned known_hosts; trust-on-first-use is not permitted",
 				errCredentialRefused, t.ID, t.TaskTarget)
+		}
+		if len(fps) > 1 {
+			// Two distinct host keys qualifying at one address and port is
+			// the handover signature itself (ADR-094): whichever machine
+			// answers would be accepted. Refuse rather than compose two lines.
+			return "", "", fmt.Errorf("%w: %d distinct ssh host keys qualify at task %s target %q on the dialled port; two hosts have been seen there and neither is trusted",
+				errCredentialRefused, len(fps), t.ID, t.TaskTarget)
 		}
 		for _, fp := range fps {
 			if !fingerprintShape.MatchString(fp) {

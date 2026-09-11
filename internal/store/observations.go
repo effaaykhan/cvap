@@ -259,6 +259,17 @@ func (Observations) ListUnresolved(ctx context.Context, c *Conn, since, until ti
 		     AND observed_at >= $2 AND observed_at < $3
 		     AND asset_id IS NULL
 		     AND ingest_state = 'accepted'
+		     -- An observation an operator has been asked to adjudicate waits
+		     -- for the answer (ADR-094). Re-sweeping it every 30 s re-raised
+		     -- the same queue item and, grouped with every later observation
+		     -- at its address, contested each of those too — one handover
+		     -- froze the address until the row aged out. It comes back the
+		     -- moment its queue item is resolved.
+		     AND NOT EXISTS (
+		         SELECT 1 FROM asset_resolution_queue q
+		          WHERE q.tenant_id = observations.tenant_id
+		            AND q.observation_id = observations.observation_id
+		            AND q.state = 'pending')
 		   ORDER BY observed_at
 		   LIMIT $4`
 

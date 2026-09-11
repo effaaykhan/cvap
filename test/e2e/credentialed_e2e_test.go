@@ -248,8 +248,13 @@ func (h *harness) seedCredentialed(keyPath, fingerprint string) {
 			return err
 		}
 		_, err := c.Exec(ctx,
-			`INSERT INTO asset_identity_keys (tenant_id, asset_id, key_type, key_value, strength)
-			 VALUES ($1,$2,'ssh_hostkey',$3,2)`, tid, assetID, fingerprint)
+			`WITH k AS (
+			   INSERT INTO asset_identity_keys (tenant_id, asset_id, key_type, key_value, strength, provenance,
+			                                    merge_evidence_observation, merge_evidence_payload)
+			   VALUES ($1,$2,'ssh_hostkey',$3,2,'new_asset',gen_random_uuid(),'{"port":22,"protocol":"tcp"}'::jsonb)
+			   RETURNING identity_key_id)
+			 INSERT INTO asset_identity_key_sightings (tenant_id, identity_key_id, address, port, scans_seen, last_seen_scan, last_seen_at)
+			 SELECT $1, identity_key_id, $4::inet, 22, 2, gen_random_uuid(), now() FROM k`, tid, assetID, fingerprint, labSSHAddr)
 		return err
 	}); err != nil {
 		h.t.Fatalf("seed credentialed: %v", err)

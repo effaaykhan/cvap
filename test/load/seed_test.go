@@ -120,8 +120,8 @@ func seedSynthetic(t *testing.T, db *store.DB, tenant store.TenantID, o seedOpts
 		}
 	}
 	insertBatched(t, db, tenant, len(kAsset), 5000, func(lo, hi int) (string, []any) {
-		return `INSERT INTO asset_identity_keys (tenant_id, asset_id, key_type, key_value, strength)
-		        SELECT $1, unnest($2::uuid[]), unnest($3::identity_key_type[]), unnest($4::text[]), 2`,
+		return `INSERT INTO asset_identity_keys (tenant_id, asset_id, key_type, key_value, strength, provenance)
+		        SELECT $1, unnest($2::uuid[]), unnest($3::identity_key_type[]), unnest($4::text[]), 2, 'new_asset'`,
 			[]any{tenant.UUID(), kAsset[lo:hi], kType[lo:hi], kValue[lo:hi]}
 	})
 

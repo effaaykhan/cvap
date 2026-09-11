@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -301,11 +302,33 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 			// Never a guess. Conflicting or ambiguous evidence is an operator's
 			// decision, and the evidence is copied into the queue so the item
 			// outlives the observation partition that raised it.
+			//
+			// The WHOLE host group is parked, not only the observation that
+			// carried the contested key (ADR-094): a newcomer on a reused
+			// lease also answers on ports that carry no key, and an
+			// observation left unparked re-groups alone next sweep, finds only
+			// the address, and attaches — writing the newcomer's services and
+			// findings onto the previous occupant's asset through the back
+			// door. Every observation gets an item naming it, so ListUnresolved
+			// parks all of them until the adjudication.
+			carried := map[uuid.UUID]bool{}
 			for _, k := range h.keys {
-				if k.Type.Strength() == 0 {
+				if k.Type.Strength() == 0 || k.ObservationID == uuid.Nil {
 					continue
 				}
+				carried[k.ObservationID] = true
 				if err := (store.ResolutionQueue{}).Enqueue(ctx, conn, v, k, now); err != nil {
+					return err
+				}
+			}
+			for _, o := range h.obs {
+				if carried[o.ID] {
+					continue
+				}
+				if err := (store.ResolutionQueue{}).Enqueue(ctx, conn, v, domain.IdentityKey{
+					Type: domain.KeyIPWindow, Value: h.address, Source: "net",
+					ObservationID: o.ID, Payload: o.Payload,
+				}, now); err != nil {
 					return err
 				}
 			}
@@ -338,50 +361,134 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		// ADR-093): an intrusive fingerprint pass captured their ed25519 keys,
 		// the observations attached by address, and asset_identity_keys stayed
 		// empty — so the credentialed engine had nothing observed to verify
-		// against. A key any OTHER live asset held would have made this a merge
-		// or a queue rather than an attach, and Record's ON CONFLICT keeps such
-		// a key where it is. What an attach must NOT do is add a key that
-		// contradicts one the target asset already holds from the same service:
-		// that is the address-handover shape (a different host on a reused
-		// DHCP lease), which domain.Resolve attaches because nothing agrees and
-		// one moderate key alone decides nothing (ADR-007). Recording the
-		// newcomer's key there would leave one asset holding two hosts' SSH
-		// keys, and ADR-091's observed-trust set for that address would accept
-		// either — a credential presented to whichever machine answers. So a
-		// contradicting key is left unrecorded and logged; the newcomer keeps
-		// attaching by address exactly as it did before keys were recorded on
-		// attach at all. Deciding that shape properly is a domain rule, not a
-		// recording rule, and is B37.
+		// against. Which verdict recorded a key is kept with it as provenance
+		// (ADR-094), for the audit trail only: whatever recorded it, a key is
+		// trust material for ADR-091's observed path at an address only once
+		// two distinct SCANS have seen it there — first sight is not an
+		// enrolment, whether it came from an attach or a new asset. An SSH
+		// host key that contradicts what the asset holds FROM THE SAME SERVICE
+		// never reaches here: that is an address handover, and domain.Resolve
+		// queues it (ADR-094) rather than attaching — the rule lives in
+		// domain, where the next caller cannot forget it. A contradicting
+		// certificate DOES reach here (a renewal is the same host) and is
+		// carried in v.Contradicted, which the attach branch skips. A key from a different service
+		// (a second sshd on 2222 beside the one on 22) contradicts nothing,
+		// is recorded as inventory, and is trust material for no port but its
+		// own. The sighting's occasion is the SCAN the observation came from,
+		// and it is counted at the ADDRESS it came from (ADR-094).
+		scanFor := func(k domain.IdentityKey) (uuid.UUID, error) {
+			for _, o := range h.obs {
+				if o.ID == k.ObservationID {
+					return (store.Jobs{}).ScanIDForTask(ctx, conn, o.TaskID)
+				}
+			}
+			return uuid.Nil, nil
+		}
+		// A key the verdict marked CONTRADICTED (a renewed certificate against
+		// the one held, ADR-094) is recorded by the corroborated block below,
+		// after the held one is retired, so the two never sit side by side as
+		// merge evidence — and never by the plain loop.
+		contradicted := func(k domain.IdentityKey) bool {
+			for _, x := range v.Contradicted {
+				if x.Type == k.Type && x.Value == k.Value && x.Source == k.Source {
+					return true
+				}
+			}
+			return false
+		}
 		if v.Decision == domain.DecisionMerge || v.Decision == domain.DecisionNewAsset {
+			from := store.KeyFromMerge
+			if v.Decision == domain.DecisionNewAsset {
+				from = store.KeyFromNewAsset
+			}
 			for _, k := range v.Agreeing {
-				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, now); err != nil {
+				scanID, err := scanFor(k)
+				if err != nil {
+					return err
+				}
+				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, h.seenAt, from, scanID, h.address, portOf(k.Source)); err != nil {
 					return err
 				}
 			}
 		}
-		if v.Decision == domain.DecisionNewAsset || v.Decision == domain.DecisionAttach {
-			var held []domain.IdentityKey
-			if v.Decision == domain.DecisionAttach {
-				var err error
-				if held, err = (store.AssetIdentityKeys{}).ForAsset(ctx, conn, assetID); err != nil {
+		// An attach that carries a contradiction records NOTHING unless
+		// something else agreed (ADR-094): a different host wearing a TLS
+		// host's address, with a new certificate and its own sshd, would
+		// otherwise ride the forgiven certificate in — its host key recorded
+		// on the occupant's asset, two scans later the occupant's trust root
+		// (the review measured exactly that). With corroboration — the
+		// asset's own steady host key agreed — the contradiction is a
+		// renewal: the held certificate is retired and the new one recorded,
+		// so the renewal survives the host's next address change.
+		//
+		// "Agreed" is not enough: the corroborating key must be ESTABLISHED at
+		// this address — two distinct scans, like the trust root — because an
+		// attach can write what the asset holds, and a key planted one scan
+		// earlier would corroborate its planter's certificate the next. The
+		// read happens before this sweep records anything, so this scan's own
+		// sighting cannot count. An observed SSH host key is a public value
+		// (the fingerprint probe verifies no signature), so even established
+		// corroboration is an echo, not a proof: it raises the cost to
+		// knowing the host key AND holding the address across scans.
+		established := false
+		if len(v.Contradicted) > 0 {
+			for _, k := range v.Corroborated {
+				ok, err := (store.AssetIdentityKeys{}).EstablishedAt(ctx, conn, assetID, k, h.address, portOf(k.Source), store.SightingWindow)
+				if err != nil {
 					return err
 				}
+				if ok {
+					established = true
+					break
+				}
+			}
+		}
+		uncorroborated := len(v.Contradicted) > 0 && !established
+		if uncorroborated {
+			c.log.WarnContext(ctx, "contradiction with no established corroboration; no key recorded",
+				slog.String("asset_id", assetID.String()),
+				slog.String("address", h.address),
+				slog.Any("decision", v.Decision),
+				slog.Int("contradicted", len(v.Contradicted)))
+		}
+		// Corroborated on either verdict — an attach the asset's own key
+		// agreed with, or a merge — the renewal is applied: the held key of
+		// that type on that port is retired and the renewed one recorded.
+		if len(v.Contradicted) > 0 && established {
+			from := store.KeyFromAttach
+			if v.Decision == domain.DecisionMerge {
+				from = store.KeyFromMerge
+			}
+			for _, k := range v.Contradicted {
+				if _, err := (store.AssetIdentityKeys{}).Retire(ctx, conn, assetID, k.Type, portOf(k.Source), h.seenAt); err != nil {
+					return err
+				}
+				scanID, err := scanFor(k)
+				if err != nil {
+					return err
+				}
+				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, h.seenAt, from, scanID, h.address, portOf(k.Source)); err != nil {
+					return err
+				}
+			}
+		}
+		if (v.Decision == domain.DecisionNewAsset || v.Decision == domain.DecisionAttach) && !uncorroborated {
+			from := store.KeyFromNewAsset
+			if v.Decision == domain.DecisionAttach {
+				from = store.KeyFromAttach
 			}
 			for _, k := range h.keys {
 				if k.Type.Strength() < 2 {
 					continue // weak keys are the address, held below
 				}
-				if other, contradicts := contradictsHeld(held, k); contradicts {
-					c.log.WarnContext(ctx, "attach: observed key contradicts the asset's held key; not recorded",
-						slog.String("asset_id", assetID.String()),
-						slog.String("address", h.address),
-						slog.String("key_type", string(k.Type)),
-						slog.String("source", k.Source),
-						slog.String("held", other.Value),
-						slog.String("observed", k.Value))
-					continue
+				if contradicted(k) {
+					continue // recorded above, after the held one was retired
 				}
-				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, now); err != nil {
+				scanID, err := scanFor(k)
+				if err != nil {
+					return err
+				}
+				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, h.seenAt, from, scanID, h.address, portOf(k.Source)); err != nil {
 					return err
 				}
 			}
@@ -823,15 +930,16 @@ func normaliseOSService(service string) string {
 	}
 }
 
-// contradictsHeld reports whether an observed key differs from a key the asset
-// already holds of the same type FROM THE SAME SERVICE — the same rule
-// domain.compare uses for a contradiction, so a host with two certificates on
-// two ports does not contradict itself, and a rotated key on one port does.
-func contradictsHeld(held []domain.IdentityKey, k domain.IdentityKey) (domain.IdentityKey, bool) {
-	for _, h := range held {
-		if h.Type == k.Type && h.Source == k.Source && h.Value != k.Value {
-			return h, true
-		}
+// portOf reads the port from a key's source ("22/tcp"); 0 when there is none,
+// which Record treats as "no occasion to count".
+func portOf(source string) int {
+	i := strings.IndexByte(source, '/')
+	if i <= 0 {
+		return 0
 	}
-	return domain.IdentityKey{}, false
+	n, err := strconv.Atoi(source[:i])
+	if err != nil || n <= 0 || n > 65535 {
+		return 0
+	}
+	return n
 }

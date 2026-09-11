@@ -23,7 +23,7 @@ agent memory until now.
 | Phase 2 — discovery, fingerprint, resolution, findings, UI, hardening | Weeks 4–8 | 12–23 | complete (closed S23) |
 | Phase 2 validation — real-network accuracy | S24 | 24 | done; P3.3 entry condition measured & **failed** (ADR-060), then met by S26–S31 |
 | Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–37 | **COMPLETE (close-out S37).** P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ · B29 coverage window (S33) ✅ · P3.4 KEV/EPSS model + ingestion (S34) ✅ · advisory→finding path (S34b, ADR-070) ✅ · confidence by weakest link (S34c/d, ADR-072/073) ✅ · P3.4 ordering acceptance on real findings (S36) ✅ · #6 exposure resolved (S37, ADR-074) ✅ — the chain closes, produces real CVE-linked findings, and orders them by priority (see "What Phase 3 changed", §2). Ceiling is the banner-inferred package identity. Next: enterprise console (#12, designed S37); the Phase 4 credentialed-vs-widen decision (S38, `docs/phase-4-sequencing-decision.md`) is the operator's |
-| Phase 4 — credentialed assessment | §7 path-to-sellable | narrow slice next (decided S38, ADR-075) | **Decided: a NARROW credentialed slice next** — Linux/SSH, package inventory, one VM — as a *validation instrument* (generates the real-host ground truth the §6.2 accuracy gates need; closes B26 if Rocky/Alma; removes B30 for credentialed hosts). Operator overruled the memo's console/B28-first ordering (ADR-075). Full Phase 4 (Windows/WinRM/domain) stays held; reach reasoning preserved. |
+| Phase 4 — credentialed assessment | §7 path-to-sellable | narrow slice next (decided S38, ADR-075) | **Decided: a NARROW credentialed slice next** — Linux/SSH, package inventory, one VM — as a *validation instrument* (generates the real-host ground truth the §6.2 accuracy gates need; closes B26 if Rocky/Alma; removes B30 for credentialed hosts). Operator overruled the memo's console/B28-first ordering (ADR-075). Full Phase 4 (Windows/WinRM/domain) stays held; reach reasoning preserved. **S39–S42:** the slice landed and ran on the production route (ADR-076–094): grant over the wire, observed trust, exact inventory, supersession — `.146`'s sixteen closed live. Headline as of S42: **credentialed FP 0% on the measured set, kernel class excluded and named** — 551 false kernel findings on a host at the fix, from the matcher not seeing which kernel runs (B36, ahead of any consumer of credentialed findings). |
 
 Weeks and sessions are not one-to-one. The eight-week plan assumed a team; this
 build is sequential under one operator with Claude Code, so a "week" of the plan
@@ -1019,6 +1019,31 @@ instrument's writes to the persistent store as a hazard for the *next* session, 
 harness that proves a path by writing the same rows the path writes leaves behind a state that makes
 the production path's first real run unmeasurable. ([[test-that-proves-nothing]] fifth shape: the
 acceptance is already true; [[measure-dont-read]] applied to the *precondition*, not the result.)
+
+### 5.14 A gate that reports success for work it did not do — the bare `go test ./...`
+
+**What happened (S42).** I reported "full suite exit 0" and two new integration tests "passing" after a bare
+`go test ./...`. Every database-backed suite in the tree skips when `CVAP_TEST_DATABASE_URL` is unset, and
+`go test` prints `ok` for a package of skips — 0.004 s for a package that opens Postgres. The tests had not
+run. The real runs went through `make store-test`, which exports the URL from `.env`, and the first one
+failed on a NOT NULL the skipped run could never have seen. Caught in-session; the claim was corrected in
+the same report that had made it.
+
+**Why it is its own pattern — and the same family as 5.3 and the mutation baseline.** The corpus revert
+(§5.3) passed a content-agnostic suite; the mutation framework once reported green on an empty baseline
+(MUTANT EMPTY read as "no tests ran", commit 1df6b0d); this is a runner reporting success for suites it
+skipped. All three are a gate whose green means "nothing failed", not "the thing was checked". The tell
+is always the same: the run was too fast, or the count did not move.
+
+**Does any earlier claim rest on it?** Checked: no session note, ADR or commit message in the tree claims
+a full pass on the strength of a bare `go test ./...` — the recorded gates are `make ci`, `make store-test`,
+`make mutate`, `make safety` and CI. The S42 claim was the first, and it is corrected here rather than only
+noted forward.
+
+**How to apply.** A sub-second `ok` on a package that opens a database is a skip. Run the DB suites through
+`make store-test` (narrow with `DB_TEST_PKGS=…`) or `make ci`; `-v | grep SKIP` when in doubt. Never
+report a suite green without naming the command that ran it. ([[gate-before-push]]; [[test-that-proves-
+nothing]] shape 3, the fixture the assertion needs is unreachable.)
 
 ---
 
