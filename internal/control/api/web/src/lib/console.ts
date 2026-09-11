@@ -143,3 +143,48 @@ export function trendGeometry(points: TrendPoint[], width: number, height: numbe
   const area = n ? `${open} L${x(n - 1).toFixed(1)},${(height - pad).toFixed(1)} L${x(0).toFixed(1)},${(height - pad).toFixed(1)} Z` : "";
   return { open, kev: line((p) => p.kev), area, max, xs: points.map((_, i) => x(i)), ys: points.map((p) => y(p.open)) };
 }
+
+// ---- chart geometry, pure ---------------------------------------------------
+
+// A stacked horizontal bar: each segment's width as a percentage of the total,
+// never summing past 100, with a zero total drawing nothing rather than NaN.
+export type Segment = { key: string; value: number; pct: number };
+export function stackSegments(entries: Array<[string, number]>): { total: number; segments: Segment[] } {
+  const total = entries.reduce((n, [, v]) => n + Math.max(0, v), 0);
+  const segments = entries
+    .filter(([, v]) => v > 0)
+    .map(([key, value]) => ({ key, value, pct: total ? (100 * value) / total : 0 }));
+  return { total, segments };
+}
+
+// A sparkline path over a value series in a box, baseline at the bottom.
+export function sparkPath(values: number[], width: number, height: number): { line: string; area: string; last: { x: number; y: number } | null } {
+  const n = values.length;
+  if (n === 0) return { line: "", area: "", last: null };
+  const max = Math.max(1, ...values);
+  const x = (i: number) => (n === 1 ? width / 2 : (i * width) / (n - 1));
+  const y = (v: number) => height - (height * v) / max;
+  const line = values.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const area = `${line} L${x(n - 1).toFixed(1)},${height} L${x(0).toFixed(1)},${height} Z`;
+  return { line, area, last: { x: x(n - 1), y: y(values[n - 1]) } };
+}
+
+// Nice y-axis ticks for a max value: 0, mid, top, where top is the smallest
+// round number at or above the data max so the top gridline is labelled with
+// a value the chart reaches or nearly reaches.
+export function yTicks(max: number): number[] {
+  if (max <= 0) return [0];
+  const mag = Math.pow(10, Math.floor(Math.log10(max)));
+  const steps = [1, 2, 2.5, 5, 10];
+  const top = steps.map((s) => s * mag).find((v) => v >= max) ?? max;
+  return [0, top / 2, top];
+}
+
+// Feed age as a fraction of its own staleness threshold: 1.0 is the line the
+// server calls stale. Capped at 2 for drawing; the number itself is shown raw.
+export function ageRatio(lastFetched: string | null | undefined, thresholdSeconds: number, now = Date.now()): number | null {
+  if (!lastFetched || thresholdSeconds <= 0) return null;
+  const age = (now - new Date(lastFetched).getTime()) / 1000;
+  if (!Number.isFinite(age)) return null;
+  return Math.max(0, age / thresholdSeconds);
+}

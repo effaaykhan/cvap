@@ -5,6 +5,7 @@ import { api, type FindingSummary } from "../lib/api";
 import { ExportButton } from "../components/ExportButton";
 import { EvidenceBlock } from "../components/Evidence";
 import { PageHead } from "../components/PageHead";
+import { SegmentBar, type SegmentSpec } from "../components/Charts";
 import { applyTriageFilter, confidenceBand, score, type TriageFilter } from "../lib/console";
 
 const STATUSES = ["open", "confirmed", "", "false_positive", "accepted_risk", "remediated", "closed"];
@@ -32,6 +33,10 @@ export function Findings() {
 
   const rows = data ? applyTriageFilter(data.findings, filter) : [];
   const truncated = data?.next_id != null;
+  const strip: SegmentSpec[] = ["critical", "high", "medium", "low", "info"].map((k) => ({
+    key: k, label: k, value: rows.filter((f) => f.severity === k).length, tone: k,
+  }));
+  const kevShown = rows.filter((f) => f.kev).length;
 
   return (
     <section>
@@ -77,6 +82,12 @@ export function Findings() {
 
       {isLoading && <p className="muted">Loading…</p>}
       {error && <p className="error">Could not load findings.</p>}
+      {data && rows.length > 0 && (
+        <div className="triage-strip">
+          <SegmentBar segments={strip} height={8} caption={`${rows.length} shown${truncated ? " of the first " + PAGE : ""}`} />
+          <span className="kevcount"><b>{kevShown}</b> in KEV · <b>{rows.filter((f) => f.epss != null && f.epss >= 0.5).length}</b> with EPSS ≥ 0.5</span>
+        </div>
+      )}
       {data && (
         <table>
           <thead>

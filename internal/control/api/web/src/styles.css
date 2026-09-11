@@ -457,3 +457,85 @@ tr.evidence-row .lbl { margin-bottom:.5rem; display:block; }
 .changed .item { display:flex; gap:.6rem; align-items:baseline; }
 .changed .item .when { color:var(--faint); font-family:var(--mono); font-size:.7rem; }
 .blocked { margin-top:.6rem; }
+
+/* ======================================================================== */
+/* Visualisations: severity, fleet and status bars, exposure by zone,         */
+/* sparklines, feed-age ratio bars, the fuller trend. One rule throughout:    */
+/* the mark carries identity, the text beside it carries the number, in text  */
+/* tokens; nothing is colour alone.                                           */
+/* ======================================================================== */
+.tone-critical { --tone: var(--sev-critical); } .tone-high { --tone: var(--sev-high); }
+.tone-medium { --tone: var(--sev-medium); } .tone-low { --tone: var(--sev-low); }
+.tone-info { --tone: var(--sev-info); } .tone-ok { --tone: var(--ok); }
+.tone-warn { --tone: var(--sev-medium); } .tone-danger { --tone: var(--danger); }
+.tone-muted { --tone: var(--faint); } .tone-accent { --tone: var(--accent); }
+.cdot[class*="tone-"] { background: var(--tone); }
+
+.segbar { display:flex; flex-direction:column; gap:.45rem; }
+.segbar-track { display:flex; gap:2px; width:100%; border-radius:3px; overflow:hidden; background:var(--surface-2); }
+.segbar-seg { display:block; height:100%; background:var(--tone); min-width:2px; }
+.segbar-seg.dim { opacity:.35; }
+.segbar-empty { flex:1; background:var(--surface-2); }
+.segbar-legend { display:flex; flex-wrap:wrap; gap:.4rem 1rem; font-size:.72rem; color:var(--muted); }
+.segbar-legend .lane { cursor:default; }
+.segbar-legend .lane.on { color:var(--fg); }
+.segbar-legend .val { font-family:var(--mono); color:var(--fg); font-variant-numeric:tabular-nums; }
+.segbar-legend .end { margin-left:auto; color:var(--faint); }
+
+.hbars { display:flex; flex-direction:column; gap:.45rem; margin-top:.6rem; }
+.hbar { display:grid; grid-template-columns:minmax(120px, 30%) 1fr 3.5ch; gap:.7rem; align-items:center; font-size:.76rem; }
+.hbar-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hbar-track { display:block; height:10px; background:var(--surface-2); border-radius:3px; overflow:hidden; }
+.hbar-bar { display:flex; gap:2px; height:100%; }
+.hbar-value { font-family:var(--mono); text-align:right; font-variant-numeric:tabular-nums; }
+
+.spark { display:block; overflow:visible; }
+.spark-area { fill:color-mix(in oklab, var(--tone), transparent 86%); }
+.spark-line { fill:none; stroke:var(--tone); stroke-width:1.5; stroke-linejoin:round; }
+.spark-dot { fill:var(--tone); stroke:var(--surface); stroke-width:1.5; }
+
+.ratiobar { display:inline-flex; align-items:center; gap:.5rem; }
+.ratiobar-track { position:relative; display:inline-block; width:96px; height:8px; background:var(--surface-2); border-radius:3px; overflow:hidden; }
+.ratiobar-fill { display:block; height:100%; background:var(--tone); border-radius:3px; }
+.ratiobar-limit { position:absolute; left:50%; top:-1px; bottom:-1px; width:1px; background:var(--line-strong); }
+.ratiobar .val { font-family:var(--mono); font-size:.72rem; color:var(--muted); min-width:4ch; text-align:right; font-variant-numeric:tabular-nums; }
+
+/* metric tiles: value + sparkline side by side, delta below */
+.metric .row.tile { align-items:center; }
+.metric .spark { flex:none; }
+.metric .value { font-variant-numeric:tabular-nums; }
+.metric .fleet { margin-top:.4rem; }
+.metric .fleet .segbar-legend { font-size:.68rem; gap:.3rem .7rem; }
+
+/* the fuller trend */
+.trend-svg { height:140px; }
+.trend-window { fill:color-mix(in oklab, var(--accent), transparent 93%); }
+.trend-tick { fill:var(--faint); font:600 9.5px var(--mono); }
+.trend-dot-kev { fill:var(--sev-critical); stroke:var(--surface); stroke-width:2; }
+.swatch-window { border-top:none; height:8px; background:color-mix(in oklab, var(--accent), transparent 80%); border-radius:2px; }
+
+/* overview layout: three rows — tiles, distributions, then the two columns */
+.dist-grid { display:grid; grid-template-columns:1fr 1fr; gap:1.1rem; margin-bottom:1.1rem; align-items:start; }
+.card.section .lbl + .segbar { margin-top:.6rem; }
+.change-tiles { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:.5rem; margin:.6rem 0 .2rem; }
+.change-tile { background:var(--surface-2); border-radius:6px; padding:.45rem .6rem; }
+.change-tile .n { font:650 1.05rem/1 var(--sans); font-variant-numeric:tabular-nums; }
+.change-tile .k { color:var(--faint); font-size:.66rem; text-transform:uppercase; letter-spacing:.05em; margin-top:.15rem; }
+.change-tile.warn .n { color:var(--sev-high); } .change-tile.ok .n { color:var(--ok); } .change-tile.danger .n { color:var(--sev-critical); }
+
+/* triage: the page's severity strip above the table */
+.triage-strip { display:grid; grid-template-columns:1fr auto; gap:1.2rem; align-items:center; margin:.4rem 0 .8rem; padding:.6rem .8rem; background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); }
+.triage-strip .kevcount { font-family:var(--mono); font-size:.74rem; color:var(--muted); white-space:nowrap; }
+.triage-strip .kevcount b { color:var(--fg); }
+
+/* health: fleet strip */
+.fleet-strip { margin:0 0 1.1rem; padding:.8rem 1rem; }
+
+@media (max-width:1000px) {
+  .dist-grid { grid-template-columns:1fr; }
+  .change-tiles { grid-template-columns:repeat(2, minmax(0,1fr)); }
+  .triage-strip { grid-template-columns:1fr; }
+}
+@media (prefers-reduced-motion:no-preference) {
+  .segbar-seg, .ratiobar-fill { transition:width .25s ease, opacity .15s ease; }
+}

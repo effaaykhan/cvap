@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyTriageFilter, attention, confidenceBand, kevInversion, score, tally, trendGeometry, worstFirst } from "./console";
+import { ageRatio, applyTriageFilter, attention, confidenceBand, kevInversion, score, sparkPath, stackSegments, tally, trendGeometry, worstFirst, yTicks } from "./console";
 import type { FindingSummary, Health, KnowledgeFeed, ScanPoint } from "./api";
 
 const f = (over: Partial<FindingSummary>): FindingSummary => ({
@@ -101,5 +101,32 @@ describe("trendGeometry", () => {
   it("never divides by zero on an empty or flat series", () => {
     expect(trendGeometry([], 100, 50).open).toBe("");
     expect(trendGeometry([{ day: "d", open: 0, kev: 0 }], 100, 50).max).toBe(1);
+  });
+});
+
+describe("chart geometry", () => {
+  it("stacks segments to at most 100 percent and drops zeros", () => {
+    const { total, segments } = stackSegments([["critical", 4], ["high", 21], ["info", 0]]);
+    expect(total).toBe(25);
+    expect(segments.map((s) => s.key)).toEqual(["critical", "high"]);
+    expect(segments.reduce((n, s) => n + s.pct, 0)).toBeCloseTo(100);
+    expect(stackSegments([["a", 0]]).segments).toEqual([]);
+  });
+  it("draws a sparkline that ends at the last value and closes on the baseline", () => {
+    const s = sparkPath([1, 2, 4], 40, 10);
+    expect(s.line).toBe("M0.0,7.5 L20.0,5.0 L40.0,0.0");
+    expect(s.last).toEqual({ x: 40, y: 0 });
+    expect(s.area.endsWith("L40.0,10 L0.0,10 Z")).toBe(true);
+    expect(sparkPath([], 40, 10).last).toBeNull();
+  });
+  it("labels the top gridline with a round number the data reaches", () => {
+    expect(yTicks(147)).toEqual([0, 100, 200]);
+    expect(yTicks(20)).toEqual([0, 10, 20]);
+    expect(yTicks(0)).toEqual([0]);
+  });
+  it("measures feed age against the feed's own threshold", () => {
+    const now = Date.parse("2026-09-11T12:00:00Z");
+    expect(ageRatio("2026-09-11T00:00:00Z", 86400, now)).toBeCloseTo(0.5);
+    expect(ageRatio(null, 86400, now)).toBeNull();
   });
 });

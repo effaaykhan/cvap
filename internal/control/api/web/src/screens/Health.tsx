@@ -5,7 +5,8 @@ import { api, has } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { PageHead } from "../components/PageHead";
 import { CreateScan } from "./Scans";
-import { ago, fmtTime, threshold, worstFirst } from "../lib/console";
+import { SegmentBar, RatioBar, type SegmentSpec } from "../components/Charts";
+import { ageRatio, ago, fmtTime, threshold, worstFirst } from "../lib/console";
 
 // Fleet & scan health (console rung 4): what is not working, made visible.
 // Every state here is the server's own word — scan-point health from
@@ -30,13 +31,33 @@ export function Health() {
   const h = health.data;
 
   const sorted = worstFirst(points.data?.scan_points ?? []);
+  const fleet: SegmentSpec[] = [
+    { key: "healthy", label: "healthy", value: sorted.filter((p) => p.health === "healthy").length, tone: "ok" },
+    { key: "degraded", label: "degraded", value: sorted.filter((p) => p.health === "degraded").length, tone: "warn" },
+    { key: "offline", label: "offline", value: sorted.filter((p) => p.health === "offline").length, tone: "danger" },
+    { key: "other", label: "pending / disabled / revoked", value: sorted.filter((p) => !["healthy", "degraded", "offline"].includes(p.health)).length, tone: "muted" },
+  ];
+  const scanRows = scans.data?.scans ?? [];
+  const scanMix: SegmentSpec[] = [
+    { key: "running", label: "running", value: scanRows.filter((x) => ["running", "planning"].includes(x.status)).length, tone: "accent" },
+    { key: "pending", label: "pending", value: scanRows.filter((x) => x.status === "pending").length, tone: "medium" },
+    { key: "completed", label: "completed", value: scanRows.filter((x) => x.status === "completed").length, tone: "ok" },
+    { key: "failed", label: "failed / killed", value: scanRows.filter((x) => ["failed", "killed"].includes(x.status)).length, tone: "danger" },
+    { key: "cancelled", label: "cancelled", value: scanRows.filter((x) => x.status === "cancelled").length, tone: "muted" },
+  ];
 
   return (
     <section>
       <PageHead
         title="Fleet & scan health"
         sub="What is not working, made visible. A dead scan point or a scan that never ran is a silent-success class if you have to hunt for it."
+        meta={h ? <>computed {ago(h.computed_at)}</> : undefined}
       />
+      {points.data && (
+        <div className="card fleet-strip">
+          <SegmentBar segments={fleet} height={12} caption={`${sorted.length} scan point${sorted.length === 1 ? "" : "s"} enrolled · health synthesised by the server`} />
+        </div>
+      )}
       <div className="health-grid">
         <div className="card section">
           <div className="lbl">Scan points — worst first</div>
@@ -71,6 +92,7 @@ export function Health() {
           </div>
           {scans.isLoading && <p className="muted">Loading…</p>}
           {scans.error && <p className="error">Could not load scans.</p>}
+          {scans.data && scanRows.length > 0 && <div style={{ margin: ".5rem 0 .8rem" }}><SegmentBar segments={scanMix} height={8} caption={`${scanRows.length} most recent${scanStatus ? ` with status ${scanStatus}` : ""}`} /></div>}
           {(scans.data?.scans ?? []).map((s) => (
             <div className="hrow" key={s.id}>
               <span>
@@ -112,14 +134,24 @@ export function Health() {
           </div>
           {feeds.isLoading && <p className="muted">Loading…</p>}
           {feeds.error && <p className="error">Could not load feed freshness.</p>}
-          {(feeds.data?.feeds ?? []).map((f) => (
-            <div className="hrow" key={f.feed}>
-              <span>{f.feed} <span className="faint small">({threshold(f.staleness_threshold_seconds)} threshold)</span></span>
-              <span className={`chip chip-${f.state === "current" ? "ok" : f.state === "stale" ? "warn" : "muted"}`}>
-                {f.state}{f.last_fetched_at ? ` · ${ago(f.last_fetched_at)}` : ""}
-              </span>
-            </div>
-          ))}
+          {(feeds.data?.feeds ?? []).map((f) => {
+            const tone = f.state === "current" ? "ok" : f.state === "stale" ? "warn" : "muted";
+            return (
+              <div className="hrow" key={f.feed}>
+                <span>
+                  {f.feed} <span className="faint small">({threshold(f.staleness_threshold_seconds)} threshold · {f.advisory_count} advisories)</span>
+                  <span className="reason">
+                    <RatioBar ratio={ageRatio(f.last_fetched_at, f.staleness_threshold_seconds)} tone={tone}
+                              label={`age ${f.last_fetched_at ? ago(f.last_fetched_at) : "never"} against a ${threshold(f.staleness_threshold_seconds)} threshold; the mark is the threshold`} />
+                  </span>
+                </span>
+                <span className={`chip chip-${tone}`}>
+                  {f.state}{f.last_fetched_at ? ` · ${ago(f.last_fetched_at)}` : ""}
+                </span>
+              </div>
+            );
+          })}
+          {feeds.data && feeds.data.feeds.length > 0 && <div className="foot-note">Each bar is the feed's age against its own threshold; the tick is the threshold. The word is the server's verdict, not the bar's.</div>}
           {feeds.data && feeds.data.feeds.length === 0 && <p className="empty">No advisory feeds ingested yet.</p>}
         </div>
 
