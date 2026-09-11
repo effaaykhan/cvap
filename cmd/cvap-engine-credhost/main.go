@@ -20,6 +20,8 @@ import (
 // (fd 0/1/2 are stdio; the first ExtraFiles entry is fd 3).
 const agentFD = 3
 
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "cvap-engine-credhost:", err)
@@ -27,7 +29,21 @@ func main() {
 	}
 }
 
+// capabilities is what the runtime's EngineSet reads to learn this binary hosts the
+// "host" engine. The shape mirrors the other engines' — a JSON array of Capability.
+func capabilities() string {
+	return `[{"engine":"host","engine_version":"` + version +
+		`","rule_format_version":"1","enabled":true}]`
+}
+
 func run() error {
+	for _, a := range os.Args[1:] {
+		if a == "-capabilities" || a == "--capabilities" {
+			_, err := fmt.Fprintln(os.Stdout, capabilities())
+			return err
+		}
+	}
+
 	in := enginewire.NewReader(os.Stdin)
 	out := enginewire.NewWriter(os.Stdout)
 

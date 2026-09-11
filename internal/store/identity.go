@@ -147,6 +147,42 @@ func (AssetIdentityKeys) LiveByValue(ctx context.Context, c *Conn, t domain.Iden
 	return id, nil
 }
 
+// SSHHostKeyFingerprintsAt returns the SSH host-key fingerprints CVAP has observed
+// for the asset currently at an address. They are the trust root the credentialed-
+// host engine verifies against on the fleet path (ADR-086/090) when no operator
+// override is pinned — the value stored is a SHA256 fingerprint (evidence copies
+// k.Fingerprint), which the engine matches by computing the presented key's own
+// fingerprint. Empty (not an error) when the address has no live asset or the asset
+// has no observed host key: the caller decides whether to refuse the job or fall
+// back to an operator-pinned known_hosts.
+func (AssetIdentityKeys) SSHHostKeyFingerprintsAt(ctx context.Context, c *Conn, ip string) ([]string, error) {
+	const q = `
+		SELECT DISTINCT k.key_value
+		  FROM asset_addresses a
+		  JOIN asset_identity_keys k
+		    ON k.tenant_id = a.tenant_id AND k.asset_id = a.asset_id
+		 WHERE a.tenant_id = $1 AND a.ip_address = $2::inet AND a.valid_to IS NULL
+		   AND k.key_type = 'ssh_hostkey'::identity_key_type AND k.valid_to IS NULL`
+
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), ip)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapError(err)
+	}
+	return out, nil
+}
+
 // ForAsset returns the live keys an asset holds, for the resolver's candidates.
 func (AssetIdentityKeys) ForAsset(ctx context.Context, c *Conn, assetID uuid.UUID) ([]domain.IdentityKey, error) {
 	// The SOURCE is derived from the copied evidence rather than stored beside

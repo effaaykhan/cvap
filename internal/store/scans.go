@@ -446,6 +446,10 @@ func EngineForScanType(scanType string) (Engine, bool) {
 		return EngineFingerprint, true
 	case "rules":
 		return EngineRules, true
+	case "host":
+		// Credentialed-host inventory (ADR-086/090, Phase 4). Plannable now that the
+		// credhost engine emits `package` observations and correlation consumes them.
+		return EngineHost, true
 	default:
 		return "", false
 	}

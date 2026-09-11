@@ -136,17 +136,40 @@ func Run(ctx context.Context, cfg Config, agentConn net.Conn, emit Emit) error {
 	return nil
 }
 
-// hostKeyCallback builds an in-memory host-key verifier from known-hosts lines
-// ("host keytype base64"). No file and no os import (engine invariant: nothing on
-// disk) — the presented key is matched by marshaled bytes against the supplied keys.
+// hostKeyCallback builds an in-memory host-key verifier from the trust material the
+// runtime supplies. No file and no os import (engine invariant: nothing on disk).
+//
+// Two shapes are accepted, because CVAP has two sources of a host's key:
+//   - Full known-hosts lines ("host keytype base64") — an operator-pinned trust root
+//     on the credential profile. Matched by marshaled public-key bytes.
+//   - SHA256 fingerprints ("SHA256:...") — what discovery already captured for the
+//     host (asset_identity_keys). A fingerprint cannot be turned back into a key, so
+//     it is matched by computing the presented key's own SHA256 fingerprint. This is
+//     a standard, secure SSH trust mechanism, and it lets the fleet path verify
+//     against exactly what CVAP observed rather than requiring a re-capture.
+//
+// A fingerprint token may stand alone on a line or be the key field of a
+// known-hosts-style line ("host SHA256:...").
 func hostKeyCallback(known string) (ssh.HostKeyCallback, error) {
 	var keys [][]byte
+	fprints := map[string]bool{}
 	for _, line := range strings.Split(known, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		f := strings.Fields(line)
+		// A SHA256 fingerprint anywhere on the line is trust material on its own.
+		matchedFingerprint := false
+		for _, tok := range f {
+			if strings.HasPrefix(tok, "SHA256:") {
+				fprints[tok] = true
+				matchedFingerprint = true
+			}
+		}
+		if matchedFingerprint {
+			continue
+		}
 		if len(f) < 3 {
 			continue
 		}
@@ -156,10 +179,13 @@ func hostKeyCallback(known string) (ssh.HostKeyCallback, error) {
 		}
 		keys = append(keys, pub.Marshal())
 	}
-	if len(keys) == 0 {
+	if len(keys) == 0 && len(fprints) == 0 {
 		return nil, errors.New("no usable host keys supplied; refusing to connect without verification")
 	}
 	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
+		if fprints[ssh.FingerprintSHA256(key)] {
+			return nil
+		}
 		km := key.Marshal()
 		for _, k := range keys {
 			if bytes.Equal(k, km) {
