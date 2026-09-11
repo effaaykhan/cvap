@@ -264,6 +264,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/findings/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Finding summary for the operator landing
+         * @description Exact open and KEV counts, what changed inside a fixed window (`days`, default 7: new, resolved, reopened, newly KEV-listed, with the worst named), and a daily open/KEV series (`trend_days`, default 30) derived from first_seen and resolved_at. Every number is a count of findings the list endpoint pages over; nothing is a rollup with its own life.
+         */
+        get: operations["getV1FindingsSummary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/findings/{finding_id}": {
         parameters: {
             query?: never;
@@ -276,6 +296,26 @@ export interface paths {
          * @description The finding, its rule and remediation, every vantage point it is exposed from, and the evidence copied from the observation at finding creation (ADR-016). When an observation has aged out, its evidence remains and the response says so rather than showing a dead link.
          */
         get: operations["getV1FindingsByFinding_id"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pipeline and safety health
+         * @description What is not working, from server-owned state: scans whose queued jobs no scan point can claim (the same predicate scan creation refuses on), the ingest backlog and unresolved observations over the last 7 days, unresolved kill switches with their unacknowledged scan points, and credential releases past expiry with no zeroisation attestation. Nothing here is inferred by the client.
+         */
+        get: operations["getV1Health"];
         put?: never;
         post?: never;
         delete?: never;
@@ -604,6 +644,17 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ActiveKillResponse: {
+            id: string;
+            /** Format: date-time */
+            issued_at: string;
+            reason: string;
+            scan_id?: string | null;
+            scope: string;
+            /** @description Scan points the kill covers that have not acknowledged it — the propagation bound ADR-024 requires to be measurable. */
+            unacknowledged: number;
+            zone_id?: string | null;
+        };
         AssetAddressResponse: {
             ip?: string;
             mac?: string;
@@ -689,6 +740,15 @@ export interface components {
             last_seen: string;
             os_family: string;
         };
+        BlockedScanResponse: {
+            engine: string;
+            id: string;
+            policy_id: string;
+            /** @description Why no scan point can claim its jobs, in the words Jobs.Claim's predicate would use. */
+            reason: string;
+            scan_type: string;
+            status: string;
+        };
         CancelScanRequest: {
             /** @description Recorded in the audit event. Required: a stopped scan with no stated reason is an unexplained gap in coverage. */
             reason: string;
@@ -696,6 +756,18 @@ export interface components {
         ChangePasswordRequest: {
             current_password: string;
             new_password: string;
+        };
+        ChangedFindingResponse: {
+            asset_hostname?: string;
+            /**
+             * Format: date-time
+             * @description When it appeared (first_seen) or, for a KEV listing, the date CISA added the CVE.
+             */
+            at: string;
+            id: string;
+            kev: boolean;
+            rule: string;
+            severity: string;
         };
         CreateScanRequest: {
             /** @description The policy this scan runs under. Its ceilings bound everything the scan may do. */
@@ -838,6 +910,51 @@ export interface components {
             rule: string;
             severity: string;
             status: string;
+        };
+        FindingSummaryStatsResponse: {
+            by_severity: {
+                [key: string]: number;
+            };
+            kev_listed_items: components["schemas"]["ChangedFindingResponse"][];
+            /** @description Open findings whose CVE CISA added to KEV inside the window — the ones that re-ranked. */
+            kev_listed_since: number;
+            /** @description Open findings whose CVE is in CISA KEV. Exact. */
+            kev_open: number;
+            new_items: components["schemas"]["ChangedFindingResponse"][];
+            /** @description Open findings first seen inside the window. */
+            new_since: number;
+            /** @description Findings in open or confirmed status. Exact. */
+            open: number;
+            /** @description Recorded transitions back to open inside the window (finding_history). */
+            reopened_since: number;
+            /** @description Findings resolved inside the window (remediated or superseded). */
+            resolved_since: number;
+            /**
+             * Format: date-time
+             * @description Start of the change window; the window is a fixed number of days, not a per-user last visit.
+             */
+            since: string;
+            /** @description Oldest first; the last point is today so far. Derived from first_seen and resolved_at, so it is reproducible from the finding rows and has no rollup of its own. */
+            trend: components["schemas"]["TrendPointResponse"][];
+            trend_days: number;
+            window_days: number;
+        };
+        HealthResponse: {
+            active_kills: components["schemas"]["ActiveKillResponse"][];
+            /** @description Scans still meant to run with queued jobs no online, capable scan point in a permitted zone can claim. */
+            blocked_scans: components["schemas"]["BlockedScanResponse"][];
+            /** Format: date-time */
+            computed_at: string;
+            /** @description Credential releases past their expiry with no zeroisation attestation from the scan point that received them (migration 0006). */
+            credential_grants_unconfirmed: number;
+            /** @description Observations still pending — never attested complete by a terminal ack — older than one hour, within the last 7 days (ADR-026 keeps them; this makes the count visible). */
+            ingest_backlog: number;
+            /** @description active when any kill is unresolved; inactive otherwise. The control is always armed; this is whether it is pressed. */
+            kill_switch_state: string;
+            /** @description Always 2 (Core at planning, the scan point on the send path — ADR-024). A property of the design asserted by the safety gate, reported so the surface says what is measured and what is not. */
+            scope_enforcement_sites: number;
+            /** @description Accepted observations in the last 7 days that correlation has not attached to an asset yet. */
+            unresolved_observations: number;
         };
         IssueKillRequest: {
             /** @description Required. A fleet stop with no stated reason is unreviewable afterwards. */
@@ -1015,6 +1132,14 @@ export interface components {
         };
         StartOIDCResponse: {
             authorization_url: string;
+        };
+        TrendPointResponse: {
+            /** @description UTC calendar day, YYYY-MM-DD. */
+            day: string;
+            /** @description The subset of open whose CVE is in CISA KEV today. */
+            kev: number;
+            /** @description Findings first seen on or before this day and not resolved by its end. */
+            open: number;
         };
         ZoneExposureResponse: {
             critical: number;
@@ -1736,6 +1861,62 @@ export interface operations {
             };
         };
     };
+    getV1FindingsSummary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FindingSummaryStatsResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold finding.read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     getV1FindingsByFinding_id: {
         parameters: {
             query?: never;
@@ -1775,6 +1956,62 @@ export interface operations {
                 };
             };
             /** @description Refused because the session's role does not hold finding.read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getV1Health: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold scan.read. */
             403: {
                 headers: {
                     [name: string]: unknown;

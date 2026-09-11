@@ -134,28 +134,29 @@ finding-count-history rollup for rung 5 (to be decided in the plan — `finding_
 
 ## Implementation status (S42, 2026-09-11)
 
-The shell and the three surfaces are built on the existing reads, in `internal/control/api/web`
-(`Overview.tsx`, `Findings.tsx` as Triage, `Health.tsx`, the console section of `styles.css`,
-`lib/console.ts` for every rule about what a number means, unit-tested). Nav is
-`Overview · Triage · Assets · Health · Knowledge`; the old paths redirect. The detail views are
+Built, on the reads the console needs, in `internal/control/api/web` (`Overview.tsx`,
+`Findings.tsx` as Triage, `Health.tsx`, `components/Trend.tsx`, the console section of
+`styles.css`, `lib/console.ts` for every rule about what a number means, unit-tested). Nav is
+`Overview · Triage · Assets · Health · Knowledge`; the old paths redirect; the detail views are
 reused as-is, as the IA says.
 
-What the surfaces show is bounded by the backend table above, and the bound is visible on the
-page rather than smoothed over:
+The two reads the backend table marked **build** now exist, registered through the route registry
+(ADR-043) and typed into the client by `make ui-types`:
 
-- **Triage** is complete on existing reads: rank, KEV, severity rail, confidence lane (banded on
-  the value — the *source* of the claim is on the expanded evidence, where `has_vuln_def` says
-  advisory-matched or rule-inferred), EPSS/CVSS with a dash for unscored, zone-derived exposure,
-  evidence one click away (the row fetches the finding).
-- **Overview** shows KEV-on-fleet and open findings from the priority-ordered list, labelled
-  `exact` when the server returned no cursor and `of the first N` when it did — never a fleet
-  total from a truncated page. *Worst right now* and *Not working* (scan points, feeds, failed
-  scans) are live. *Changed since your last visit* and the *trend* line are rendered as
-  **not measured**, in their own place, until the delta and history reads exist.
-- **Health** shows scan points worst-first (server-synthesised health), recent scans with the
-  create form, feed freshness chips, and a pipeline-and-safety card whose three counters
-  (ingest backlog, kill-switch state, unresolved correlations) read **no read yet**.
-  Blocked-for-capacity is named as indistinguishable from queued until its signal is served.
+- `GET /v1/findings/summary` (finding.read): exact open and KEV counts, counts by severity, what
+  changed inside a fixed window (`days`, default 7: new, resolved, reopened from `finding_history`,
+  newly KEV-listed, with the worst named), and a daily open/KEV series (`trend_days`, default 30)
+  derived from `first_seen` and `resolved_at`. This settles open questions 1 and 2: the trend is
+  derived from the finding rows, no rollup; the window is fixed, not a per-user last visit.
+- `GET /v1/health` (scan.read): scans blocked for capacity (the same `CountDispatchable` predicate
+  scan creation refuses on, asked again after the fleet changed), ingest backlog and unresolved
+  observations over the last 7 days, unresolved kill switches with their unacknowledged scan
+  points, credential grants past expiry with no attestation.
 
-Remaining, in the spec's own phasing: the delta read, the not-working reads (blocked scans,
-ingest backlog, kill-switch state), and the history rollup for rung 5.
+Every region of the four artboards is live: Overview's metric strip with deltas, worst-right-now
+with the KEV inversion explained only when visible, changed-in-window, not-working (kill switch,
+blocked scans, backlog, unconfirmed grants, scan points, feeds, failed scans), and the 30-day
+trend with hover and a table view; Triage complete; Health with blocked scans and the
+pipeline-and-safety card on real counters. The tests move a finding through open, resolved and
+reopened and require the counts and the series to follow, and put a scan point offline to make a
+scan read as blocked (`overview_read_test.go`).

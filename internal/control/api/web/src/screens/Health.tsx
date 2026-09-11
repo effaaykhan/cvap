@@ -26,6 +26,8 @@ export function Health() {
   const scanQ = scanStatus ? `?status=${scanStatus}&limit=50` : "?limit=50";
   const scans = useQuery({ queryKey: ["scans", scanQ], queryFn: () => api.listScans(scanQ) });
   const feeds = useQuery({ queryKey: ["knowledge-freshness"], queryFn: () => api.knowledgeFreshness(), enabled: has(session, "finding.read") });
+  const health = useQuery({ queryKey: ["health"], queryFn: () => api.health() });
+  const h = health.data;
 
   const sorted = worstFirst(points.data?.scan_points ?? []);
 
@@ -83,9 +85,23 @@ export function Health() {
             </div>
           ))}
           {scans.data && scans.data.scans.length === 0 && <p className="empty">No scans{scanStatus ? ` with status ${scanStatus}` : ""}.</p>}
-          <div className="not-measured">
-            Not read yet: a scan waiting because no scan point covers its zone is indistinguishable here from one that is merely queued. The blocked-for-capacity signal is a planned read.
-          </div>
+          {h && h.blocked_scans.length > 0 && (
+            <div className="blocked">
+              <span className="lbl warn">Blocked for capacity</span>
+              {h.blocked_scans.map((b) => (
+                <div className="hrow" key={b.id}>
+                  <span>
+                    <span className="dot dot-warn" />
+                    <Link className="name" to={`/scans/${b.id}`}>{b.id.slice(0, 8)}</Link>
+                    <span className="zone small">{b.scan_type} · {b.status}</span>
+                    <span className="reason">{b.reason}</span>
+                  </span>
+                  <span className="state high">BLOCKED</span>
+                </div>
+              ))}
+              <div className="foot-note">Queued jobs no online, capable scan point in a permitted zone can claim — the same predicate scan creation refuses on. The scan reports nothing rather than "nothing found".</div>
+            </div>
+          )}
           {has(session, "scan.create") && <CreateScan />}
         </div>
 
@@ -108,14 +124,44 @@ export function Health() {
         </div>
 
         <div className="card section">
-          <div className="lbl">Pipeline & safety</div>
-          <div className="hrow"><span>Scope enforcement</span><span className="chip chip-ok">2 sites · by construction</span></div>
-          <div className="hrow"><span>Ingest backlog <span className="faint small">pending &gt; 1h</span></span><span className="chip chip-muted">no read yet</span></div>
-          <div className="hrow"><span>Kill-switch state</span><span className="chip chip-muted">no read yet</span></div>
-          <div className="hrow"><span>Unresolved correlations</span><span className="chip chip-muted">no read yet</span></div>
-          <div className="not-measured">
-            Scope enforcement is a property of the design (Core at planning, the scan point on the send path — ADR-024) and is asserted by the safety gate, not measured live here. The three rows above are counters Core holds and does not yet serve.
+          <div className="card-head">
+            <span className="lbl">Pipeline & safety</span>
+            {h && <span className="aside">computed {ago(h.computed_at)}</span>}
           </div>
+          {health.isLoading && <p className="muted">Loading…</p>}
+          {health.error && <p className="error">Could not load pipeline state.</p>}
+          {h && (
+            <>
+              <div className="hrow">
+                <span>Kill switch</span>
+                <span className={`chip ${h.kill_switch_state === "active" ? "chip-danger" : "chip-ok"}`}>
+                  {h.kill_switch_state === "active" ? `ACTIVE · ${h.active_kills.length}` : "armed · inactive"}
+                </span>
+              </div>
+              {h.active_kills.map((k) => (
+                <div className="hrow" key={k.id}>
+                  <span><span className="dot dot-danger" /><span className="name">{k.scope}</span><span className="zone small">{k.reason}</span><span className="reason">issued {ago(k.issued_at)}</span></span>
+                  <span className={`state ${k.unacknowledged ? "danger" : ""}`}>{k.unacknowledged} unacknowledged</span>
+                </div>
+              ))}
+              <div className="hrow">
+                <span>Ingest backlog <span className="faint small">pending &gt; 1h, last 7d</span></span>
+                <span className={`chip ${h.ingest_backlog > 0 ? "chip-warn" : "chip-ok"}`}>{h.ingest_backlog} obs</span>
+              </div>
+              <div className="hrow">
+                <span>Unresolved correlations <span className="faint small">accepted, no asset, last 7d</span></span>
+                <span className={`chip ${h.unresolved_observations > 0 ? "chip-muted" : "chip-ok"}`}>{h.unresolved_observations}</span>
+              </div>
+              <div className="hrow">
+                <span>Credential grants unconfirmed <span className="faint small">past expiry, no attestation</span></span>
+                <span className={`chip ${h.credential_grants_unconfirmed > 0 ? "chip-warn" : "chip-ok"}`}>{h.credential_grants_unconfirmed}</span>
+              </div>
+              <div className="hrow"><span>Scope enforcement</span><span className="chip chip-ok">{h.scope_enforcement_sites} sites · by construction</span></div>
+              <div className="foot-note">
+                Every row above is read from server-owned state. Scope enforcement is a property of the design (Core at planning, the scan point on the send path — ADR-024), asserted by the safety gate rather than measured live.
+              </div>
+            </>
+          )}
         </div>
       </div>
       <p className="faint small" style={{ marginTop: "1rem" }}>

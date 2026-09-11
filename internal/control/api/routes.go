@@ -360,6 +360,31 @@ func (s *Server) routes() {
 	})
 
 	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/findings/summary",
+		Summary: "Finding summary for the operator landing",
+		Description: "Exact open and KEV counts, what changed inside a fixed window (`days`, default 7: " +
+			"new, resolved, reopened, newly KEV-listed, with the worst named), and a daily open/KEV " +
+			"series (`trend_days`, default 30) derived from first_seen and resolved_at. Every number " +
+			"is a count of findings the list endpoint pages over; nothing is a rollup with its own life.",
+		Access: AccessPermission, Permission: PermFindingRead,
+		Response: FindingSummaryStatsResponse{},
+		Handler:  s.findingSummaryStats,
+	})
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/health",
+		Summary: "Pipeline and safety health",
+		Description: "What is not working, from server-owned state: scans whose queued jobs no scan point " +
+			"can claim (the same predicate scan creation refuses on), the ingest backlog and unresolved " +
+			"observations over the last 7 days, unresolved kill switches with their unacknowledged scan " +
+			"points, and credential releases past expiry with no zeroisation attestation. Nothing here " +
+			"is inferred by the client.",
+		Access: AccessPermission, Permission: PermScanRead,
+		Response: HealthResponse{},
+		Handler:  s.health,
+	})
+
+	r.Register(Route{
 		Method: http.MethodGet, Path: "/v1/findings.csv",
 		Summary: "Export findings as CSV",
 		Description: "The findings list (same filters) as CSV, for the reporting §2 permits. " +

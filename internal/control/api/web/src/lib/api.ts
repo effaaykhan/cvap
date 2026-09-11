@@ -23,6 +23,11 @@ export type Scan = Schemas["ScanResponse"];
 export type ScanList = Schemas["ScanListResponse"];
 export type ScanPoint = Schemas["ScanPointResponse"];
 export type ScanPointList = Schemas["ScanPointListResponse"];
+export type FindingStats = Schemas["FindingSummaryStatsResponse"];
+export type ChangedFinding = Schemas["ChangedFindingResponse"];
+export type TrendPoint = Schemas["TrendPointResponse"];
+export type Health = Schemas["HealthResponse"];
+export type BlockedScan = Schemas["BlockedScanResponse"];
 
 // ApiError carries the server's stable code so a caller can branch — notably 403
 // (forbidden), which the UI surfaces honestly rather than swallowing.
@@ -99,6 +104,8 @@ export const api = {
 
   listScans: (q: string) => request<ScanList>("GET", `/v1/scans${q}`),
   listScanPoints: () => request<ScanPointList>("GET", "/v1/scan-points"),
+  findingSummary: (q: string) => request<FindingStats>("GET", `/v1/findings/summary${q}`),
+  health: () => request<Health>("GET", "/v1/health"),
   getScan: (id: string) => request<Scan>("GET", `/v1/scans/${id}`),
   createScan: (body: Schemas["CreateScanRequest"]) =>
     request<Scan>("POST", "/v1/scans", body),

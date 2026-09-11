@@ -2,7 +2,7 @@
 // so each rule about what a number MEANS can be tested on its own: rung 1 of the
 // console design is "accurate first — nothing overstates weak data", and these
 // are where that is decided rather than in JSX.
-import type { FindingSummary, KnowledgeFeed, ScanPoint, Scan } from "./api";
+import type { FindingSummary, Health, KnowledgeFeed, ScanPoint, Scan, TrendPoint } from "./api";
 
 // A page of findings is complete when the server handed back no cursor. Counts
 // over a complete page are exact; counts over a truncated one are "of the first
@@ -65,8 +65,20 @@ export function worstFirst(points: ScanPoint[]): ScanPoint[] {
 // yet (console spec, backend table) and are NOT synthesised from anything else.
 export type Attention = { level: "danger" | "warn"; text: string; detail: string; to: string };
 
-export function attention(points: ScanPoint[], feeds: KnowledgeFeed[], scans: Scan[]): Attention[] {
+export function attention(points: ScanPoint[], feeds: KnowledgeFeed[], scans: Scan[], health?: Health): Attention[] {
   const out: Attention[] = [];
+  // Server-owned pipeline state first: a pressed kill switch and a scan that
+  // cannot run outrank a stale feed.
+  if (health) {
+    for (const k of health.active_kills)
+      out.push({ level: "danger", text: `kill switch active (${k.scope})`, detail: `${k.reason} · ${k.unacknowledged} scan point${k.unacknowledged === 1 ? "" : "s"} not yet acknowledged`, to: "/health" });
+    for (const b of health.blocked_scans)
+      out.push({ level: "warn", text: `scan ${b.id.slice(0, 8)} blocked`, detail: b.reason, to: `/scans/${b.id}` });
+    if (health.ingest_backlog > 0)
+      out.push({ level: "warn", text: `ingest backlog ${health.ingest_backlog}`, detail: "observations pending over an hour; results never attested complete", to: "/health" });
+    if (health.credential_grants_unconfirmed > 0)
+      out.push({ level: "warn", text: `${health.credential_grants_unconfirmed} credential grant${health.credential_grants_unconfirmed === 1 ? "" : "s"} unconfirmed`, detail: "past expiry with no zeroisation attestation", to: "/health" });
+  }
   for (const p of worstFirst(points)) {
     if (p.health === "offline")
       out.push({ level: "danger", text: `scan point ${p.hostname} offline`, detail: p.health_reason ?? "", to: "/health" });
@@ -114,4 +126,20 @@ export function fmtTime(t?: string | null): string {
 // something to explain.
 export function kevInversion(rows: FindingSummary[]): boolean {
   return rows.some((f, i) => f.kev && rows.slice(i + 1).some((g) => !g.kev && (g.cvss ?? -1) > (f.cvss ?? -1)));
+}
+
+// Trend geometry, pure so the chart's scale is testable: one y scale for both
+// series (open and its KEV subset share a unit), x spread evenly over the days,
+// the path closed under the open line for the area fill. Never a dual axis.
+export type TrendGeometry = { open: string; kev: string; area: string; max: number; xs: number[]; ys: number[] };
+
+export function trendGeometry(points: TrendPoint[], width: number, height: number, pad = 4): TrendGeometry {
+  const n = points.length;
+  const max = Math.max(1, ...points.map((p) => p.open));
+  const x = (i: number) => (n <= 1 ? width / 2 : pad + (i * (width - 2 * pad)) / (n - 1));
+  const y = (v: number) => height - pad - ((height - 2 * pad) * v) / max;
+  const line = (pick: (p: TrendPoint) => number) => points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(pick(p)).toFixed(1)}`).join(" ");
+  const open = line((p) => p.open);
+  const area = n ? `${open} L${x(n - 1).toFixed(1)},${(height - pad).toFixed(1)} L${x(0).toFixed(1)},${(height - pad).toFixed(1)} Z` : "";
+  return { open, kev: line((p) => p.kev), area, max, xs: points.map((_, i) => x(i)), ys: points.map((p) => y(p.open)) };
 }
