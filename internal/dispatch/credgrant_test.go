@@ -80,7 +80,7 @@ func seedHostJob(t *testing.T, db *store.DB, tenant store.TenantID, seed hostJob
 			}
 		}
 		if err := c.QueryRow(ctx,
-			`INSERT INTO scans (tenant_id, policy_id, scan_type) VALUES ($1,$2,'host') RETURNING scan_id`,
+			`INSERT INTO scans (tenant_id, policy_id, scan_type, status) VALUES ($1,$2,'host','running') RETURNING scan_id`,
 			tid, policyID).Scan(&scanID); err != nil {
 			return err
 		}

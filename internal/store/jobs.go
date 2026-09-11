@@ -318,6 +318,13 @@ const MaxTasksPerAssignment = 1000
 var ErrTooManyTasks = errors.New("store: job has more tasks than one assignment can carry")
 
 // Tasks returns a job's tasks, which is what the assignment carries.
+//
+// EVERY task, whatever its status. The assignment is the whole job: a status
+// filter here would hand a re-claimed reassign_safe job fewer targets than it
+// has (ErrTooManyTasks's failure arrived at from the other side), stop
+// scopeNarrowedForJob's mid-scan re-check covering the dropped targets, and
+// make tasksBelongToJob refuse valid observations. Task status is a record of
+// what happened, never a filter on what is sent.
 func (Jobs) Tasks(ctx context.Context, c *Conn, jobID uuid.UUID) ([]Task, error) {
 	const q = `
 		SELECT t.task_id, t.job_id, t.target_id, t.asset_id, t.task_target, t.status,
@@ -371,7 +378,13 @@ func (Jobs) MarkRunning(ctx context.Context, c *Conn, jobID, scanPointID uuid.UU
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
-	return nil
+	// The job's tasks follow it. Only the first progress report moves the job
+	// (status = 'assigned' above), so this runs once per job.
+	const tq = `
+		UPDATE scan_tasks SET status = 'running', started_at = now()
+		 WHERE tenant_id = $1 AND job_id = $2 AND status = 'pending'`
+	_, err = c.Exec(ctx, tq, c.Tenant().UUID(), jobID)
+	return mapError(err)
 }
 
 // Terminate records how a job ended.
@@ -396,7 +409,10 @@ func (Jobs) MarkRunning(ctx context.Context, c *Conn, jobID, scanPointID uuid.UU
 // The status is derived from the reason rather than taken from the scan point: a
 // scan point reports what happened to it, and Core decides what that means for
 // the job.
-func (Jobs) Terminate(ctx context.Context, c *Conn, jobID, scanPointID uuid.UUID, reason TerminationReason) error {
+//
+// incomplete is JobTerminal's flag: the scan point marked its results partial
+// (ADR-026), so a completed reason does not mean every task was covered.
+func (Jobs) Terminate(ctx context.Context, c *Conn, jobID, scanPointID uuid.UUID, reason TerminationReason, incomplete bool) error {
 	status := JobFailed
 	switch reason {
 	case TerminationCompleted:
@@ -420,7 +436,100 @@ func (Jobs) Terminate(ctx context.Context, c *Conn, jobID, scanPointID uuid.UUID
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
-	return nil
+
+	// The job's tasks end with it, in the same transaction and only when the
+	// job's own predicate matched — so a non-holder that cannot end the job
+	// cannot end its tasks either. Nothing else ever advanced a task: every
+	// task in the deploy estate sat at 'pending' under a completed job, and an
+	// operator reads a pending task as work not yet done.
+	otherwise := TaskFailed
+	if status == JobCancelled || status == JobKilled {
+		otherwise = TaskSkipped // stopped by an operator, not lost by an engine
+	}
+	return mapError(endTasks(ctx, c, jobID, status == JobCompleted && !incomplete, otherwise))
+}
+
+// TaskStatus is scan_tasks.status (migration 0005, task_status).
+type TaskStatus string
+
+const (
+	TaskPending   TaskStatus = "pending"
+	TaskRunning   TaskStatus = "running"
+	TaskCompleted TaskStatus = "completed"
+	TaskFailed    TaskStatus = "failed"
+	TaskSkipped   TaskStatus = "skipped"
+)
+
+// endTasks closes a job's open tasks once the job itself has ended.
+//
+// The wire carries no per-task outcome — JobTerminal has tasks_completed and
+// tasks_failed as COUNTS and one `incomplete` flag — so Core decides from what
+// it holds. A job that completed with its results whole completed its tasks.
+// Any other ending is judged task by task on the one thing Core can see:
+// whether an observation was attributed to the task. The credentialed engine
+// aborts the whole job on the first unreachable host after emitting for the
+// hosts before it (ADR-093), and those hosts were read; a completed-but-
+// incomplete submission dropped something, and the tasks it dropped are the
+// ones with nothing attributed. "The engine never reported on this target"
+// and "the target was done" must not share a status in either direction.
+//
+// `otherwise` is what an unreported task becomes: failed when the engine or
+// the lease was lost — nothing here can tell "unreachable" from "never
+// reached", and failed is the reading an operator investigates — and skipped
+// when an operator stopped the job, because that target was not attempted.
+//
+// The observations read is bounded to the job's own window — nothing observed
+// for a task predates its job — because observations is partitioned by
+// observed_at and an unbounded EXISTS visits every live partition per task,
+// inside the terminal's transaction (internal/store/CLAUDE.md).
+func endTasks(ctx context.Context, c *Conn, jobID uuid.UUID, allCovered bool, otherwise TaskStatus) error {
+	const q = `
+		UPDATE scan_tasks t
+		   SET status = CASE
+		                  WHEN $3::bool THEN 'completed'::task_status
+		                  WHEN EXISTS (SELECT 1 FROM observations o
+		                                WHERE o.tenant_id = t.tenant_id AND o.task_id = t.task_id
+		                                  AND o.ingest_state = 'accepted'
+		                                  AND o.observed_at >= j.created_at - interval '1 hour')
+		                       THEN 'completed'::task_status
+		                  ELSE $4::task_status
+		                END,
+		       completed_at = now()
+		  FROM scan_jobs j
+		 WHERE j.tenant_id = t.tenant_id AND j.job_id = t.job_id
+		   AND t.tenant_id = $1 AND t.job_id = $2 AND t.status IN ('pending', 'running')`
+	_, err := c.Exec(ctx, q, c.Tenant().UUID(), jobID, allCovered, string(otherwise))
+	return err
+}
+
+// ReconcileTasksWithResults revisits a job's ended tasks once a submission for
+// it is promoted to accepted.
+//
+// Only ACCEPTED observations count as coverage, in endTasks and here: a pending
+// row was never attested complete and a quarantined one is withheld from the
+// pipeline, so neither says the target was done. That filter opens a window:
+// the runtime submits before it sends JobTerminal, but the two travel on
+// different streams, and a terminal that lands before the final chunk's ack
+// judges tasks whose results are still in flight — failed, with nothing to
+// revisit them. Ingest calls this after the promotion, so a task the terminal
+// wrote off becomes completed the moment its results are accepted. Only FAILED
+// tasks move: a skipped one was stopped by an operator (cancel, kill switch),
+// and ADR-024 exists so the operator can see what was and was not finished —
+// a target the engine had half-reported on before the halt stays skipped.
+// Same window bound as endTasks.
+func (Jobs) ReconcileTasksWithResults(ctx context.Context, c *Conn, jobID uuid.UUID) error {
+	const q = `
+		UPDATE scan_tasks t
+		   SET status = 'completed', completed_at = now()
+		  FROM scan_jobs j
+		 WHERE j.tenant_id = t.tenant_id AND j.job_id = t.job_id
+		   AND t.tenant_id = $1 AND t.job_id = $2 AND t.status = 'failed'
+		   AND EXISTS (SELECT 1 FROM observations o
+		                WHERE o.tenant_id = t.tenant_id AND o.task_id = t.task_id
+		                  AND o.ingest_state = 'accepted'
+		                  AND o.observed_at >= j.created_at - interval '1 hour')`
+	_, err := c.Exec(ctx, q, c.Tenant().UUID(), jobID)
+	return mapError(err)
 }
 
 // MaxAttempts bounds how often one job may be re-queued.

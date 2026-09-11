@@ -338,10 +338,20 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		// ADR-093): an intrusive fingerprint pass captured their ed25519 keys,
 		// the observations attached by address, and asset_identity_keys stayed
 		// empty — so the credentialed engine had nothing observed to verify
-		// against. Recording on attach is safe by construction: Record's
-		// ON CONFLICT keeps a key live on another asset where it is, and a key
-		// any live asset held would have made this a merge or a queue rather
-		// than an attach.
+		// against. A key any OTHER live asset held would have made this a merge
+		// or a queue rather than an attach, and Record's ON CONFLICT keeps such
+		// a key where it is. What an attach must NOT do is add a key that
+		// contradicts one the target asset already holds from the same service:
+		// that is the address-handover shape (a different host on a reused
+		// DHCP lease), which domain.Resolve attaches because nothing agrees and
+		// one moderate key alone decides nothing (ADR-007). Recording the
+		// newcomer's key there would leave one asset holding two hosts' SSH
+		// keys, and ADR-091's observed-trust set for that address would accept
+		// either — a credential presented to whichever machine answers. So a
+		// contradicting key is left unrecorded and logged; the newcomer keeps
+		// attaching by address exactly as it did before keys were recorded on
+		// attach at all. Deciding that shape properly is a domain rule, not a
+		// recording rule, and is B37.
 		if v.Decision == domain.DecisionMerge || v.Decision == domain.DecisionNewAsset {
 			for _, k := range v.Agreeing {
 				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, now); err != nil {
@@ -350,9 +360,26 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 			}
 		}
 		if v.Decision == domain.DecisionNewAsset || v.Decision == domain.DecisionAttach {
+			var held []domain.IdentityKey
+			if v.Decision == domain.DecisionAttach {
+				var err error
+				if held, err = (store.AssetIdentityKeys{}).ForAsset(ctx, conn, assetID); err != nil {
+					return err
+				}
+			}
 			for _, k := range h.keys {
 				if k.Type.Strength() < 2 {
 					continue // weak keys are the address, held below
+				}
+				if other, contradicts := contradictsHeld(held, k); contradicts {
+					c.log.WarnContext(ctx, "attach: observed key contradicts the asset's held key; not recorded",
+						slog.String("asset_id", assetID.String()),
+						slog.String("address", h.address),
+						slog.String("key_type", string(k.Type)),
+						slog.String("source", k.Source),
+						slog.String("held", other.Value),
+						slog.String("observed", k.Value))
+					continue
 				}
 				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, now); err != nil {
 					return err
@@ -794,4 +821,17 @@ func normaliseOSService(service string) string {
 	default:
 		return service
 	}
+}
+
+// contradictsHeld reports whether an observed key differs from a key the asset
+// already holds of the same type FROM THE SAME SERVICE — the same rule
+// domain.compare uses for a contradiction, so a host with two certificates on
+// two ports does not contradict itself, and a rotated key on one port does.
+func contradictsHeld(held []domain.IdentityKey, k domain.IdentityKey) (domain.IdentityKey, bool) {
+	for _, h := range held {
+		if h.Type == k.Type && h.Source == k.Source && h.Value != k.Value {
+			return h, true
+		}
+	}
+	return domain.IdentityKey{}, false
 }

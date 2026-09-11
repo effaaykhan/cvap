@@ -581,3 +581,44 @@ is x/crypto's `ssh: unsupported key type %q`, which renders the PEM BLOCK LABEL,
 `CredentialGrants.*` are tenant-qualified under RLS, `credential_grants` has its policy and
 composite FKs, and deleting a tenant with grants still cascades despite the `ON DELETE RESTRICT`
 to `scan_jobs`.
+
+**42. Evidence written on the branch that DISCLAIMS authority, read by a control that
+REQUIRES it.** S42 made `DecisionAttach` record the observation's moderate keys
+(`internal/correlate/correlate.go`, the `NewAsset || Attach` block). Attach is defined — in
+`domain.Decision`'s own comment — as "weak evidence, the address alone ... never claims two
+hosts are one". The keys it now writes land in `asset_identity_keys`, which is exactly what
+`AssetIdentityKeys.SSHHostKeyFingerprintsAt` returns as ADR-091's *observed trust root* for a
+credentialed SSH job, and exactly what `domain.Resolve` later reads as merge evidence. So a
+decision that asserts nothing feeds two decisions that assert everything. Measured on the dev DB:
+an attacker who answers for an address (ARP/DHCP) gets their chosen host key added ALONGSIDE the
+real one at that address (`[SHA256:real SHA256:evil]`, zero resolution-queue items), and
+`credhost.hostKeyCallback` accepts any fingerprint bound to the host — so host-key verification,
+the one control that defeats an on-path attacker, is defeated. Planting an ssh key AND a TLS leaf
+on a keyless asset then presenting both at the attacker's own address merges the attacker's host
+onto that asset (1 asset holding both addresses). Both are regressions: under the pre-change code
+the same inputs recorded nothing and produced 2 assets.
+**The structural sub-bug that let it through:** `domain.Resolve`'s "disagreement is not outvoted"
+branch is `if len(s.agreeing) > 0 && maxStrength(conflicts) >= maxStrength(agreeing)`. Weak keys
+are deliberately NOT stored in `asset_identity_keys`, so an address-only attach has
+`agreeing == []` by construction and the contradiction is dropped rather than queued. The guard
+only fires when there is already agreement, which is the case it is least needed in.
+**The half-fix, and why it is the wrong half.** A mid-review patch added `contradictsHeld` — an
+attach will not record a key that differs from one the asset already holds at the same source.
+That closes the "add a second key beside the real one" case and leaves the case the feature
+EXISTS for wide open: an asset with no key yet (S42/ADR-093's own motivating state — every Phase 4
+host) has nothing to contradict, so the first key to answer at its address is recorded and becomes
+the trust root. Re-measured after the patch: attacker key still returned by
+`SSHHostKeyFingerprintsAt`, and planting ssh+cert then answering at the attacker's own address
+still merged their host onto the existing asset, 1 asset, 0 queue items. The generalisable
+lesson: when a write is added to serve case X and a reviewer reports it is unsafe, check whether
+the fix covers X itself or only the cases adjacent to it.
+**Why:** the commit's own comment argues "safe by construction: Record's ON CONFLICT keeps a key
+live on another asset where it is, and a key any live asset held would have made this a merge or
+a queue". Both clauses are true and neither covers a key NO asset holds yet — a fresh
+attacker-generated key. The safety argument was made about key COLLISION and the risk is key
+ADDITION.
+**How to apply:** for any write made on a "this is only weak/provisional" branch, grep for every
+reader of that table and ask what the strongest claim any of them derives from a row. If one of
+them is a trust root, the weak branch has to write somewhere the trust root does not read, or
+not write. And for any "conflicting evidence queues" rule, check whether the conflict test is
+gated on agreement existing.

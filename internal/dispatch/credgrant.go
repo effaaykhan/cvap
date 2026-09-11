@@ -276,7 +276,7 @@ func (s *Service) refuseCredentialedJob(ctx context.Context, c *store.Conn, jobI
 		slog.String("policy_id", policy.ID.String()),
 		slog.String("reason", why))
 
-	if err := (store.Jobs{}).Terminate(ctx, c, jobID, spID, store.TerminationEngineFailure); err != nil &&
+	if err := (store.Jobs{}).Terminate(ctx, c, jobID, spID, store.TerminationEngineFailure, false); err != nil &&
 		!errors.Is(err, store.ErrNotFound) {
 		return store.AuditEvent{}, err
 	}

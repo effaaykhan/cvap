@@ -96,3 +96,20 @@ In `internal/dispatch`, `export_test.go` already exports `OfferWorkForTest`; a s
 to ask "what does a DIFFERENT scan point's session do to this job's rows" without forging a cert.
 The dev DB accumulates `disp-%` tenants from every dispatch run (144 before this session); the
 suite does not clean them and another agent may be mid-run, so leave them alone.
+
+**`internal/correlate` probes.** Scratch files go in `internal/correlate/` as `package
+correlate_test`; `aareview_*_test.go` is picked up. Reuse `testDB`, `seed(t, db, label)`,
+`s.observe(t, db, at, payload)`, `sshService(addr, port, fp)`, `tlsService(addr, port, fp)`,
+`assetCount`, `quietLogger` from `correlate_integration_test.go`. `correlate.New(db,
+quietLogger()).SweepOnce(ctx)` runs the whole resolver against the dev DB in ~1.5 s per sweep;
+one sweep per "scan" is how you stage an attacker-in-the-middle scenario. `seed` makes its own
+tenant, so cross-tenant probes are two `seed` calls. `SSHHostKeyFingerprintsAt` is the ADR-091
+trust root and is the right thing to assert on — it is what `dispatch.trustMaterial` reads.
+To prove a finding is a REGRESSION rather than pre-existing, patch the one condition under
+review in place, re-run, and `cp` the saved copy back — a worktree is not needed and the shared
+dev DB makes one awkward anyway.
+
+**Task/job status probes in `internal/store`.** `seedJob(t, db, tenant, sp, reassignSafe)` +
+`Jobs.Claim` is the shortest route to an assigned job with a task; `Leases.Grant(ctx, c, job,
+holder, time.Millisecond)` then a 50 ms sleep then `Leases.ExpireLeases(ctx, c, 10)` drives the
+sweeper deterministically without touching a clock.

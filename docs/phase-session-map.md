@@ -989,6 +989,37 @@ must still resolve release at 1.0) rather than another unit test of the read.
 ([[dormant-rule-behind-a-gate]]; [[measure-dont-read]] found it — the live release read 0.8, not the
 value the unit test asserts.)
 
+### 5.13 A green acceptance that proves the opposite of its claim — state left behind by a previous session's instrument
+
+**What happened (S42, ADR-093).** The fleet credentialed run's acceptance was fixed in advance: ".146's
+sixteen inferred OpenSSH findings close as `refuted_by_credentialed`, every leg the production route, no
+harness." Taking the baseline before dispatch showed all sixteen — and four exim4 alongside — were
+**already** `refuted_by_credentialed`, closed at 09:50Z the same day by the S41 instrument's package
+read: a harness submission with no `credential_grants` row and no credential audit event. And
+`Findings.Supersede` only touches rows in `open`/`confirmed`. So a production run would have delivered a
+grant, read dpkg over SSH, correlated, and **closed nothing** — and the acceptance query would have
+returned sixteen `refuted_by_credentialed` rows and gone green. A green gate proving the opposite of its
+claim: the production route "worked" precisely because it had no work left to do, and the sixteen would
+have been credited to a route that never touched them.
+
+**Why it is its own pattern — distinct from 5.11 and 5.12.** 5.11 was a correct unit fed the wrong
+input; 5.12 a correct unit no input reaches. Here every unit and the whole path are correct and reachable
+— the *acceptance* was unfalsifiable, because a **previous session's instrument left the system in the
+accepted state** before this session's run began. The instrument did exactly what it was built for (S41
+proved the matcher on real data); its side effect on the persistent store is what poisoned the next
+session's measurement. Nothing in the run itself could detect this: the acceptance is a predicate on the
+after-state, and the after-state was already true. It was caught by taking a baseline rather than by
+trusting the acceptance, and the mitigation was to reopen the twenty with a `finding_history` row saying
+why — establish the *before*, do not assume it.
+
+**How to apply.** An acceptance stated as an after-state predicate is only a test if the before-state
+contradicts it. Before a run whose acceptance is "X becomes Y", measure that X is not already Y; if it
+is, say who made it so and reset it *with a recorded reason* rather than running anyway. And treat an
+instrument's writes to the persistent store as a hazard for the *next* session, not just this one — a
+harness that proves a path by writing the same rows the path writes leaves behind a state that makes
+the production path's first real run unmeasurable. ([[test-that-proves-nothing]] fifth shape: the
+acceptance is already true; [[measure-dont-read]] applied to the *precondition*, not the result.)
+
 ---
 
 ## 6. Standing requirement (from S23 onward)

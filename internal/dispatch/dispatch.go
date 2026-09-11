@@ -691,7 +691,7 @@ func (s *Service) onTerminal(ctx context.Context, sess *session, t *scanpointv1.
 
 	reason := terminationReason(t.GetReason())
 	err = s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
-		if err := (store.Jobs{}).Terminate(ctx, c, jobID, sess.spID, reason); err != nil &&
+		if err := (store.Jobs{}).Terminate(ctx, c, jobID, sess.spID, reason, t.GetIncomplete()); err != nil &&
 			!errors.Is(err, store.ErrNotFound) {
 			return err
 		}
@@ -1022,7 +1022,7 @@ func (s *Service) refuseJob(ctx context.Context, c *store.Conn, jobID, spID uuid
 	// side refusing a target. A Core-side refusal is the same class of event and
 	// wants the same visibility; the enum value carries both, and this comment
 	// is here so the widening is deliberate rather than assumed.
-	if err := (store.Jobs{}).Terminate(ctx, c, jobID, spID, store.TerminationScopeViolationHalt); err != nil &&
+	if err := (store.Jobs{}).Terminate(ctx, c, jobID, spID, store.TerminationScopeViolationHalt, false); err != nil &&
 		!errors.Is(err, store.ErrNotFound) {
 		return err
 	}

@@ -111,7 +111,7 @@ func TestNonReassignSafeJobCompletedByAtMostOneScanPoint(t *testing.T) {
 			defer wg.Done()
 			<-start
 			errs[i] = db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-				return (store.Jobs{}).Terminate(ctx, c, jobID, holders[i], store.TerminationCompleted)
+				return (store.Jobs{}).Terminate(ctx, c, jobID, holders[i], store.TerminationCompleted, false)
 			})
 		}(i)
 	}
@@ -203,7 +203,7 @@ func TestTerminateRefusesANonHolder(t *testing.T) {
 	// The non-holder's completion is refused — the job is still assignable, so
 	// without the holder clause it would succeed.
 	err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		return (store.Jobs{}).Terminate(ctx, c, jobID, other, store.TerminationCompleted)
+		return (store.Jobs{}).Terminate(ctx, c, jobID, other, store.TerminationCompleted, false)
 	})
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("a non-holder completed the job (got %v, want ErrNotFound); one scan point "+
@@ -229,7 +229,7 @@ func TestTerminateRefusesANonHolder(t *testing.T) {
 
 	// The real holder completes it.
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		return (store.Jobs{}).Terminate(ctx, c, jobID, holder, store.TerminationCompleted)
+		return (store.Jobs{}).Terminate(ctx, c, jobID, holder, store.TerminationCompleted, false)
 	}); err != nil {
 		t.Fatalf("the holder could not complete its own job: %v", err)
 	}

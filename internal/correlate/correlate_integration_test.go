@@ -508,6 +508,22 @@ func TestAnExistingAssetGainsTheKeysItIsLaterSeenWith(t *testing.T) {
 	if got := assetCount(t, db, s.tenant); got != 1 {
 		t.Fatalf("%d assets after the first scan, want 1", got)
 	}
+	moderateKeys := func() int {
+		t.Helper()
+		var keys int
+		if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
+			return c.QueryRow(ctx, `SELECT count(*) FROM asset_identity_keys WHERE tenant_id = $1 AND valid_to IS NULL AND strength >= 2`,
+				c.Tenant().UUID()).Scan(&keys)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return keys
+	}
+	// The before-state, asserted rather than assumed (§5.13): the asset exists
+	// with no moderate key, which is what makes the count after meaningful.
+	if keys := moderateKeys(); keys != 0 {
+		t.Fatalf("%d moderate keys after a keyless scan, want 0", keys)
+	}
 
 	// An intrusive pass at the SAME address captures the host key and a cert.
 	// The observations attach by address; the keys must land on the asset.
@@ -517,21 +533,32 @@ func TestAnExistingAssetGainsTheKeysItIsLaterSeenWith(t *testing.T) {
 	if err := c.SweepOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var keys int
-	if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
-		return c.QueryRow(ctx, `SELECT count(*) FROM asset_identity_keys WHERE tenant_id = $1 AND valid_to IS NULL AND strength >= 2`,
-			c.Tenant().UUID()).Scan(&keys)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if keys != 2 {
+	if keys := moderateKeys(); keys != 2 {
 		t.Fatalf("%d moderate keys recorded after the keyed scan attached by address, want 2 — "+
 			"an asset first seen without keys never gains them, so it can never merge across DHCP", keys)
 	}
 
+	// Address handover: a DIFFERENT host key from the same service at the same
+	// address. Nothing agrees and one moderate key decides nothing (ADR-007),
+	// so this attaches — and the attach must NOT record the newcomer's key,
+	// or the asset holds two hosts' SSH keys and ADR-091's observed-trust set
+	// for the address accepts either (B37 is the domain decision on the shape).
+	handover := second.Add(10 * time.Minute)
+	s.observe(t, db, handover, sshService("10.10.0.20", 22, "SHA256:HANDOVERHANDOVERHANDOVERHANDOVERHANDOVER"))
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := assetCount(t, db, s.tenant); got != 1 {
+		t.Fatalf("%d assets after the handover sighting, want 1 (it attaches; the domain rule is B37)", got)
+	}
+	if keys := moderateKeys(); keys != 2 {
+		t.Fatalf("%d moderate keys after a contradicting key attached by address, want 2 — "+
+			"a contradicting key must not be recorded on attach", keys)
+	}
+
 	// And now the host moves: the keys recorded on attach are what carry the
 	// merge, exactly as they would for a host first seen with them.
-	third := second.Add(30 * time.Minute)
+	third := handover.Add(20 * time.Minute)
 	s.observe(t, db, third, sshService("10.10.0.99", 22, hostKey))
 	s.observe(t, db, third, tlsService("10.10.0.99", 443, certFP))
 	if err := c.SweepOnce(ctx); err != nil {

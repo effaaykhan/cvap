@@ -412,6 +412,13 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 			terminationReason(chunk.GetTerminationReason()), sub.reason); err != nil {
 			return err
 		}
+		// The tasks a terminal already judged, revisited now their results are
+		// accepted (ADR-093 decision 3). Quarantined results are not coverage.
+		if to == store.IngestAccepted {
+			if err := (store.Jobs{}).ReconcileTasksWithResults(ctx, c, sub.jobID); err != nil {
+				return err
+			}
+		}
 
 		if sub.quarantined {
 			if err := (store.AuditEvents{}).Record(ctx, c, store.AuditEvent{

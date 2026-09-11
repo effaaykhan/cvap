@@ -303,5 +303,29 @@ func (Leases) ExpireLeases(ctx context.Context, c *Conn, limit int) ([]ExpiredLe
 		}
 		out = append(out, e)
 	}
-	return out, mapError(rows.Err())
+	if err := rows.Err(); err != nil {
+		return nil, mapError(err)
+	}
+	rows.Close()
+
+	// The tasks follow the job here too (ADR-093 decision 3). A job that
+	// failed on lease loss is judged task by task like any other failure; a
+	// job going back to the queue takes its tasks back to pending, with no
+	// started_at, because no scan point holds it and a `running` task under a
+	// `queued` job reads as a target being probed right now.
+	for _, e := range out {
+		if e.Requeued {
+			if _, err := c.Exec(ctx, `
+				UPDATE scan_tasks SET status = 'pending', started_at = NULL
+				 WHERE tenant_id = $1 AND job_id = $2 AND status = 'running'`,
+				c.Tenant().UUID(), e.JobID); err != nil {
+				return nil, mapError(err)
+			}
+			continue
+		}
+		if err := endTasks(ctx, c, e.JobID, false, TaskFailed); err != nil {
+			return nil, mapError(err)
+		}
+	}
+	return out, nil
 }
