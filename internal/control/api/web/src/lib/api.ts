@@ -21,6 +21,8 @@ export type KnowledgeFeed = Schemas["KnowledgeFeedResponse"];
 export type ReleaseCoverage = Schemas["ReleaseCoverageResponse"];
 export type Scan = Schemas["ScanResponse"];
 export type ScanList = Schemas["ScanListResponse"];
+export type ScanPoint = Schemas["ScanPointResponse"];
+export type ScanPointList = Schemas["ScanPointListResponse"];
 
 // ApiError carries the server's stable code so a caller can branch — notably 403
 // (forbidden), which the UI surfaces honestly rather than swallowing.
@@ -96,6 +98,7 @@ export const api = {
   listPolicies: () => request<Schemas["PolicyListResponse"]>("GET", "/v1/policies"),
 
   listScans: (q: string) => request<ScanList>("GET", `/v1/scans${q}`),
+  listScanPoints: () => request<ScanPointList>("GET", "/v1/scan-points"),
   getScan: (id: string) => request<Scan>("GET", `/v1/scans/${id}`),
   createScan: (body: Schemas["CreateScanRequest"]) =>
     request<Scan>("POST", "/v1/scans", body),

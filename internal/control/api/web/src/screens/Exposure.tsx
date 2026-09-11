@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { PageHead } from "../components/PageHead";
 
 // Exposure by zone: how many OPEN findings are visible from each zone, by
 // severity. Presented as what the data IS — a zone-derived count — and NOT as a
@@ -14,12 +15,10 @@ export function Exposure() {
 
   return (
     <section>
-      <h1>Exposure by zone</h1>
-      <p className="note">
-        Open findings visible from each zone. A finding seen from several zones is counted once in
-        each — these columns are not a total. This reflects which vantage points observed a
-        finding, not whether it is reachable from the internet (not yet assessed).
-      </p>
+      <PageHead
+        title="Exposure by zone"
+        sub="Open findings visible from each zone. A finding seen from several zones is counted once in each, so these columns are not a total. Zone-derived and coarse: which vantage points observed a finding, never a per-asset reachability probe."
+      />
       {isLoading && <p>Loading…</p>}
       {error && <p className="error">Could not load exposure.</p>}
       {data && (

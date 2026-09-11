@@ -1,14 +1,15 @@
 import { useState } from "react";
-import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { Link, NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./lib/auth";
 import { has } from "./lib/api";
 import { Login } from "./screens/Login";
 import { ChangePassword } from "./screens/ChangePassword";
+import { Overview } from "./screens/Overview";
 import { Findings } from "./screens/Findings";
 import { FindingDetail } from "./screens/FindingDetail";
 import { Assets } from "./screens/Assets";
 import { AssetDetail } from "./screens/AssetDetail";
-import { Scans } from "./screens/Scans";
+import { Health } from "./screens/Health";
 import { ScanDetail } from "./screens/ScanDetail";
 import { Exposure } from "./screens/Exposure";
 import { Knowledge } from "./screens/Knowledge";
@@ -41,18 +42,18 @@ export function App() {
   if (mustChange) return <ChangePassword />;
   if (!session) return <Login />;
 
-  // Nav items reflect the session's permissions. This is a courtesy: every route
-  // is enforced server-side, and each screen surfaces a 403 if a control was
-  // shown that should not have been. Hiding is never the only gate.
+  // The console's five surfaces (design spec, backlog #12): landing first,
+  // triage as the centre of gravity, health as its own place. Nav items reflect
+  // the session's permissions as a courtesy: every route is enforced server-side,
+  // and each screen surfaces a 403 if a control was shown that should not have
+  // been. Hiding is never the only gate.
+  const canFindings = has(session, "finding.read");
   const nav: [string, string, boolean][] = [
-    ["/findings", "Findings", has(session, "finding.read")],
+    ["/", "Overview", true],
+    ["/triage", "Triage", canFindings],
     ["/assets", "Assets", has(session, "asset.read")],
-    ["/scans", "Scans", has(session, "scan.read")],
-    ["/exposure", "Exposure", has(session, "finding.read")],
-    ["/knowledge", "Knowledge", has(session, "finding.read")],
-    // No permission gate: changing your own password is available to any
-    // signed-in operator.
-    ["/settings", "Settings", true],
+    ["/health", "Health", has(session, "scan.read")],
+    ["/knowledge", "Knowledge", canFindings],
   ];
 
   return (
@@ -61,7 +62,7 @@ export function App() {
         <span className="brand">CVAP</span>
         <nav>
           {nav.filter(([, , ok]) => ok).map(([to, label]) => (
-            <NavLink key={to} to={to}>
+            <NavLink key={to} to={to} end={to === "/"}>
               {label}
             </NavLink>
           ))}
@@ -76,23 +77,30 @@ export function App() {
             {theme === "dark" ? "☀" : "☾"}
           </button>
           <span className="email">{session.email}</span>
+          <span className="sep">·</span>
+          <Link className="settings" to="/settings">Settings</Link>
           <button className="link" onClick={() => void logout()}>
             Sign out
           </button>
         </span>
       </header>
-      <main>
+      <main className="console">
         <Routes>
-          <Route path="/findings" element={<Findings />} />
+          <Route path="/" element={<Overview />} />
+          <Route path="/triage" element={<Findings />} />
+          {/* The old table-per-screen paths keep working: bookmarks and the
+              detail crumbs land on the console surface that absorbed them. */}
+          <Route path="/findings" element={<Navigate to="/triage" replace />} />
           <Route path="/findings/:id" element={<FindingDetail />} />
           <Route path="/assets" element={<Assets />} />
           <Route path="/assets/:id" element={<AssetDetail />} />
-          <Route path="/scans" element={<Scans />} />
+          <Route path="/health" element={<Health />} />
+          <Route path="/scans" element={<Navigate to="/health" replace />} />
           <Route path="/scans/:id" element={<ScanDetail />} />
           <Route path="/exposure" element={<Exposure />} />
           <Route path="/knowledge" element={<Knowledge />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="*" element={<Navigate to="/findings" replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
     </div>

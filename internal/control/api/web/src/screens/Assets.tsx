@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { ExportButton } from "../components/ExportButton";
+import { PageHead } from "../components/PageHead";
 
 export function Assets() {
   const [q, setQ] = useState("");
@@ -22,10 +23,11 @@ export function Assets() {
 
   return (
     <section>
-      <div className="row-between">
-        <h1>Assets</h1>
-        <ExportButton perm="asset.export_all" href={api.exportURL("assets", query)} />
-      </div>
+      <PageHead
+        title="Assets"
+        sub="What discovery has seen and correlated. Advisory status, OS attribution and its provenance are on each asset."
+        action={<ExportButton perm="asset.export_all" href={api.exportURL("assets", query)} />}
+      />
       <div className="filters">
         <input placeholder="search hostname or address" value={q} onChange={(e) => setQ(e.target.value)} />
         <input placeholder="environment" value={environment} onChange={(e) => setEnvironment(e.target.value)} />
@@ -44,10 +46,10 @@ export function Assets() {
             {data.assets.map((a) => (
               <tr key={a.id}>
                 <td><Link to={`/assets/${a.id}`}>{a.hostname || a.id}</Link></td>
-                <td>{a.os_family}</td>
+                <td>{a.os_family || <span className="unknown">unknown</span>}</td>
                 <td>{a.environment || "—"}</td>
-                <td>{a.fragile ? "yes" : ""}</td>
-                <td>{fmt(a.last_seen)}</td>
+                <td>{a.fragile ? <span className="chip chip-high">fragile</span> : ""}</td>
+                <td className="data">{fmt(a.last_seen)}</td>
               </tr>
             ))}
             {data.assets.length === 0 && <tr><td colSpan={5} className="muted">No assets match.</td></tr>}

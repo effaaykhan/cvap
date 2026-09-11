@@ -282,3 +282,153 @@ code { background:var(--surface-2); padding:.06rem .35rem; border-radius:4px; fo
   caption-side:top; text-align:left; color:var(--muted);
   font-size:.76rem; margin-bottom:.4rem;
 }
+
+/* ======================================================================== */
+/* Console (backlog #12): the shell and the three surfaces the design canvas  */
+/* drew — Overview, Triage, Health. Same tokens; the finding row stays the    */
+/* signature. Everything below extends the sheet above, it replaces nothing.  */
+/* ======================================================================== */
+
+/* ---- shell: tenant + operator in the top bar, five-item nav ------------- */
+.who .tenant { font-family:var(--mono); font-size:.74rem; color:var(--muted); }
+.who .sep { color:var(--faint); }
+.who a.settings { color:var(--muted); font-size:.8rem; }
+.who a.settings:hover { color:var(--fg); text-decoration:none; }
+main.console { max-width:1440px; padding:1.4rem 1.6rem; }
+
+/* ---- page head: title, one honest sentence, right-aligned meta ---------- */
+.page-head { display:flex; justify-content:space-between; align-items:baseline; gap:1rem; margin-bottom:1.25rem; }
+.page-head h1 { margin:0; }
+.page-head .sub { color:var(--muted); font-size:.8rem; margin-top:.25rem; max-width:72ch; }
+.page-head .meta { color:var(--faint); font-family:var(--mono); font-size:.74rem; text-align:right; white-space:nowrap; }
+.page-head .meta .muted { color:var(--muted); }
+
+/* ---- section label: .68rem/700 uppercase muted, the canvas's "lbl" ------- */
+.lbl { font-size:.68rem; font-weight:700; text-transform:uppercase; letter-spacing:.09em; color:var(--muted); }
+.lbl.warn { color:var(--sev-high); }
+.card-head { display:flex; justify-content:space-between; align-items:center; gap:.75rem; }
+.card-head .aside { color:var(--faint); font-size:.72rem; }
+
+/* ---- metric strip -------------------------------------------------------- */
+.metric-strip { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1rem; margin-bottom:1.35rem; }
+.metric { padding:.9rem 1rem; }
+.metric .row { display:flex; justify-content:space-between; align-items:flex-end; margin-top:.35rem; gap:.5rem; }
+.metric .value { font:650 1.6rem/1 var(--sans); letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+.metric .value.warn { color:var(--sev-high); }
+.metric .value.danger { color:var(--sev-critical); }
+.metric .qual { font-family:var(--mono); font-size:.74rem; color:var(--muted); }
+.metric .foot { color:var(--faint); font-size:.72rem; margin-top:.15rem; }
+.metric.attention { border-color:color-mix(in oklab, var(--sev-high), transparent 60%); }
+
+/* ---- overview grid ------------------------------------------------------- */
+.overview { display:grid; grid-template-columns:1.65fr 1fr; gap:1.1rem; align-items:start; }
+.stack { display:flex; flex-direction:column; gap:1.1rem; }
+.card.section { padding:1rem 1.1rem; }
+
+/* Worst-right-now rows: the finding-row signature, outside a table. */
+.worst { margin-top:.6rem; }
+.worst .frow-line {
+  display:grid; grid-template-columns:4px 1fr auto; gap:.75rem; align-items:center;
+  padding:.55rem .25rem; border-bottom:1px solid var(--line);
+}
+.worst .frow-line:last-child { border-bottom:none; }
+.worst .rail { align-self:stretch; border-radius:2px; background:var(--sev-info); width:2px; justify-self:start; }
+.worst .rail-critical, .worst .rail-high { width:4px; }
+.worst .rail-medium { width:3px; }
+.worst .rail-critical { background:var(--sev-critical); }
+.worst .rail-high { background:var(--sev-high); }
+.worst .rail-medium { background:var(--sev-medium); }
+.worst .rail-low { background:var(--sev-low); }
+.worst .line1 { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
+.worst .line1 a { font-family:var(--mono); font-size:.82rem; }
+.worst .line2 { color:var(--faint); font-family:var(--mono); font-size:.72rem; margin-top:.1rem; }
+.worst .right { text-align:right; }
+.worst .right .faint { font-size:.68rem; }
+.card .foot-note { color:var(--muted); font-size:.72rem; margin-top:.7rem; border-top:1px solid var(--line); padding-top:.6rem; }
+
+/* Attention list (not working) and change list: dot + sentence. */
+.attn { margin-top:.6rem; display:flex; flex-direction:column; gap:.65rem; font-size:.8rem; }
+.attn .item { display:flex; gap:.6rem; align-items:baseline; }
+.attn .item a { color:var(--fg); }
+.attn .item .detail { color:var(--faint); }
+.dot { width:8px; height:8px; border-radius:50%; display:inline-block; flex:none; position:relative; top:-1px; }
+.dot-danger { background:var(--danger); } .dot-warn { background:var(--sev-high); }
+.dot-medium { background:var(--sev-medium); } .dot-ok { background:var(--ok); }
+.dot-muted { background:var(--faint); } .dot-accent { background:var(--accent); }
+.card.attention { border-color:color-mix(in oklab, var(--sev-high), transparent 62%); }
+/* A surface the console needs whose read does not exist yet. Said plainly, in
+   the section's own place, so the gap is visible rather than the section quietly
+   missing — the same rule the not-working list itself enforces. */
+.not-measured { color:var(--faint); font-size:.74rem; border:1px dashed var(--line-strong); border-radius:6px; padding:.5rem .7rem; margin-top:.6rem; }
+
+/* ---- chips: state words as tinted pills (the canvas's "chip") ------------ */
+.chip {
+  display:inline-block; font:600 .68rem/1.5 var(--mono); letter-spacing:.03em;
+  padding:.1rem .5rem; border-radius:999px; border:1px solid var(--line-strong); color:var(--muted);
+}
+.chip-ok { color:var(--ok); border-color:color-mix(in oklab, var(--ok), transparent 55%); background:color-mix(in oklab, var(--ok), transparent 88%); }
+.chip-warn { color:var(--sev-medium); border-color:color-mix(in oklab, var(--sev-medium), transparent 55%); background:color-mix(in oklab, var(--sev-medium), transparent 88%); }
+.chip-high { color:var(--sev-high); border-color:color-mix(in oklab, var(--sev-high), transparent 55%); background:color-mix(in oklab, var(--sev-high), transparent 88%); }
+.chip-danger { color:var(--sev-critical); border-color:color-mix(in oklab, var(--sev-critical), transparent 55%); background:color-mix(in oklab, var(--sev-critical), transparent 88%); }
+.chip-muted { color:var(--faint); border-style:dashed; }
+.chip-accent { color:var(--accent); border-color:color-mix(in oklab, var(--accent), transparent 55%); }
+
+/* ---- triage: filter chips, rank, confidence lane, evidence expansion ----- */
+.triage-filters { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; margin:0 0 .5rem; }
+.triage-filters .vsep { width:1px; height:20px; background:var(--line-strong); margin:0 .2rem; }
+.filt {
+  font:600 .74rem var(--sans); color:var(--muted); background:var(--surface-2);
+  border:1px solid var(--line-strong); border-radius:6px; padding:.3rem .65rem; cursor:pointer;
+}
+.filt:hover { color:var(--fg); background:var(--surface-2); }
+.filt.on { color:var(--fg); border-color:var(--accent); background:var(--surface-2); }
+.triage-filters input { margin-left:auto; width:220px; background:var(--surface-2); }
+.triage-filters select { background:var(--surface-2); font-weight:600; font-size:.74rem; color:var(--muted); }
+.rank { font-family:var(--mono); font-size:.72rem; color:var(--faint); margin-right:.35rem; }
+.finding-cell a { font-family:var(--mono); }
+.finding-cell .cat { color:var(--muted); margin-left:.4rem; }
+.lane { display:inline-flex; align-items:center; gap:.4rem; font-size:.72rem; }
+.cdot { width:9px; height:9px; border-radius:2px; flex:none; }
+.cdot-high { background:var(--ok); } .cdot-medium { background:var(--sev-medium); } .cdot-low { background:var(--faint); }
+.lane .val { font-family:var(--mono); color:var(--faint); }
+td.num.hot { color:var(--sev-high); }
+.exposure-cell { font-family:var(--mono); font-size:.72rem; color:var(--faint); }
+td.expand { text-align:right; }
+td.expand button { padding:.1rem .45rem; font-size:.9rem; line-height:1; background:transparent; color:var(--accent); border:0; }
+td.expand button:hover { background:var(--surface-2); }
+tr.evidence-row td { background:var(--surface-2); border-bottom:1px solid var(--line-strong); padding:.8rem 1rem 1rem; }
+tr.evidence-row .lbl { margin-bottom:.5rem; display:block; }
+.evidence-facts { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.8rem 1.4rem; font-size:.76rem; margin-bottom:.8rem; }
+.evidence-facts .k { color:var(--faint); font-size:.66rem; text-transform:uppercase; letter-spacing:.04em; }
+.evidence-facts .v { font-family:var(--mono); }
+.legend { margin-top:1rem; display:flex; gap:1.4rem; align-items:center; flex-wrap:wrap; font-size:.72rem; color:var(--muted); border-top:1px solid var(--line); padding-top:.75rem; }
+.legend .lbl { margin-right:.2rem; }
+.legend .end { margin-left:auto; color:var(--faint); }
+
+/* ---- health ------------------------------------------------------------- */
+.health-grid { display:grid; grid-template-columns:1fr 1fr; gap:1.1rem; align-items:start; }
+.hrow { display:grid; grid-template-columns:1fr auto; gap:.75rem; align-items:center; padding:.5rem .15rem; border-bottom:1px solid var(--line); font-size:.8rem; }
+.hrow:last-child { border-bottom:none; }
+.hrow .dot { margin-right:.45rem; }
+.hrow .name { font-family:var(--mono); font-weight:600; }
+.hrow .zone { color:var(--muted); margin-left:.35rem; }
+.hrow .state { font-family:var(--mono); font-size:.76rem; color:var(--muted); text-align:right; }
+.hrow .state.danger { color:var(--danger); } .hrow .state.warn { color:var(--sev-medium); } .hrow .state.high { color:var(--sev-high); }
+.hrow .reason { display:block; color:var(--faint); font-size:.7rem; margin-top:.1rem; }
+.card.section h2 { margin-top:1.4rem; }
+.create { margin-top:1rem; }
+.create textarea { width:100%; margin:.5rem 0; }
+.create .check { display:flex; gap:.5rem; align-items:center; font-size:.8rem; color:var(--muted); margin:.4rem 0 .6rem; }
+
+@media (max-width:1000px) {
+  .metric-strip { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .overview, .health-grid { grid-template-columns:1fr; }
+  .evidence-facts { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+@media (max-width:640px) {
+  .metric-strip { grid-template-columns:1fr; }
+  .page-head { flex-direction:column; align-items:flex-start; }
+  .page-head .meta { text-align:left; white-space:normal; }
+  .triage-filters input { margin-left:0; width:100%; }
+  main.console { padding:1rem .8rem; }
+}

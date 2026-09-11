@@ -32,7 +32,7 @@ export function ScanDetail() {
 
   return (
     <section className="detail">
-      <p className="crumb"><Link to="/scans">← Scans</Link></p>
+      <p className="crumb"><Link to="/health">← Health</Link></p>
       <h1>Scan {s.id.slice(0, 8)}</h1>
       <dl className="facts">
         <div className="kv"><dt>Type</dt><dd>{s.scan_type}</dd></div>

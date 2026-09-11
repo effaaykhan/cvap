@@ -131,3 +131,31 @@ finding-count-history rollup for rung 5 (to be decided in the plan — `finding_
    (e.g. 7 days). Leaning: a fixed window first (no new per-user state), last-visit later.
 3. **Phasing:** confirm the three-phase split above (triage+language → landing+health → trends) for
    the implementation plan.
+
+## Implementation status (S42, 2026-09-11)
+
+The shell and the three surfaces are built on the existing reads, in `internal/control/api/web`
+(`Overview.tsx`, `Findings.tsx` as Triage, `Health.tsx`, the console section of `styles.css`,
+`lib/console.ts` for every rule about what a number means, unit-tested). Nav is
+`Overview · Triage · Assets · Health · Knowledge`; the old paths redirect. The detail views are
+reused as-is, as the IA says.
+
+What the surfaces show is bounded by the backend table above, and the bound is visible on the
+page rather than smoothed over:
+
+- **Triage** is complete on existing reads: rank, KEV, severity rail, confidence lane (banded on
+  the value — the *source* of the claim is on the expanded evidence, where `has_vuln_def` says
+  advisory-matched or rule-inferred), EPSS/CVSS with a dash for unscored, zone-derived exposure,
+  evidence one click away (the row fetches the finding).
+- **Overview** shows KEV-on-fleet and open findings from the priority-ordered list, labelled
+  `exact` when the server returned no cursor and `of the first N` when it did — never a fleet
+  total from a truncated page. *Worst right now* and *Not working* (scan points, feeds, failed
+  scans) are live. *Changed since your last visit* and the *trend* line are rendered as
+  **not measured**, in their own place, until the delta and history reads exist.
+- **Health** shows scan points worst-first (server-synthesised health), recent scans with the
+  create form, feed freshness chips, and a pipeline-and-safety card whose three counters
+  (ingest backlog, kill-switch state, unresolved correlations) read **no read yet**.
+  Blocked-for-capacity is named as indistinguishable from queued until its signal is served.
+
+Remaining, in the spec's own phasing: the delta read, the not-working reads (blocked scans,
+ingest backlog, kill-switch state), and the history rollup for rung 5.

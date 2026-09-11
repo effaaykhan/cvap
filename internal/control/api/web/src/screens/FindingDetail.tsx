@@ -19,7 +19,7 @@ export function FindingDetail() {
 
   return (
     <section className="detail">
-      <p className="crumb"><Link to="/findings">← Findings</Link></p>
+      <p className="crumb"><Link to="/triage">← Triage</Link></p>
       <div className="row-between">
         <h1><span className={`sev sev-${f.severity}`}>{f.severity}</span> {f.rule}</h1>
         <span className="tag">{f.status}</span>

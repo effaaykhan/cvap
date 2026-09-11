@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api, type KnowledgeFeed, type ReleaseCoverage } from "../lib/api";
+import { PageHead } from "../components/PageHead";
 
 // Coverage state labels (B29). "Out of coverage" means the release is past its
 // advisory window — the keyspace stopped accumulating for it, so a no-match on a
@@ -85,12 +86,10 @@ export function Knowledge() {
 
   return (
     <section>
-      <h1>Knowledge feeds</h1>
-      <p className="note">
-        Vendor-advisory feeds behind advisory-matched findings. <strong>Stale</strong> means the
-        last fetch is older than the feed's own freshness threshold, so matching against it is
-        under-reporting — a stale feed is a source of missed findings, not just old data.
-      </p>
+      <PageHead
+        title="Knowledge feeds"
+        sub={<>Vendor-advisory feeds behind advisory-matched findings. <strong>Stale</strong> means the last fetch is older than the feed's own threshold, so matching against it under-reports: a stale feed is missed findings, not just old data.</>}
+      />
       {isLoading && <p>Loading…</p>}
       {error && <p className="error">Could not load feed freshness.</p>}
       {anyStale && (

@@ -1,52 +1,12 @@
 import { useState, type FormEvent } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, ApiError, has } from "../lib/api";
-import { useAuth } from "../lib/auth";
+import { api, ApiError } from "../lib/api";
 
-export function Scans() {
-  const { session } = useAuth();
-  const [status, setStatus] = useState("");
-  const query = status ? `?status=${status}` : "";
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["scans", query],
-    queryFn: () => api.listScans(query),
-  });
+// The scan list lives on Health (console rung 4); this file keeps the create
+// form, which Health renders for an operator holding scan.create.
 
-  return (
-    <section>
-      <h1>Scans</h1>
-      {has(session, "scan.create") && <CreateScan />}
-      <div className="filters">
-        <select value={status} onChange={(e) => setStatus(e.target.value)}>
-          {["", "pending", "planning", "running", "completed", "failed", "cancelled", "killed"].map((s) => (
-            <option key={s} value={s}>{s || "any status"}</option>
-          ))}
-        </select>
-      </div>
-      {isLoading && <p>Loading…</p>}
-      {error && <p className="error">Could not load scans.</p>}
-      {data && (
-        <table>
-          <thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Created</th></tr></thead>
-          <tbody>
-            {data.scans.map((s) => (
-              <tr key={s.id}>
-                <td><Link to={`/scans/${s.id}`}>{s.id.slice(0, 8)}</Link></td>
-                <td>{s.scan_type}</td>
-                <td>{s.status}</td>
-                <td>{s.created_at ? new Date(s.created_at).toLocaleString() : "—"}</td>
-              </tr>
-            ))}
-            {data.scans.length === 0 && <tr><td colSpan={4} className="muted">No scans.</td></tr>}
-          </tbody>
-        </table>
-      )}
-    </section>
-  );
-}
-
-function CreateScan() {
+export function CreateScan() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const policies = useQuery({ queryKey: ["policies"], queryFn: () => api.listPolicies(), retry: false });
@@ -103,6 +63,7 @@ function CreateScan() {
         <select value={scanType} onChange={(e) => setScanType(e.target.value)}>
           <option value="discovery">discovery</option>
           <option value="fingerprint">fingerprint</option>
+          <option value="host">host (credentialed inventory)</option>
         </select>
         <select value={targetType} onChange={(e) => setTargetType(e.target.value)}>
           <option value="cidr">cidr</option>
