@@ -35,6 +35,18 @@ type AssetSummary struct {
 	Fragile     bool      `json:"fragile" doc:"Rate-capped and probe-suppressed regardless of policy (ADR-024)."`
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
+
+	// The risk facts an operator triages systems by, on the row itself.
+	Address       string `json:"address,omitempty" doc:"The earliest current address, for assets with no hostname."`
+	OpenFindings  int    `json:"open_findings" doc:"Count of open or confirmed findings on this asset — the same rows GET /v1/findings?asset_id= pages over."`
+	WorstSeverity string `json:"worst_severity,omitempty" doc:"The highest severity among its open findings; absent when none."`
+	KEVFindings   int    `json:"kev_findings" doc:"Open findings whose CVE is in CISA KEV."`
+	// AdvisoryStatus is the host's advisory posture as ONE server-owned value
+	// (ADR-068): no_release | clean | cannot_know | vulnerable. "clean" is emitted
+	// only when a release is resolved AND in coverage AND nothing matched — it is
+	// never an empty finding list. A client renders this; there is no other clean
+	// signal, so cannot-know cannot collapse into clean at the wire.
+	AdvisoryStatus string `json:"advisory_status" doc:"no_release | clean | cannot_know | vulnerable (ADR-068). The only expression of advisory-clean; emptiness of the finding list is never a clean verdict."`
 }
 
 // AssetListResponse is a keyset page of assets, newest-seen first.
@@ -66,12 +78,11 @@ type AssetServiceResponse struct {
 // AssetResponse is the full asset detail.
 type AssetResponse struct {
 	AssetSummary
-	OSVersion    string                 `json:"os_version,omitempty"`
-	Vendor       string                 `json:"vendor,omitempty"`
-	Owner        string                 `json:"owner,omitempty"`
-	Addresses    []AssetAddressResponse `json:"addresses"`
-	Services     []AssetServiceResponse `json:"services"`
-	OpenFindings int                    `json:"open_findings" doc:"Count of open or confirmed findings on this asset."`
+	OSVersion string                 `json:"os_version,omitempty"`
+	Vendor    string                 `json:"vendor,omitempty"`
+	Owner     string                 `json:"owner,omitempty"`
+	Addresses []AssetAddressResponse `json:"addresses"`
+	Services  []AssetServiceResponse `json:"services"`
 
 	// OS attribution (ADR-061), the three-state model made visible:
 	//   - distro_family absent            -> no attribution
@@ -99,13 +110,6 @@ type AssetResponse struct {
 	// accumulating for it. Absent when there is no resolved release.
 	ReleaseCoverageState *string `json:"release_coverage_state,omitempty" doc:"covered | out_of_coverage | unknown. out_of_coverage means a no-advisory result is cannot-know, not clean — the release is past its feed's window."`
 	ReleaseCoverageEnd   *string `json:"release_coverage_end,omitempty" doc:"The effective last-covered date for the release: the newest advisory the keyspace holds for it, or the feed's ESM end."`
-
-	// AdvisoryStatus is the host's advisory posture as ONE server-owned value
-	// (ADR-068): no_release | clean | cannot_know | vulnerable. "clean" is emitted
-	// only when a release is resolved AND in coverage AND nothing matched — it is
-	// never an empty finding list. A client renders this; there is no other clean
-	// signal, so cannot-know cannot collapse into clean at the wire.
-	AdvisoryStatus string `json:"advisory_status" doc:"no_release | clean | cannot_know | vulnerable (ADR-068). The only expression of advisory-clean; emptiness of the finding list is never a clean verdict."`
 }
 
 func assetSummary(a *store.Asset) AssetSummary {
@@ -114,6 +118,9 @@ func assetSummary(a *store.Asset) AssetSummary {
 		DeviceType: a.DeviceType, Criticality: string(a.Criticality),
 		Environment: a.Environment, Fragile: a.Fragile,
 		FirstSeen: a.FirstSeen, LastSeen: a.LastSeen,
+		Address: a.Address, OpenFindings: a.OpenFindings, WorstSeverity: a.WorstSeverity,
+		KEVFindings:    a.KEVFindings,
+		AdvisoryStatus: string(domain.AssetAdvisoryStatus(a.ReleaseResolved, a.InCoverage, a.HasAdvisoryFinding)),
 	}
 }
 
@@ -136,6 +143,16 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 				"fragile must be true or false.", nil)
 			return
 		}
+	}
+
+	filter.AtRisk = q.Get("at_risk") == "true"
+	switch q.Get("sort") {
+	case "", "last_seen":
+	case "risk":
+		filter.SortByRisk = true
+	default:
+		writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest, "sort must be last_seen or risk.", nil)
+		return
 	}
 
 	limit := 50
@@ -193,17 +210,24 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// GetDetail does not carry the list's lateral risk facts; the detail's own
+	// reads fill the same two fields the summary exposes, so the row and the
+	// detail agree by construction on open_findings and advisory_status.
+	summary := assetSummary(&d.Asset)
+	summary.OpenFindings = d.OpenFindings
+	summary.AdvisoryStatus = advisoryStatusOf(d.DistroRelease, d.ReleaseCoverageState, d.HasOpenAdvisoryFinding)
+	if len(d.Addresses) > 0 {
+		summary.Address = d.Addresses[0].IP
+	}
 	out := AssetResponse{
-		AssetSummary: assetSummary(&d.Asset),
+		AssetSummary: summary,
 		OSVersion:    d.OSVersion, Vendor: d.Vendor, Owner: d.Owner,
 		Addresses:    make([]AssetAddressResponse, 0, len(d.Addresses)),
 		Services:     make([]AssetServiceResponse, 0, len(d.Services)),
-		OpenFindings: d.OpenFindings,
 		DistroFamily: d.DistroFamily, DistroRelease: d.DistroRelease,
 		OSConfidence: d.OSConfidence, OSProvenance: d.OSProvenance,
 		ReleaseConfidence: d.ReleaseConfidence, ReleaseProvenance: d.ReleaseProvenance,
 		ReleaseCoverageState: d.ReleaseCoverageState, ReleaseCoverageEnd: dateOrNil(d.ReleaseCoverageEnd),
-		AdvisoryStatus: advisoryStatusOf(d.DistroRelease, d.ReleaseCoverageState, d.HasOpenAdvisoryFinding),
 	}
 	for _, a := range d.Addresses {
 		out.Addresses = append(out.Addresses, AssetAddressResponse{IP: a.IP, MAC: a.MAC, ValidFrom: a.ValidFrom})

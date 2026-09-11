@@ -28,6 +28,20 @@ type ChangedFindingResponse struct {
 	At            time.Time `json:"at" doc:"When it appeared (first_seen) or, for a KEV listing, the date CISA added the CVE."`
 }
 
+// AssetRiskResponse is one system on the worst-systems list.
+type AssetRiskResponse struct {
+	ID            string `json:"id"`
+	Hostname      string `json:"hostname,omitempty"`
+	Address       string `json:"address,omitempty"`
+	Open          int    `json:"open"`
+	Critical      int    `json:"critical"`
+	High          int    `json:"high"`
+	Medium        int    `json:"medium"`
+	Low           int    `json:"low"`
+	KEV           int    `json:"kev"`
+	WorstSeverity string `json:"worst_severity"`
+}
+
 // TrendPointResponse is one day of the open-finding series.
 type TrendPointResponse struct {
 	Day  string `json:"day" doc:"UTC calendar day, YYYY-MM-DD."`
@@ -50,6 +64,8 @@ type FindingSummaryStatsResponse struct {
 
 	NewItems       []ChangedFindingResponse `json:"new_items"`
 	KEVListedItems []ChangedFindingResponse `json:"kev_listed_items"`
+
+	WorstAssets []AssetRiskResponse `json:"worst_assets" doc:"The systems carrying the most open findings, worst first: KEV first, then the highest severity present, then count. Which system is vulnerable, by asset rather than by rule."`
 
 	TrendDays int                  `json:"trend_days"`
 	Trend     []TrendPointResponse `json:"trend" doc:"Oldest first; the last point is today so far. Derived from first_seen and resolved_at, so it is reproducible from the finding rows and has no rollup of its own."`
@@ -156,6 +172,13 @@ func (s *Server) findingSummaryStats(w http.ResponseWriter, r *http.Request) {
 		ReopenedSince: stats.ReopenedSince, KEVListedSince: stats.KEVListedSince,
 		NewItems: items(stats.NewItems), KEVListedItems: items(stats.KEVListedItems),
 		TrendDays: trendDays, Trend: make([]TrendPointResponse, 0, len(stats.Trend)),
+		WorstAssets: make([]AssetRiskResponse, 0, len(stats.WorstAssets)),
+	}
+	for _, a := range stats.WorstAssets {
+		out.WorstAssets = append(out.WorstAssets, AssetRiskResponse{
+			ID: a.ID.String(), Hostname: a.Hostname, Address: a.Address, Open: a.Open,
+			Critical: a.Critical, High: a.High, Medium: a.Medium, Low: a.Low, KEV: a.KEV, WorstSeverity: a.WorstSeverity,
+		})
 	}
 	for _, p := range stats.Trend {
 		out.Trend = append(out.Trend, TrendPointResponse{Day: p.Day.UTC().Format("2006-01-02"), Open: p.Open, KEV: p.KEV})

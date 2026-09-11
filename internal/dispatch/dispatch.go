@@ -695,6 +695,16 @@ func (s *Service) onTerminal(ctx context.Context, sess *session, t *scanpointv1.
 			!errors.Is(err, store.ErrNotFound) {
 			return err
 		}
+		// The scan settles in the same transaction as its last job: a scan that
+		// stayed `running` after every job had ended was the deploy estate's
+		// state for thirty scans, and an operator reads "running" as work.
+		if job, err := (store.Jobs{}).GetByID(ctx, c, jobID); err == nil {
+			if _, err := (store.Scans{}).SettleIfDone(ctx, c, job.ScanID); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
 		if err := (store.Leases{}).Release(ctx, c, jobID, t.GetLeaseEpoch(), sess.spID, store.LeaseReleased); err != nil &&
 			!errors.Is(err, store.ErrNotFound) {
 			return err

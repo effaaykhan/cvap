@@ -4,7 +4,6 @@ import { useQuery } from "@tanstack/react-query";
 import { api, has } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { PageHead } from "../components/PageHead";
-import { CreateScan } from "./Scans";
 import { SegmentBar, RatioBar, type SegmentSpec } from "../components/Charts";
 import { ageRatio, ago, fmtTime, threshold, worstFirst } from "../lib/console";
 
@@ -124,7 +123,7 @@ export function Health() {
               <div className="foot-note">Queued jobs no online, capable scan point in a permitted zone can claim — the same predicate scan creation refuses on. The scan reports nothing rather than "nothing found".</div>
             </div>
           )}
-          {has(session, "scan.create") && <CreateScan />}
+          <div className="foot-note"><Link to="/scans">Start a scan →</Link></div>
         </div>
 
         <div className="card section">

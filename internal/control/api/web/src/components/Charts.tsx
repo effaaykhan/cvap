@@ -1,4 +1,5 @@
 import { useId, useState } from "react";
+import { Link } from "react-router-dom";
 import { sparkPath, stackSegments } from "../lib/console";
 
 // Small chart primitives on the console's tokens. Each one: thin marks, a
@@ -88,7 +89,7 @@ export function HBars({ rows, unit = "findings" }: { rows: HBarRow[]; unit?: str
         const byKey = Object.fromEntries(r.segments.map((s) => [s.key, s]));
         return (
           <div className="hbar" key={r.key}>
-            <span className="hbar-label"><span className="data">{r.label}</span>{r.sub && <span className="faint"> {r.sub}</span>}</span>
+            <span className="hbar-label">{r.to ? <Link className="data" to={r.to}>{r.label}</Link> : <span className="data">{r.label}</span>}{r.sub && <span className="faint"> {r.sub}</span>}</span>
             <span className="hbar-track" role="img" aria-label={`${r.label}: ${total} ${unit}`}>
               <span className="hbar-bar" style={{ width: `${(100 * total) / max}%` }}>
                 {segments.map((s) => (

@@ -2,7 +2,7 @@
 // so each rule about what a number MEANS can be tested on its own: rung 1 of the
 // console design is "accurate first — nothing overstates weak data", and these
 // are where that is decided rather than in JSX.
-import type { FindingSummary, Health, KnowledgeFeed, ScanPoint, Scan, TrendPoint } from "./api";
+import type { FindingSummary, Health, KnowledgeFeed, ScanPoint, Scan, ScopeRule, TrendPoint } from "./api";
 
 // A page of findings is complete when the server handed back no cursor. Counts
 // over a complete page are exact; counts over a truncated one are "of the first
@@ -187,4 +187,35 @@ export function ageRatio(lastFetched: string | null | undefined, thresholdSecond
   const age = (now - new Date(lastFetched).getTime()) / 1000;
   if (!Number.isFinite(age)) return null;
   return Math.max(0, age / thresholdSeconds);
+}
+
+// The advisory posture words (ADR-068), explained from the operator's side of
+// the screen. "clean" is a real verdict; "cannot_know" and "no_release" are
+// honest gaps, never silence dressed as safety.
+export const ADVISORY: Record<string, { label: string; tone: string; why: string }> = {
+  vulnerable: { label: "vulnerable", tone: "critical", why: "at least one installed package matches a vendor advisory that fixes a known CVE" },
+  clean: { label: "clean", tone: "ok", why: "its release is resolved and inside advisory coverage, and no installed package matches an advisory" },
+  cannot_know: { label: "cannot know", tone: "warn", why: "its release is past its vendor's advisory window, so a missing match proves nothing" },
+  no_release: { label: "no release", tone: "muted", why: "no release could be attributed, so advisory matching has nothing to key on; a credentialed read or a fingerprint scan resolves it" },
+};
+
+export function advisory(status: string | undefined): { label: string; tone: string; why: string } {
+  return ADVISORY[status ?? ""] ?? { label: status || "unknown", tone: "muted", why: "no advisory posture is recorded for this system" };
+}
+
+// One line that says whether a scan can run right now, from the reads that
+// decide it: online capable scan points, a policy with an allow rule.
+export function scanReadiness(points: ScanPoint[], engine: string, rules: ScopeRule[] | undefined): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  const capable = points.filter((p) => p.health === "healthy" && p.capabilities.includes(engine));
+  if (capable.length === 0) {
+    const anyEngine = points.some((p) => p.capabilities.includes(engine));
+    reasons.push(anyEngine
+      ? `no scan point with the ${engine} engine is online (${points.length} enrolled, none healthy)`
+      : `no enrolled scan point has the ${engine} engine`);
+  }
+  if (rules && !rules.some((r) => r.effect === "allow")) {
+    reasons.push("the policy has no allow rule, so every target would be refused as out of scope");
+  }
+  return { ok: reasons.length === 0, reasons };
 }

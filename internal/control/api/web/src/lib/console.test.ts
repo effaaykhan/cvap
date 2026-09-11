@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ageRatio, applyTriageFilter, attention, confidenceBand, kevInversion, score, sparkPath, stackSegments, tally, trendGeometry, worstFirst, yTicks } from "./console";
+import { advisory, ageRatio, applyTriageFilter, attention, confidenceBand, kevInversion, scanReadiness, score, sparkPath, stackSegments, tally, trendGeometry, worstFirst, yTicks } from "./console";
 import type { FindingSummary, Health, KnowledgeFeed, ScanPoint } from "./api";
 
 const f = (over: Partial<FindingSummary>): FindingSummary => ({
@@ -128,5 +128,24 @@ describe("chart geometry", () => {
     const now = Date.parse("2026-09-11T12:00:00Z");
     expect(ageRatio("2026-09-11T00:00:00Z", 86400, now)).toBeCloseTo(0.5);
     expect(ageRatio(null, 86400, now)).toBeNull();
+  });
+});
+
+describe("advisory and scan readiness", () => {
+  it("never explains cannot-know as clean", () => {
+    expect(advisory("cannot_know").tone).not.toBe("ok");
+    expect(advisory("clean").tone).toBe("ok");
+    expect(advisory(undefined).label).toBe("unknown");
+  });
+  it("names why a scan cannot run", () => {
+    const off = [sp("offline", "sp-1")];
+    off[0].capabilities = ["discovery"];
+    const r = scanReadiness(off, "discovery", [{ id: "r", effect: "allow", match_type: "cidr", match_value: "10.0.0.0/8", precedence: 0 }]);
+    expect(r.ok).toBe(false);
+    expect(r.reasons[0]).toContain("none healthy");
+    const on = [sp("healthy", "sp-1")];
+    on[0].capabilities = ["discovery"];
+    expect(scanReadiness(on, "discovery", []).reasons[0]).toContain("no allow rule");
+    expect(scanReadiness(on, "host", []).reasons[0]).toContain("no enrolled scan point has the host engine");
   });
 });

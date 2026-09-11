@@ -1,6 +1,7 @@
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { advisory, score } from "../lib/console";
 
 // AttributionSource mirrors the provenance rows the API embeds (ADR-061). The
 // API types it as opaque JSON, so it is narrowed here at the one place it is read.
@@ -39,8 +40,15 @@ export function AssetDetail() {
 
   return (
     <section className="detail">
-      <p className="crumb"><Link to="/assets">← Assets</Link></p>
-      <h1>{a.hostname || a.id}</h1>
+      <p className="crumb"><Link to="/assets">← Systems</Link></p>
+      <div className="row-between">
+        <h1>{a.hostname || a.address || a.id}</h1>
+        <span className={`chip chip-${advisory(a.advisory_status).tone === "critical" ? "danger" : advisory(a.advisory_status).tone}`}>{advisory(a.advisory_status).label}</span>
+      </div>
+      <p className="muted small" style={{ marginTop: "-.5rem" }}>
+        {a.open_findings} open finding{a.open_findings === 1 ? "" : "s"} · posture <b>{advisory(a.advisory_status).label}</b>: {advisory(a.advisory_status).why}.
+      </p>
+      <FindingsOnAsset assetID={a.id} count={a.open_findings} />
       <dl className="facts">
         <div className="kv"><dt>Environment</dt><dd>{a.environment || "—"}</dd></div>
         <div className="kv"><dt>OS attribution</dt><dd>{osAttribution(a.distro_family, a.distro_release ?? undefined, a.os_confidence ?? undefined)}</dd></div>
@@ -245,3 +253,40 @@ function band(c?: number): "high" | "medium" | "low" | "" {
 }
 
 function fmt(t?: string): string { return t ? new Date(t).toLocaleString() : "—"; }
+
+// The "why" for this system: its open findings in priority order, each with
+// the rule, the severity word, KEV, EPSS and CVSS, and the evidence one click
+// away — the same rows the triage list pages over, filtered to this asset.
+function FindingsOnAsset({ assetID, count }: { assetID: string; count: number }) {
+  const q = `?asset_id=${assetID}&status=open&limit=200`;
+  const { data, isLoading, error } = useQuery({ queryKey: ["findings", q], queryFn: () => api.listFindings(q) });
+  return (
+    <>
+      <h2>Findings on this system</h2>
+      {isLoading && <p className="muted">Loading…</p>}
+      {error && <p className="error">Could not load this system's findings.</p>}
+      {data && data.findings.length === 0 && (
+        <p className="muted">{count === 0 ? "No open findings." : "No open findings in this page."}</p>
+      )}
+      {data && data.findings.length > 0 && (
+        <table>
+          <thead><tr><th>Priority</th><th>Severity</th><th>Finding</th><th>Where</th><th className="num">EPSS</th><th className="num">CVSS</th><th>Confidence</th></tr></thead>
+          <tbody>
+            {data.findings.map((f, i) => (
+              <tr key={f.id} className={`frow frow-${f.severity}`}>
+                <td><span className="rank">#{i + 1}</span>{f.kev && <span className={`kev-badge${f.kev_ransomware ? " kev-ransomware" : ""}`}>KEV</span>} <span className="priority-basis">{f.priority_basis}</span></td>
+                <td><span className={`sev sev-${f.severity}`}>{f.severity}</span></td>
+                <td className="finding-cell"><Link to={`/findings/${f.id}`}>{f.rule}</Link><span className="cat small">{f.category}</span></td>
+                <td className="data">{f.instance_locator || "—"}</td>
+                <td className="num">{score(f.epss, 5)}</td>
+                <td className="num">{score(f.cvss, 1)}</td>
+                <td className="data">{(f.confidence ?? 0).toFixed(2)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {data && data.next_id && <p className="faint small">Showing the first 200 by priority; the triage view can narrow further.</p>}
+    </>
+  );
+}

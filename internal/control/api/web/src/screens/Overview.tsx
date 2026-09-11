@@ -104,6 +104,29 @@ export function Overview() {
         </div>
       </div>
 
+      {s && s.worst_assets.length > 0 && (
+        <div className="card section" style={{ marginBottom: "1.1rem" }}>
+          <div className="card-head">
+            <span className="lbl">Systems at risk</span>
+            <span className="aside">KEV first, then worst severity, then count · <Link to="/assets">all systems →</Link></span>
+          </div>
+          <HBars unit="open findings" rows={s.worst_assets.map((a) => ({
+            key: a.id, to: `/assets/${a.id}`, label: a.hostname || a.address || a.id.slice(0, 8), sub: a.kev ? `${a.kev} KEV` : undefined,
+            segments: [
+              { key: "critical", label: "critical", value: a.critical, tone: "critical" },
+              { key: "high", label: "high", value: a.high, tone: "high" },
+              { key: "medium", label: "medium", value: a.medium, tone: "medium" },
+              { key: "low", label: "low", value: a.low, tone: "low" },
+              { key: "info", label: "info", value: a.open - a.critical - a.high - a.medium - a.low, tone: "info" },
+            ],
+          }))} />
+          <div className="segbar-legend" style={{ marginTop: ".5rem" }}>
+            {SEVERITIES.map((k) => <span className="lane" key={k}><span className={`cdot tone-${k}`} />{k}</span>)}
+            <span className="end">open findings per system; click a system for the findings and their evidence</span>
+          </div>
+        </div>
+      )}
+
       <div className="dist-grid">
         <div className="card section">
           <div className="card-head">

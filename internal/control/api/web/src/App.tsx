@@ -10,6 +10,7 @@ import { FindingDetail } from "./screens/FindingDetail";
 import { Assets } from "./screens/Assets";
 import { AssetDetail } from "./screens/AssetDetail";
 import { Health } from "./screens/Health";
+import { Scans } from "./screens/Scans";
 import { ScanDetail } from "./screens/ScanDetail";
 import { Exposure } from "./screens/Exposure";
 import { Knowledge } from "./screens/Knowledge";
@@ -51,7 +52,8 @@ export function App() {
   const nav: [string, string, boolean][] = [
     ["/", "Overview", true],
     ["/triage", "Triage", canFindings],
-    ["/assets", "Assets", has(session, "asset.read")],
+    ["/assets", "Systems", has(session, "asset.read")],
+    ["/scans", "Scans", has(session, "scan.read")],
     ["/health", "Health", has(session, "scan.read")],
     ["/knowledge", "Knowledge", canFindings],
   ];
@@ -68,6 +70,7 @@ export function App() {
           ))}
         </nav>
         <span className="who">
+          {has(session, "scan.create") && <Link className="btn small-btn" to="/scans">New scan</Link>}
           <button
             className="theme-toggle"
             onClick={toggleTheme}
@@ -95,7 +98,7 @@ export function App() {
           <Route path="/assets" element={<Assets />} />
           <Route path="/assets/:id" element={<AssetDetail />} />
           <Route path="/health" element={<Health />} />
-          <Route path="/scans" element={<Navigate to="/health" replace />} />
+          <Route path="/scans" element={<Scans />} />
           <Route path="/scans/:id" element={<ScanDetail />} />
           <Route path="/exposure" element={<Exposure />} />
           <Route path="/knowledge" element={<Knowledge />} />

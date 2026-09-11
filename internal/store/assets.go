@@ -47,6 +47,17 @@ type Asset struct {
 
 	FirstSeen time.Time
 	LastSeen  time.Time
+
+	// Risk facts, filled by List only (Create and Get do not carry them): the
+	// answer to "which system is vulnerable" on the inventory row itself, so an
+	// operator does not open 274 details to find the five that matter.
+	Address            string // the earliest current address, "" when none
+	OpenFindings       int
+	WorstSeverity      string // critical|high|medium|low|info, "" when none open
+	KEVFindings        int
+	ReleaseResolved    bool // inputs to domain.AssetAdvisoryStatus (ADR-068)
+	InCoverage         bool
+	HasAdvisoryFinding bool
 }
 
 type Assets struct{}
@@ -114,6 +125,12 @@ type AssetFilter struct {
 	Environment string
 	// Fragile filters on the fragile flag when non-nil.
 	Fragile *bool
+	// AtRisk keeps only assets with an open or confirmed finding.
+	AtRisk bool
+	// SortByRisk orders by open-finding burden (KEV, then worst severity, then
+	// count) instead of last seen. Keyset paging is disabled for that order:
+	// callers get the first page of the worst, which is what a triage read wants.
+	SortByRisk bool
 }
 
 // List returns assets newest-seen first, backed by the (tenant_id, last_seen DESC)
@@ -140,30 +157,54 @@ func (Assets) List(ctx context.Context, c *Conn, f AssetFilter, before time.Time
 		fragileArg = *f.Fragile
 	}
 
+	// The risk facts ride as lateral aggregates over the same findings rows
+	// the finding list pages over, so a count here is a count the operator can
+	// open. The advisory-status inputs mirror AdvisoryStatusInputs exactly.
 	const q = `
-		SELECT asset_id, coalesce(primary_hostname,''), coalesce(os_family,''),
-		       coalesce(os_version,''), coalesce(device_type,''), coalesce(vendor,''),
-		       criticality, coalesce(environment,''), coalesce(owner,''), fragile,
-		       first_seen, last_seen
-		  FROM assets
-		 WHERE tenant_id = $1
-		   AND ($2::timestamptz IS NULL OR (last_seen, asset_id) < ($2, $3))
-		   AND ($5::text IS NULL OR primary_hostname ILIKE $5 OR EXISTS (
+		SELECT a.asset_id, coalesce(a.primary_hostname,''), coalesce(a.os_family,''),
+		       coalesce(a.os_version,''), coalesce(a.device_type,''), coalesce(a.vendor,''),
+		       a.criticality, coalesce(a.environment,''), coalesce(a.owner,''), a.fragile,
+		       a.first_seen, a.last_seen,
+		       coalesce((SELECT host(ad.ip_address) FROM asset_addresses ad
+		                  WHERE ad.tenant_id = a.tenant_id AND ad.asset_id = a.asset_id AND ad.valid_to IS NULL
+		                  ORDER BY ad.valid_from LIMIT 1), ''),
+		       r.open, r.worst, r.kev, r.advisory,
+		       a.distro_release IS NOT NULL,
+		       (rc.esm_expires IS NOT NULL AND rc.esm_expires >= now()::date)
+		  FROM assets a
+		  LEFT JOIN release_coverage rc ON rc.distro_release = a.distro_release
+		  CROSS JOIN LATERAL (
+		    SELECT count(*)::int AS open,
+		           coalesce(max(CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END), -1) AS worst,
+		           count(*) FILTER (WHERE k.cve_id IS NOT NULL)::int AS kev,
+		           bool_or(f.vuln_def_id IS NOT NULL) AS advisory
+		      FROM findings f
+		      LEFT JOIN vulnerability_defs vd ON vd.vuln_def_id = f.vuln_def_id
+		      LEFT JOIN kev k ON k.cve_id = vd.cve_id
+		     WHERE f.tenant_id = a.tenant_id AND f.asset_id = a.asset_id AND f.status IN ('open','confirmed')
+		  ) r
+		 WHERE a.tenant_id = $1
+		   AND ($2::timestamptz IS NULL OR (a.last_seen, a.asset_id) < ($2, $3))
+		   AND ($5::text IS NULL OR a.primary_hostname ILIKE $5 OR EXISTS (
 		         SELECT 1 FROM asset_addresses aa
-		          WHERE aa.tenant_id = assets.tenant_id AND aa.asset_id = assets.asset_id
+		          WHERE aa.tenant_id = a.tenant_id AND aa.asset_id = a.asset_id
 		            AND aa.valid_to IS NULL AND host(aa.ip_address) ILIKE $5))
-		   AND ($6::text IS NULL OR environment = $6)
-		   AND ($7::boolean IS NULL OR fragile = $7)
-		 ORDER BY last_seen DESC, asset_id DESC
+		   AND ($6::text IS NULL OR a.environment = $6)
+		   AND ($7::boolean IS NULL OR a.fragile = $7)
+		   AND (NOT $8::boolean OR r.open > 0)
+		 ORDER BY CASE WHEN $9::boolean THEN r.kev END DESC NULLS LAST,
+		          CASE WHEN $9::boolean THEN r.worst END DESC NULLS LAST,
+		          CASE WHEN $9::boolean THEN r.open END DESC NULLS LAST,
+		          a.last_seen DESC, a.asset_id DESC
 		 LIMIT $4`
 
 	var beforeArg any
 	var beforeIDArg any = beforeID
-	if !before.IsZero() {
+	if !before.IsZero() && !f.SortByRisk {
 		beforeArg = before
 	}
 
-	rows, err := c.Query(ctx, q, c.Tenant().UUID(), beforeArg, beforeIDArg, limit, qArg, envArg, fragileArg)
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), beforeArg, beforeIDArg, limit, qArg, envArg, fragileArg, f.AtRisk, f.SortByRisk)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -172,17 +213,24 @@ func (Assets) List(ctx context.Context, c *Conn, f AssetFilter, before time.Time
 	page := &AssetPage{}
 	for rows.Next() {
 		var a Asset
+		var worst int
+		var advisory *bool
 		if err := rows.Scan(&a.ID, &a.Hostname, &a.OSFamily, &a.OSVersion, &a.DeviceType,
 			&a.Vendor, &a.Criticality, &a.Environment, &a.Owner, &a.Fragile,
-			&a.FirstSeen, &a.LastSeen); err != nil {
+			&a.FirstSeen, &a.LastSeen, &a.Address, &a.OpenFindings, &worst, &a.KEVFindings, &advisory,
+			&a.ReleaseResolved, &a.InCoverage); err != nil {
 			return nil, mapError(err)
 		}
+		if worst >= 0 {
+			a.WorstSeverity = severityWord(worst)
+		}
+		a.HasAdvisoryFinding = advisory != nil && *advisory
 		page.Assets = append(page.Assets, a)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, mapError(err)
 	}
-	if len(page.Assets) == limit {
+	if len(page.Assets) == limit && !f.SortByRisk {
 		last := page.Assets[len(page.Assets)-1]
 		page.NextBefore, page.NextID = last.LastSeen, last.ID
 	}

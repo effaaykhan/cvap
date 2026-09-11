@@ -50,6 +50,42 @@ func TestFindingSummaryCountsFollowTheRows(t *testing.T) {
 	if len(after.NewItems) != 1 || after.NewItems[0].ID != sf.findingID.String() {
 		t.Errorf("new_items = %+v, want the seeded finding", after.NewItems)
 	}
+	if len(after.WorstAssets) != 1 || after.WorstAssets[0].ID != sf.assetID.String() || after.WorstAssets[0].Open != 1 {
+		t.Errorf("worst_assets = %+v, want the seeded asset with one open finding", after.WorstAssets)
+	}
+
+	// The inventory row carries the same facts, and the risk order puts the
+	// burdened system first even when it was seen earlier than a clean one.
+	{
+		w := f.do(t, http.MethodGet, "/v1/assets?sort=risk&at_risk=true", nil, cookies, csrf)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("assets without asset.read gave %d, want 403", w.Code)
+		}
+	}
+	fa := newFixture(t, `{"finding.read": true, "asset.read": true}`)
+	sfa := fa.seedFinding(t, false)
+	ca, xa := fa.login(t)
+	if err := fa.db.Write(context.Background(), fa.tenant, func(ctx context.Context, c *store.Conn) error {
+		_, err := (store.Assets{}).Create(ctx, c, store.Asset{Hostname: "clean-and-newer.corp", Environment: "production"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var list api.AssetListResponse
+	wr := fa.do(t, http.MethodGet, "/v1/assets?sort=risk", nil, ca, xa)
+	if err := json.Unmarshal(wr.Body.Bytes(), &list); err != nil || wr.Code != http.StatusOK {
+		t.Fatalf("assets sort=risk: %d %s", wr.Code, wr.Body.String())
+	}
+	if len(list.Assets) < 2 || list.Assets[0].ID != sfa.assetID.String() {
+		t.Fatalf("risk order did not put the burdened asset first: %+v", list.Assets)
+	}
+	if row := list.Assets[0]; row.OpenFindings != 1 || row.WorstSeverity == "" || row.AdvisoryStatus == "" {
+		t.Errorf("inventory row lacks its risk facts: %+v", row)
+	}
+	wr = fa.do(t, http.MethodGet, "/v1/assets?at_risk=true", nil, ca, xa)
+	if err := json.Unmarshal(wr.Body.Bytes(), &list); err != nil || len(list.Assets) != 1 {
+		t.Errorf("at_risk=true returned %d assets, want 1: %s", len(list.Assets), wr.Body.String())
+	}
 	last := after.Trend[len(after.Trend)-1]
 	if last.Open != 1 {
 		t.Errorf("today's trend point open=%d, want 1 (it must equal the open count)", last.Open)

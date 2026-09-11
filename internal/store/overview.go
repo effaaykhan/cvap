@@ -32,6 +32,10 @@ type FindingStats struct {
 	NewItems       []ChangedFinding
 	KEVListedItems []ChangedFinding
 
+	// WorstAssets are the systems carrying the most open findings, worst first
+	// — the answer to "which system is vulnerable", by asset rather than by rule.
+	WorstAssets []AssetRisk
+
 	// Trend is one point per day, oldest first. Open at day D counts findings
 	// first seen on or before D and not resolved by the end of D; KEV is the
 	// subset in KEV today. Derived from first_seen and resolved_at, which is
@@ -47,6 +51,20 @@ type ChangedFinding struct {
 	Severity      string
 	KEV           bool
 	At            time.Time // first_seen, or the KEV listing date
+}
+
+// AssetRisk is one system's open-finding burden.
+type AssetRisk struct {
+	ID            uuid.UUID
+	Hostname      string
+	Address       string
+	Open          int
+	Critical      int
+	High          int
+	Medium        int
+	Low           int
+	KEV           int
+	WorstSeverity string
 }
 
 // TrendPoint is one day of the series.
@@ -156,6 +174,48 @@ func (Findings) Stats(ctx context.Context, c *Conn, since, now time.Time, days i
 		return nil, err
 	}
 
+	// The systems, worst first: KEV first, then severity weight, then count.
+	const worstAssets = `
+		SELECT a.asset_id, coalesce(a.primary_hostname, ''),
+		       coalesce((SELECT host(ad.ip_address) FROM asset_addresses ad
+		                  WHERE ad.tenant_id = a.tenant_id AND ad.asset_id = a.asset_id AND ad.valid_to IS NULL
+		                  ORDER BY ad.valid_from LIMIT 1), ''),
+		       count(*),
+		       count(*) FILTER (WHERE f.severity = 'critical'),
+		       count(*) FILTER (WHERE f.severity = 'high'),
+		       count(*) FILTER (WHERE f.severity = 'medium'),
+		       count(*) FILTER (WHERE f.severity = 'low'),
+		       count(*) FILTER (WHERE k.cve_id IS NOT NULL),
+		       max(CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)
+		  FROM findings f
+		  JOIN assets a ON a.tenant_id = f.tenant_id AND a.asset_id = f.asset_id
+		  LEFT JOIN vulnerability_defs vd ON vd.vuln_def_id = f.vuln_def_id
+		  LEFT JOIN kev k ON k.cve_id = vd.cve_id
+		 WHERE f.tenant_id = $1 AND f.status IN ('open','confirmed')
+		 GROUP BY a.asset_id, a.primary_hostname, a.tenant_id
+		 ORDER BY count(*) FILTER (WHERE k.cve_id IS NOT NULL) DESC,
+		          max(CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) DESC,
+		          count(*) DESC
+		 LIMIT 8`
+	arows, err := c.Query(ctx, worstAssets, tid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	for arows.Next() {
+		var a AssetRisk
+		var worst int
+		if err := arows.Scan(&a.ID, &a.Hostname, &a.Address, &a.Open, &a.Critical, &a.High, &a.Medium, &a.Low, &a.KEV, &worst); err != nil {
+			arows.Close()
+			return nil, mapError(err)
+		}
+		a.WorstSeverity = severityWord(worst)
+		out.WorstAssets = append(out.WorstAssets, a)
+	}
+	arows.Close()
+	if err := arows.Err(); err != nil {
+		return nil, mapError(err)
+	}
+
 	// The series. Day boundaries are UTC midnights; the last point is today,
 	// counted as of now.
 	const trend = `
@@ -259,4 +319,19 @@ func (Scans) ActiveWithQueuedJobs(ctx context.Context, c *Conn) ([]Scan, error) 
 		out = append(out, s)
 	}
 	return out, mapError(rows.Err())
+}
+
+func severityWord(rank int) string {
+	switch rank {
+	case 4:
+		return "critical"
+	case 3:
+		return "high"
+	case 2:
+		return "medium"
+	case 1:
+		return "low"
+	default:
+		return "info"
+	}
 }

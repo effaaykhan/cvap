@@ -28,6 +28,10 @@ export type ChangedFinding = Schemas["ChangedFindingResponse"];
 export type TrendPoint = Schemas["TrendPointResponse"];
 export type Health = Schemas["HealthResponse"];
 export type BlockedScan = Schemas["BlockedScanResponse"];
+export type AssetRisk = Schemas["AssetRiskResponse"];
+export type Zone = Schemas["ZoneResponse"];
+export type ScopeRule = Schemas["ScopeRuleResponse"];
+export type Policy = Schemas["PolicyResponse"];
 
 // ApiError carries the server's stable code so a caller can branch — notably 403
 // (forbidden), which the UI surfaces honestly rather than swallowing.
@@ -101,6 +105,8 @@ export const api = {
   getAsset: (id: string) => request<Asset>("GET", `/v1/assets/${id}`),
 
   listPolicies: () => request<Schemas["PolicyListResponse"]>("GET", "/v1/policies"),
+  listZones: () => request<Schemas["ZoneListResponse"]>("GET", "/v1/zones"),
+  scopeRules: (policyID: string) => request<Schemas["ScopeRuleListResponse"]>("GET", `/v1/policies/${policyID}/scope-rules`),
 
   listScans: (q: string) => request<ScanList>("GET", `/v1/scans${q}`),
   listScanPoints: () => request<ScanPointList>("GET", "/v1/scan-points"),

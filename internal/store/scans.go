@@ -546,3 +546,35 @@ func (Scans) Fail(ctx context.Context, c *Conn, scanID uuid.UUID, reason string)
 		Detail:       map[string]any{"reason": reason},
 	})
 }
+
+// SettleIfDone moves a running scan to completed or failed once none of its
+// jobs is queued, assigned or running. Called on every job terminal, so a scan
+// whose last job just ended settles in the same transaction.
+//
+// Nothing did this before: scans reached `running` at planning and stayed there
+// forever after every job had finished, so an operator read thirty scans as in
+// flight against a fleet that had long since gone quiet (S42, the deploy
+// estate). completed when at least one job completed; failed when every job
+// failed. A scan with no jobs at all is left alone — the planner owns that.
+func (Scans) SettleIfDone(ctx context.Context, c *Conn, scanID uuid.UUID) (ScanStatus, error) {
+	const q = `
+		UPDATE scans s
+		   SET status = CASE WHEN EXISTS (SELECT 1 FROM scan_jobs j WHERE j.tenant_id = s.tenant_id AND j.scan_id = s.scan_id AND j.status = 'completed')
+		                     THEN 'completed'::scan_status ELSE 'failed'::scan_status END,
+		       completed_at = now()
+		 WHERE s.tenant_id = $1 AND s.scan_id = $2
+		   AND s.status IN ('planning','running')
+		   AND EXISTS (SELECT 1 FROM scan_jobs j WHERE j.tenant_id = s.tenant_id AND j.scan_id = s.scan_id)
+		   AND NOT EXISTS (SELECT 1 FROM scan_jobs j WHERE j.tenant_id = s.tenant_id AND j.scan_id = s.scan_id
+		                    AND j.status IN ('queued','assigned','running'))
+		RETURNING s.status::text`
+	var st string
+	err := c.QueryRow(ctx, q, c.Tenant().UUID(), scanID).Scan(&st)
+	if err != nil {
+		if mapped := mapError(err); errors.Is(mapped, ErrNotFound) {
+			return "", nil // still has work in flight, or already settled
+		}
+		return "", mapError(err)
+	}
+	return ScanStatus(st), nil
+}

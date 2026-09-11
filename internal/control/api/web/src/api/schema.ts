@@ -671,6 +671,8 @@ export interface components {
             next_id?: string | null;
         };
         AssetResponse: {
+            /** @description The earliest current address, for assets with no hostname. */
+            address?: string;
             addresses: components["schemas"]["AssetAddressResponse"][];
             /** @description no_release | clean | cannot_know | vulnerable (ADR-068). The only expression of advisory-clean; emptiness of the finding list is never a clean verdict. */
             advisory_status: string;
@@ -689,9 +691,11 @@ export interface components {
             /** @description Primary hostname, or empty if the asset has only addresses. */
             hostname: string;
             id: string;
+            /** @description Open findings whose CVE is in CISA KEV. */
+            kev_findings: number;
             /** Format: date-time */
             last_seen: string;
-            /** @description Count of open or confirmed findings on this asset. */
+            /** @description Count of open or confirmed findings on this asset — the same rows GET /v1/findings?asset_id= pages over. */
             open_findings: number;
             /** @description Confidence in the attribution. Non-authoritative — derived from banners, never OS detection. */
             os_confidence?: number | null;
@@ -710,6 +714,20 @@ export interface components {
             release_provenance?: number[];
             services: components["schemas"]["AssetServiceResponse"][];
             vendor?: string;
+            /** @description The highest severity among its open findings; absent when none. */
+            worst_severity?: string;
+        };
+        AssetRiskResponse: {
+            address?: string;
+            critical: number;
+            high: number;
+            hostname?: string;
+            id: string;
+            kev: number;
+            low: number;
+            medium: number;
+            open: number;
+            worst_severity: string;
         };
         AssetServiceResponse: {
             /** Format: date-time */
@@ -725,6 +743,10 @@ export interface components {
             version_confidence?: number | null;
         };
         AssetSummary: {
+            /** @description The earliest current address, for assets with no hostname. */
+            address?: string;
+            /** @description no_release | clean | cannot_know | vulnerable (ADR-068). The only expression of advisory-clean; emptiness of the finding list is never a clean verdict. */
+            advisory_status: string;
             criticality: string;
             device_type: string;
             /** @description Operator-set environment tag. Empty is treated as production by the rules (the safe default). */
@@ -736,9 +758,15 @@ export interface components {
             /** @description Primary hostname, or empty if the asset has only addresses. */
             hostname: string;
             id: string;
+            /** @description Open findings whose CVE is in CISA KEV. */
+            kev_findings: number;
             /** Format: date-time */
             last_seen: string;
+            /** @description Count of open or confirmed findings on this asset — the same rows GET /v1/findings?asset_id= pages over. */
+            open_findings: number;
             os_family: string;
+            /** @description The highest severity among its open findings; absent when none. */
+            worst_severity?: string;
         };
         BlockedScanResponse: {
             engine: string;
@@ -938,6 +966,8 @@ export interface components {
             trend: components["schemas"]["TrendPointResponse"][];
             trend_days: number;
             window_days: number;
+            /** @description The systems carrying the most open findings, worst first: KEV first, then the highest severity present, then count. Which system is vulnerable, by asset rather than by rule. */
+            worst_assets: components["schemas"]["AssetRiskResponse"][];
         };
         HealthResponse: {
             active_kills: components["schemas"]["ActiveKillResponse"][];

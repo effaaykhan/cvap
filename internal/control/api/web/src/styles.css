@@ -539,3 +539,13 @@ tr.evidence-row .lbl { margin-bottom:.5rem; display:block; }
 @media (prefers-reduced-motion:no-preference) {
   .segbar-seg, .ratiobar-fill { transition:width .25s ease, opacity .15s ease; }
 }
+
+/* ---- scans: the form and its readiness panel side by side ---------------- */
+.scan-new { display:grid; grid-template-columns:1.2fr 1fr; gap:1.1rem; align-items:start; }
+.scan-form { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:.7rem 1rem; margin-top:.7rem; }
+.scan-form label { display:flex; flex-direction:column; gap:.3rem; font-size:.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+.scan-form label.wide { grid-column:1 / -1; }
+.scan-form textarea, .scan-form select, .scan-form input { font-family:var(--mono); text-transform:none; letter-spacing:0; }
+.who .small-btn { padding:.3rem .7rem; font-size:.76rem; }
+.who .small-btn:hover { text-decoration:none; background:var(--accent-strong); }
+@media (max-width:1000px) { .scan-new { grid-template-columns:1fr; } .scan-form { grid-template-columns:1fr; } }
