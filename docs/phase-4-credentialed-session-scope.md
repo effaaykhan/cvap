@@ -52,3 +52,17 @@ The first task of the session is to write this up as the placement ADR, then bui
   than asserted at 0.60 (credentialed removes the need on hosts it can read).
 - ADR-085: the keyspace `advisory_vuln_map` completeness gap (a one-behind USN mapping zero CVEs) —
   confirm the credentialed truth is complete for the hosts under test.
+
+## Status after Session 40, and the fleet increment's acceptance (ADR-088)
+
+Session 40 built and proved the security core (the agent/signing proxy, ADR-086), the credentialed
+matching (exact-version, EVR-correct after the B26 fix), rpm-in-situ, and the per-host FP numbers
+(0% credentialed; .146 OpenSSH 16 to 0) — but via the cvap-credscan instrument, not the fleet path.
+The fleet engine increment remains: cvap-engine-credhost emitting package observations,
+credential-grant delivery through dispatch, and correlation consuming those observations to activate
+ADR-077's dormant precedence and drive the supersession lifecycle.
+
+Acceptance (ADR-088): .146's sixteen unauthenticated OpenSSH findings close as refuted_by_credentialed
+through the real pipeline — engine to observation to correlation to finding lifecycle — not the
+instrument computing a zero. Re-add the three hosts (.138/.146/.148) to lab/scope.txt for that
+session; AlmaLinux .148 also carries the thin ALSA already ingested.

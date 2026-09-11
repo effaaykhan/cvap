@@ -927,6 +927,35 @@ flake and a real regression can wear the same mask, and only the log tells them 
 re-run that goes green does not prove the earlier red was noise, it just reshuffled the
 runner. ([[gate-before-push]] extended: also *read the gate* before dismissing it.)
 
+### 5.11 A comparator correct in isolation, wrong at the seam — what an oracle proves
+
+**What happened (S40, B26, ADR-087).** `CompareRPM` is a faithful rpmvercmp port, validated two
+ways: against Red Hat's own `rpmvercmp.at` corpus AND against a live `librpm` oracle differential
+(ADR-062). Both pass. And the credentialed matcher still produced **56 false positives** on a
+fully-patched AlmaLinux host — because `version.Compare(SchemeRPM, …)` handed the whole
+`epoch:version-release` string to `CompareRPM`, which is version-only (rpmvercmp treats `:` and `-`
+as ordinary separators). The epoch digit `0` was compared against the first version segment `9`, so
+`0:9.9p1-25…` read as *below* the epoch-less fix `9.9p1-25…`. The function was correct against its
+spec; the caller handed it the wrong string. Correct in isolation, wrong at the seam.
+
+**Why it is its own pattern.** This is the most instructive defect in the project because both
+validations passed and the result was still wrong, and the reason is a category error about what an
+oracle proves. **An oracle validates a FUNCTION against its SPEC, not a SYSTEM against its INTENT.**
+`rpmvercmp.at` proves `CompareRPM` implements rpmvercmp; it says nothing about whether callers hand
+it the right string. The most rigorous unit validation available — a corpus *and* a live oracle —
+sat one call frame away from a false-positive result and could not see it, because the bug was in
+what crossed the boundary into the function, not in the function. Note the direction: a fully-patched
+host reading as vulnerable — the **same worst direction as revision blindness (ADR-078, 5-adjacent)**,
+from a completely unrelated cause. Two independent defects, one failure mode.
+
+**How to apply.** A green oracle proves the unit, never the seam. When a validated function still
+produces a wrong *system* result, do not re-examine the function — examine what the caller passes
+into it: the string shape, the units, the epoch. And validate the caller's *use* against intent
+separately from the function against its spec — a real advisory on a real host caught this in one
+run; no version-compare corpus ever could, because the corpus does not know an epoch was on the wire.
+([[measure-dont-read]] and [[test-that-proves-nothing]] extended to the caller/callee seam:
+a proof of the callee is not a proof of the call.)
+
 ---
 
 ## 6. Standing requirement (from S23 onward)
