@@ -78,8 +78,22 @@ type osHintPayload struct {
 // read, not estimated — ground truth beats an estimate of it.
 type packagePayload struct {
 	Address       string `json:"address"`
-	Release       string `json:"release"`        // VERSION_CODENAME, e.g. "jammy"
+	Release       string `json:"release"`        // VERSION_CODENAME or ID-major (rpm), read
 	ReleaseSource string `json:"release_source"` // "os-release" = read on the host, authoritative
+	// Installed is the exact inventory a credentialed-host engine read (empty on the
+	// dormant/instrument shapes). It drives credentialed advisory matching — exact
+	// name + version, no product->package map and no banner-version inference — and
+	// the supersession of inferred findings (ADR-077/087/088). credentialedRelease
+	// reads only Release/ReleaseSource above, so this is backward-compatible.
+	Installed []installedPackage `json:"installed,omitempty"`
+}
+
+// installedPackage is one exactly-known package: its source name (the key advisory
+// data uses) and exact installed version. The comparator is not carried — it comes
+// from the matched advisory row (advisory_fixed_packages.comparator, ADR-062).
+type installedPackage struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
 }
 
 // addressed is the minimum any observation carries: which address it is about.

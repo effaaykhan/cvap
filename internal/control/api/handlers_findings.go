@@ -20,6 +20,10 @@ import (
 var validFindingStatuses = map[string]bool{
 	"open": true, "confirmed": true, "false_positive": true,
 	"accepted_risk": true, "remediated": true, "closed": true,
+	// Credentialed supersession terminal states (ADR-087/088, migration 0041): an
+	// operator must be able to filter these to SEE what a credentialed read resolved —
+	// a refuted inferred finding is an action to review, not a silent vanish.
+	"refuted_by_credentialed": true, "superseded_by_credentialed": true,
 }
 
 var validSeverities = map[string]bool{

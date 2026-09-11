@@ -105,6 +105,21 @@ type OSRelease struct {
 // Get returns any os-release key (uppercase), for keys OSRelease does not name.
 func (r OSRelease) Get(key string) string { return r.raw[key] }
 
+// ReleaseKey is the advisory keyspace's key for this release: the codename for dpkg
+// distros (jammy/resolute), and ID+major for rpm distros, which carry no codename
+// (almalinux 10.2 -> "almalinux-10"). The credentialed engine stamps this on its
+// `package` observation and correlation keys FixesFor on it.
+func (r OSRelease) ReleaseKey() string {
+	if r.Codename != "" {
+		return r.Codename
+	}
+	major := r.VersionID
+	if i := strings.IndexByte(major, '.'); i >= 0 {
+		major = major[:i]
+	}
+	return r.ID + "-" + major
+}
+
 // IsRPMFamily reports whether the host uses rpm (RHEL family) rather than dpkg. It
 // checks ID and ID_LIKE, so a derivative (AlmaLinux, Rocky) that sets ID_LIKE=rhel
 // is recognised without an exhaustive ID list.

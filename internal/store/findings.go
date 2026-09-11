@@ -260,6 +260,63 @@ func (Findings) AdvisoryKeysForAsset(ctx context.Context, c *Conn, assetID uuid.
 	return out, mapError(rows.Err())
 }
 
+// SupersedableFinding is a currently-asserted advisory finding as the credentialed
+// supersession sees it: the finding id, its (package, cve) and its source, so the
+// credentialed path can decide which inferred (network) findings a credentialed read
+// resolves.
+type SupersedableFinding struct {
+	ID      uuid.UUID
+	Package string
+	CVE     string
+	Source  string
+	Status  string // 'open' or 'confirmed' — the from-state for the transition record
+}
+
+// AdvisoryFindingsForAsset returns the open/confirmed advisory findings on an asset
+// with their ids and source — the set the credentialed read adjudicates. Same
+// global-join-from-tenant-Read pattern as AdvisoryKeysForAsset (ADR-030).
+func (Findings) AdvisoryFindingsForAsset(ctx context.Context, c *Conn, assetID uuid.UUID) ([]SupersedableFinding, error) {
+	const q = `
+		SELECT f.finding_id, coalesce(f.instance_locator, ''), vd.cve_id, f.source::text, f.status::text
+		  FROM findings f
+		  JOIN vulnerability_defs vd ON vd.vuln_def_id = f.vuln_def_id
+		 WHERE f.tenant_id = $1 AND f.asset_id = $2
+		   AND f.status IN ('open', 'confirmed')
+		   AND f.vuln_def_id IS NOT NULL
+		 ORDER BY f.instance_locator, vd.cve_id`
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), assetID)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	var out []SupersedableFinding
+	for rows.Next() {
+		var f SupersedableFinding
+		if err := rows.Scan(&f.ID, &f.Package, &f.CVE, &f.Source, &f.Status); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, f)
+	}
+	return out, mapError(rows.Err())
+}
+
+// Supersede closes an open/confirmed finding to a credentialed-supersession status —
+// 'refuted_by_credentialed' (the exact version is not vulnerable) or
+// 'superseded_by_credentialed' (the exact version is vulnerable and a credentialed
+// finding now carries the claim). Predicated on the currently-asserted states, the
+// same guard MarkRemediated uses, so a concurrent close does not double-write.
+// Returns whether it closed a row.
+func (Findings) Supersede(ctx context.Context, c *Conn, findingID uuid.UUID, newStatus string, at time.Time) (bool, error) {
+	const q = `
+		UPDATE findings SET status = $3::finding_status, resolved_at = $4, last_seen = $4
+		 WHERE tenant_id = $1 AND finding_id = $2 AND status IN ('open', 'confirmed')`
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), findingID, newStatus, at)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // MarkRemediated moves a finding to remediated. Used by the lifecycle when the
 // endpoint was re-observed and the rule did not fire — the issue is gone, and
 // that is different from the endpoint simply not being scanned.

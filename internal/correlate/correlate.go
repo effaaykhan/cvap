@@ -409,6 +409,15 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 			}
 		}
 
+		// Credentialed findings (ADR-077/087/088): a credentialed-host engine's
+		// `package` observation carries exact versions, so it matches without revision
+		// blindness AND resolves the inferred findings it now speaks to — superseding a
+		// match, refuting a non-match. Same transaction. A no-op unless this host has a
+		// credentialed inventory observation.
+		if err := c.evaluateCredentialed(ctx, conn, assetID, h, now); err != nil {
+			return err
+		}
+
 		for _, o := range h.obs {
 			if err := (store.Observations{}).Resolve(ctx, conn, o.ID, o.ObservedAt, assetID); err != nil {
 				return err
