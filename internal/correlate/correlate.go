@@ -376,12 +376,24 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 			return err
 		}
 
-		// Release resolution (P3.3, ADR-064) runs only under a known family:
-		// release is far less ambiguous once the family is fixed, and a family-only
-		// host is the honest state to leave when nothing resolves. Same transaction.
+		// Release resolution (P3.3, ADR-064). A credentialed `package` observation
+		// carries the exact family AND release read from /etc/os-release — ground
+		// truth — and OUTRANKS the service-inferred attribution above. It resolves
+		// both, at confidence 1.0, WITHOUT the `family != ""` gate that the band-vote
+		// path needs (ADR-089): gating the exact signal behind the weaker inferred
+		// one inverts the confidence ordering, and a package-only sweep has no
+		// inferred family at all, so the gate made ADR-077 unreachable on the very
+		// data shape it was built for. Otherwise the band vote runs, and only under a
+		// known family — release is far less ambiguous once the family is fixed, and a
+		// family-only host is the honest state to leave when nothing resolves.
 		var release string
 		var releaseConf float32
-		if family != "" {
+		if facts, ok := credentialedAttribution(h); ok {
+			if release, releaseConf, err = c.applyCredentialedAttribution(ctx, conn, assetID, facts); err != nil {
+				return err
+			}
+			family = facts.Family
+		} else if family != "" {
 			if release, releaseConf, err = c.deriveRelease(ctx, conn, assetID, h); err != nil {
 				return err
 			}
@@ -621,31 +633,12 @@ func (c *Correlator) deriveAttribution(ctx context.Context, conn *store.Conn, as
 // so the caller can match advisories against it in the same transaction (ADR-070)
 // without a re-read, and compose the finding's confidence from it (ADR-072).
 func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetID uuid.UUID, h host) (string, float32, error) {
-	// Credentialed precedence (ADR-076/077), DORMANT. An exact release READ from a
-	// credentialed `package` observation (/etc/os-release) outranks the band-vote
-	// INFERENCE below, because the credentialed source is ground truth and the vote
-	// is an estimate of it — the same relation the validation instrument measures.
-	// This is unreachable today: no scan point emits `package` observations (the
-	// production credentialed-host engine is deferred, ADR-076), so credentialedRelease
-	// finds nothing on any real host and the band vote runs as before. The rule is
-	// decided here, while the measurement is in front of us, and tested in isolation;
-	// it fires the day the engine emits, with no rediscovery of the reasoning.
-	if release, ok := credentialedRelease(h); ok {
-		prov, err := json.Marshal(map[string]any{
-			"source":  "package_manager",
-			"release": release,
-			"basis":   "exact release read from /etc/os-release; outranks band voting (ADR-076/077)",
-		})
-		if err != nil {
-			return "", 0, err
-		}
-		rel := release
-		if err := (store.Assets{}).SetRelease(ctx, conn, assetID, &rel, 1.0, prov); err != nil {
-			return "", 0, err
-		}
-		return release, 1.0, nil
-	}
-
+	// The credentialed precedence (ADR-076/077) is NOT here — it is applied upstream
+	// in resolveHost, ungated by family (ADR-089), so a package-only sweep reaches it.
+	// This function is the band-vote INFERENCE only, reached when no credentialed
+	// `package` observation is present. Keeping the exact-release branch out of here
+	// is deliberate: it lived behind this function's own `family != ""` caller-gate,
+	// which is exactly what made ADR-077 unreachable on real data.
 	var votes []domain.ReleaseVote
 	// One vote per listening endpoint (port/protocol), the same unit the services
 	// table dedups on: a service seen across several observations (a rescan) must
@@ -719,27 +712,67 @@ func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetI
 	return *res.Release, res.Confidence, nil
 }
 
-// credentialedRelease returns an exact release read from a credentialed `package`
-// observation (/etc/os-release), if the host has one. This is the read side of the
-// ADR-076/077 precedence decision: an exact release READ on the host outranks the
-// band-vote inference. DORMANT — no scan point emits `package` observations today
-// (the production engine is deferred), so on every real host this returns
-// ("", false) and band voting decides; it is exercised only by its unit test, by
-// design (decide the rule now, fire it when the engine emits).
-func credentialedRelease(h host) (string, bool) {
+// credentialedFacts is the ground-truth attribution read from /etc/os-release on a
+// credentialed host: both the family (ID) and the release. Ground truth — it
+// outranks the service-inferred family and the band-vote release alike.
+type credentialedFacts struct {
+	Family  string // os-release ID, e.g. "ubuntu"
+	Release string // release key (codename, or ID-major for rpm)
+}
+
+// credentialedAttribution returns the exact family+release read from a credentialed
+// `package` observation (/etc/os-release), if the host has a usable one. This is the
+// read side of the ADR-076/077/089 precedence decision: an exact read on the host
+// outranks the service-inferred attribution and the band-vote release. It requires a
+// non-empty Family so it can resolve attribution self-sufficiently — a package
+// payload without a family (pre-ADR-089, or the dormant/instrument shapes) is not a
+// self-sufficient attribution and falls through to band voting, unchanged.
+func credentialedAttribution(h host) (credentialedFacts, bool) {
 	for _, o := range h.obs {
 		if o.Type != store.ObsPackage {
 			continue
 		}
 		var p packagePayload
 		if err := json.Unmarshal(o.Payload, &p); err != nil {
-			continue // a malformed package payload is not a release we can trust
+			continue // a malformed package payload is not attribution we can trust
 		}
-		if p.ReleaseSource == "os-release" && p.Release != "" {
-			return p.Release, true
+		if p.ReleaseSource == "os-release" && p.Release != "" && p.Family != "" {
+			return credentialedFacts{Family: p.Family, Release: p.Release}, true
 		}
 	}
-	return "", false
+	return credentialedFacts{}, false
+}
+
+// applyCredentialedAttribution writes the exact family and release to the asset at
+// confidence 1.0, with provenance recording that each outranked the inferred signal
+// (ADR-089). Family first, because SetRelease is guarded by distro_family NOT NULL.
+// One code path for release resolution: this does NOT go through deriveRelease's
+// band vote — the exact read is the whole answer.
+func (c *Correlator) applyCredentialedAttribution(ctx context.Context, conn *store.Conn, assetID uuid.UUID, f credentialedFacts) (string, float32, error) {
+	rel := f.Release
+	famProv, err := json.Marshal(map[string]any{
+		"source": "os-release",
+		"family": f.Family,
+		"basis":  "exact /etc/os-release ID read on the host; outranks service-inferred attribution (ADR-089)",
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	if err := (store.Assets{}).SetAttribution(ctx, conn, assetID, f.Family, &rel, 1.0, famProv); err != nil {
+		return "", 0, err
+	}
+	relProv, err := json.Marshal(map[string]any{
+		"source":  "package_manager",
+		"release": f.Release,
+		"basis":   "exact release read from /etc/os-release; outranks band voting (ADR-076/077/089)",
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	if err := (store.Assets{}).SetRelease(ctx, conn, assetID, &rel, 1.0, relProv); err != nil {
+		return "", 0, err
+	}
+	return f.Release, 1.0, nil
 }
 
 // normaliseOSService collapses service names that name the same platform source

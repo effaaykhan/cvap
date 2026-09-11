@@ -64,14 +64,11 @@ type osHintPayload struct {
 }
 
 // packagePayload is what a credentialed-host engine's `package` observation carries
-// (ADR-076/077). It is DORMANT: no engine emits it today — the production
-// credentialed-host engine is deferred to full Phase 4 (ADR-076), and the
-// operator-run validation instrument deliberately does NOT emit observations, on
-// principle (ADR-077: an instrument that measures whether the pipeline is right must
-// not mutate what it measures). The precedence rule that reads this is defined now,
-// while the measurement motivating it is in front of us — the same way ADR-068
-// defined the `vulnerable` state dormant — so the decision is recorded once and
-// fires when the engine emits.
+// (ADR-076/077/090). It is LIVE: the credhost fleet engine (ADR-086/087) emits it,
+// and the correlator resolves attribution and supersedes inferred findings from it.
+// The precedence rule that reads it was built dormant (S33, ADR-077) and activated on
+// first contact in S41 — but ADR-089 found it unreachable behind a family gate, so
+// ADR-090 lifted the exact read ahead of that gate. It is now genuinely live.
 //
 // Release is EXACT: read from /etc/os-release, not inferred from a banner band. The
 // resolver lets it outrank the band vote (ADR-064) because ReleaseSource marks it
@@ -80,11 +77,18 @@ type packagePayload struct {
 	Address       string `json:"address"`
 	Release       string `json:"release"`        // VERSION_CODENAME or ID-major (rpm), read
 	ReleaseSource string `json:"release_source"` // "os-release" = read on the host, authoritative
+	// Family is the os-release ID ("ubuntu", "debian", "almalinux") — ground-truth
+	// distro family, read on the host. It lets a credentialed observation resolve
+	// attribution WITHOUT the service-inferred family gate (ADR-089): the exact
+	// signal must not depend on the weaker inferred one. Empty on the dormant/
+	// instrument shapes and on pre-ADR-089 payloads, which fall back to band voting.
+	Family string `json:"family,omitempty"`
 	// Installed is the exact inventory a credentialed-host engine read (empty on the
-	// dormant/instrument shapes). It drives credentialed advisory matching — exact
-	// name + version, no product->package map and no banner-version inference — and
-	// the supersession of inferred findings (ADR-077/087/088). credentialedRelease
-	// reads only Release/ReleaseSource above, so this is backward-compatible.
+	// instrument shapes). It drives credentialed advisory matching — exact name +
+	// version, no product->package map and no banner-version inference — and the
+	// supersession of inferred findings (ADR-077/087/088). It is read separately from
+	// the attribution fields above (credentialedAttribution reads Release/Source/
+	// Family), so an observation without Installed still resolves the release.
 	Installed []installedPackage `json:"installed,omitempty"`
 }
 

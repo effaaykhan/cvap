@@ -7,46 +7,48 @@ import (
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
-// The credentialed release-precedence rule (ADR-076/077) is DORMANT: no scan point
-// emits `package` observations today, so credentialedRelease returns false on every
-// real host and the band vote decides. These tests exercise the decision in
-// isolation, so the rule is verified now — while the measurement motivating it is in
-// front of us — and fires correctly the day the deferred production engine emits.
+// The credentialed release-precedence rule (ADR-076/077/089): an exact family+release
+// read from /etc/os-release outranks the service-inferred family and the band-vote
+// release. ADR-089 moved this ahead of the `family != ""` gate so a package-only
+// sweep reaches it — these tests pin the read-side decision: it fires only on an
+// exact, authoritative read that carries a family, and falls through otherwise.
 
 func pkgObs(payload any) store.Observation {
 	b, _ := json.Marshal(payload)
 	return store.Observation{Type: store.ObsPackage, Payload: b}
 }
 
-func TestCredentialedReleaseOutranksWhenPresent(t *testing.T) {
+func TestCredentialedAttributionOutranksWhenPresent(t *testing.T) {
 	h := host{obs: []store.Observation{
 		{Type: store.ObsService, Payload: []byte(`{"product":"OpenSSH","version":"8.9"}`)}, // a band voter
-		pkgObs(packagePayload{Address: "10.0.0.9", Release: "jammy", ReleaseSource: "os-release"}),
+		pkgObs(packagePayload{Address: "10.0.0.9", Family: "ubuntu", Release: "jammy", ReleaseSource: "os-release"}),
 	}}
-	rel, ok := credentialedRelease(h)
-	if !ok || rel != "jammy" {
-		t.Fatalf("credentialedRelease = (%q, %v), want (jammy, true)", rel, ok)
+	f, ok := credentialedAttribution(h)
+	if !ok || f.Release != "jammy" || f.Family != "ubuntu" {
+		t.Fatalf("credentialedAttribution = (%+v, %v), want ({ubuntu jammy}, true)", f, ok)
 	}
 }
 
-func TestCredentialedReleaseAbsentWithoutPackageObs(t *testing.T) {
-	// The real-host case today: only band-vote inputs, no `package` observation.
+func TestCredentialedAttributionAbsentWithoutPackageObs(t *testing.T) {
+	// Only band-vote inputs, no `package` observation: band voting decides.
 	h := host{obs: []store.Observation{
 		{Type: store.ObsService, Payload: []byte(`{"product":"OpenSSH","version":"8.9"}`)},
 	}}
-	if rel, ok := credentialedRelease(h); ok {
-		t.Errorf("credentialedRelease = (%q, true) with no package obs; want dormant (false)", rel)
+	if f, ok := credentialedAttribution(h); ok {
+		t.Errorf("credentialedAttribution = (%+v, true) with no package obs; want false", f)
 	}
 }
 
-func TestCredentialedReleaseIgnoresNonAuthoritativeSource(t *testing.T) {
-	// A `package` observation whose release was not read from /etc/os-release must
-	// NOT outrank the vote — only an exact, read release is ground truth.
+func TestCredentialedAttributionIgnoresNonAuthoritativeSource(t *testing.T) {
+	// A `package` observation whose release was not read from /etc/os-release, or that
+	// carries no family, must NOT outrank the vote — only an exact, read release with
+	// a ground-truth family is self-sufficient attribution (ADR-089).
 	h := host{obs: []store.Observation{
-		pkgObs(packagePayload{Address: "10.0.0.9", Release: "jammy", ReleaseSource: "inferred"}),
-		pkgObs(packagePayload{Address: "10.0.0.9", Release: "", ReleaseSource: "os-release"}), // empty release
+		pkgObs(packagePayload{Address: "10.0.0.9", Family: "ubuntu", Release: "jammy", ReleaseSource: "inferred"}),
+		pkgObs(packagePayload{Address: "10.0.0.9", Family: "ubuntu", Release: "", ReleaseSource: "os-release"}), // empty release
+		pkgObs(packagePayload{Address: "10.0.0.9", Family: "", Release: "jammy", ReleaseSource: "os-release"}),  // no family
 	}}
-	if rel, ok := credentialedRelease(h); ok {
-		t.Errorf("credentialedRelease = (%q, true) for non-authoritative/empty; want false", rel)
+	if f, ok := credentialedAttribution(h); ok {
+		t.Errorf("credentialedAttribution = (%+v, true) for non-authoritative/empty/family-less; want false", f)
 	}
 }

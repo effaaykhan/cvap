@@ -69,6 +69,7 @@ type packagePayload struct {
 	Address       string             `json:"address"`
 	Release       string             `json:"release"`
 	ReleaseSource string             `json:"release_source"`
+	Family        string             `json:"family,omitempty"` // os-release ID: ground-truth family (ADR-089)
 	Installed     []installedPackage `json:"installed,omitempty"`
 }
 
@@ -111,6 +112,7 @@ func Run(ctx context.Context, cfg Config, agentConn net.Conn, emit Emit) error {
 			Address:       t.Value,
 			Release:       read.Release.ReleaseKey(),
 			ReleaseSource: "os-release",
+			Family:        read.Release.ID, // ground-truth distro family, read on the host (ADR-089)
 			Installed:     make([]installedPackage, len(read.Packages)),
 		}
 		for i, p := range read.Packages {

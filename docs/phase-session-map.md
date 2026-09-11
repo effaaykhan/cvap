@@ -956,6 +956,39 @@ run; no version-compare corpus ever could, because the corpus does not know an e
 ([[measure-dont-read]] and [[test-that-proves-nothing]] extended to the caller/callee seam:
 a proof of the callee is not a proof of the call.)
 
+### 5.12 A proven rule that no input reaches — dormant behind a gate its own data cannot open
+
+**What happened (S41, ADR-077/089).** The credentialed release-precedence rule (`credentialedRelease`)
+was built dormant in S33 and unit-tested the whole time: fed the exact `.146` payload it returns
+`("resolute", true)`, correct. S41 put the first real credentialed `package` observation through the
+live pipeline — the event that was supposed to activate it — and it **still did not fire**: the release
+stayed the band-vote 0.8, not the 1.0 it promises. Root cause: `credentialedRelease` lived inside
+`deriveRelease`, which `resolveHost` calls only under `family != ""`; family is derived per sweep from
+*service* observations in the unresolved host group, and a credentialed `package` observation correlates
+in its own later sweep with no services in the group — so family is `""`, `deriveRelease` is skipped, and
+the rule downstream of it is never reached. It was placed behind a gate the very data shape it exists for
+cannot open. The acceptance held anyway only because a *sibling* path (`evaluateCredentialed`) is ungated.
+
+**Why it is its own pattern — distinct from 5.11.** 5.11 was a proven unit fed the **wrong input** (the
+epoch string crossed the seam). This is a proven unit that **no input reaches** — the input is correct
+and the function is correct, but the call never happens on the data that matters. Both pass every test,
+both are wrong in the system, and neither is visible without running the real path. And note the contrast
+with the dormant-mechanism that DID pay off: a dormant ENUM VALUE (`advisory_status = 'vulnerable'`,
+ADR-068) activates the day its data arrives because the switch that reads it is total — every value is
+handled. A dormant RULE has no such guarantee: it can sit behind a conditional that its activating data
+never satisfies, and nothing about it being dormant makes that reachability gap visible. "Tested for
+eight sessions, inert on first contact" is the signature.
+
+**How to apply.** When a rule is "dormant until its data arrives," a passing unit test is not evidence the
+rule will *run* — it is evidence the rule is *correct if run*. Trace the call path from where the data
+lands to where the rule executes, and check every gate on the way against the data's actual shape. The
+fix (ADR-089) was to lift the exact-read ahead of the inferred-family gate — the exact signal must not be
+gated by the weaker inferred one, which inverts the confidence ordering regardless of sweep mechanics —
+and, decisively, to prove REACHABILITY with an integration test (a package-only host, no inferred family,
+must still resolve release at 1.0) rather than another unit test of the read.
+([[dormant-rule-behind-a-gate]]; [[measure-dont-read]] found it — the live release read 0.8, not the
+value the unit test asserts.)
+
 ---
 
 ## 6. Standing requirement (from S23 onward)
