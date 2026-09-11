@@ -7,6 +7,7 @@ import (
 
 	scanpointv1 "github.com/effaaykhan/cvap/gen/cybersentinel/scanpoint/v1"
 	"github.com/effaaykhan/cvap/internal/enginewire"
+	"github.com/effaaykhan/cvap/internal/hostkeytrust"
 )
 
 // job is one assignment this scan point is executing.
@@ -57,6 +58,25 @@ type job struct {
 	// than reporting false, because Core only audits the absent case.
 	creds []*Credential
 
+	// agents are the signing agents built from those credentials (ADR-086).
+	// Each holds its own copy of the key, so each is zeroised and attested
+	// alongside the Credential it came from — an attestation over creds alone
+	// would answer one layer above where the key lives (ADR-091).
+	agents []*CredAgent
+
+	// The credentialed-host fields from the assignment (ADR-091), validated in
+	// onAssignment before the job exists. needsCred is set for the host engine
+	// and means runJob waits for a CredentialGrant before spawning anything.
+	needsCred  bool
+	credUser   string
+	knownHosts string
+	trust      hostkeytrust.Source
+
+	// credReady closes when the first grant lands. runJob waits on it for a
+	// credentialed job, bounded by CredentialGrantWait.
+	credReady chan struct{}
+	credOnce  sync.Once
+
 	expires  time.Time
 	aborting bool
 	reason   scanpointv1.TerminationReason
@@ -78,28 +98,78 @@ type job struct {
 }
 
 // addCredential takes a new grant without losing the old one.
+//
+// A grant that arrives once the job is already on its terminal path is zeroised
+// HERE, immediately, rather than appended: the terminal path's own zeroise may
+// already have run, and material appended after it would be held for the life
+// of the process while credentials_zeroised — answered over the list at the
+// time it was asked — reported nothing wrong. This is the runtime's half of the
+// resolve-then-abort window (ADR-091): Core resolved and sent, the job was
+// refused or severed before the engine started, and the material must still die.
 func (j *job) addCredential(c *Credential) {
 	j.mu.Lock()
-	defer j.mu.Unlock()
+	if j.aborting {
+		j.mu.Unlock()
+		c.Zeroise()
+		return
+	}
 	j.creds = append(j.creds, c)
+	j.mu.Unlock()
+	j.credOnce.Do(func() {
+		if j.credReady != nil {
+			close(j.credReady)
+		}
+	})
 }
 
-// zeroiseCredentials erases every credential this job has ever held (ADR-020).
+// addAgent registers a signing agent so the terminal path zeroises it with the
+// credential it was built from.
+func (j *job) addAgent(a *CredAgent) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.agents = append(j.agents, a)
+}
+
+// firstCredential is the grant runJob builds the agent from, or nil.
+func (j *job) firstCredential() *Credential {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if len(j.creds) == 0 {
+		return nil
+	}
+	return j.creds[0]
+}
+
+// zeroiseCredentials erases every credential AND every agent this job has ever
+// held (ADR-020). Agents first: closing the agent socket is what stops an engine
+// that is still running from obtaining another signature, and the key array it
+// shares with the Credential is overwritten by whichever runs first.
 func (j *job) zeroiseCredentials() {
 	j.mu.Lock()
+	agents := append([]*CredAgent(nil), j.agents...)
 	creds := append([]*Credential(nil), j.creds...)
 	j.mu.Unlock()
+	for _, agent := range agents {
+		agent.Zeroise()
+	}
 	for _, c := range creds {
 		c.Zeroise()
 	}
 }
 
-// credentialsZeroised answers over EVERYTHING the job held, which is what
-// JobTerminal.credentials_zeroised claims and what Core audits.
+// credentialsZeroised answers over EVERYTHING the job held — credentials and
+// the agents built from them — which is what JobTerminal.credentials_zeroised
+// claims and what Core audits.
 func (j *job) credentialsZeroised() bool {
 	j.mu.Lock()
+	agents := append([]*CredAgent(nil), j.agents...)
 	creds := append([]*Credential(nil), j.creds...)
 	j.mu.Unlock()
+	for _, a := range agents {
+		if !a.Zeroised() {
+			return false
+		}
+	}
 	for _, c := range creds {
 		if !c.Zeroised() {
 			return false

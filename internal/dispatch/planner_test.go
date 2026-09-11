@@ -203,3 +203,14 @@ func TestAHostnameIsStillAHostname(t *testing.T) {
 		}
 	}
 }
+
+// credhost dials (ADR-086), so a hostname is refused for it exactly as for
+// discovery. It was missing from dialsTargets when the fleet path landed, and
+// the scan-safety audit measured the result: both scope sites authorised the
+// string and the engine resolved the name itself (ADR-091).
+func TestHostnameIsRefusedForTheCredentialedHostEngine(t *testing.T) {
+	if _, err := expandFor(store.EngineHost, "ssh1.corp.example"); !errors.Is(err, ErrHostnameTargetUnresolvable) {
+		t.Fatalf("expandFor(host, hostname) = %v, want ErrHostnameTargetUnresolvable: the credhost engine "+
+			"connects to what it is given, and a name it resolves itself is an address no rule saw", err)
+	}
+}

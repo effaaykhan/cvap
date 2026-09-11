@@ -36,7 +36,9 @@ import (
 // exactly as gRPC would deliver it, which is the part that matters: identity
 // comes from there and nowhere else.
 type fakeStream struct {
-	ctx context.Context
+	// grantMaterial is the bytes of the last CredentialGrant as Send saw them.
+	grantMaterial []byte
+	ctx           context.Context
 
 	mu       sync.Mutex
 	inbound  chan *scanpointv1.ScanPointMessage
@@ -58,6 +60,12 @@ func (f *fakeStream) Context() context.Context { return f.ctx }
 func (f *fakeStream) Send(m *scanpointv1.CoreMessage) error {
 	f.mu.Lock()
 	f.outbound = append(f.outbound, m)
+	// A grant's material is erased by the send loop the moment Send returns
+	// (ADR-091), so the only place a test can see what crossed the wire is
+	// here, as the transport would have — a copy taken inside Send.
+	if g := m.GetCredential(); g != nil {
+		f.grantMaterial = append([]byte(nil), g.GetMaterial()...)
+	}
 	f.mu.Unlock()
 	select {
 	case f.sent <- m:

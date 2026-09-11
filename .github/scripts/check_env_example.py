@@ -53,6 +53,14 @@ ALLOWED_UNDOCUMENTED: dict[str, str] = {
     # absent — same shape as CVAP_REQUIRE_LAB. Read only by a _test.go, never by
     # the app, so documenting it in env.example would imply the app reads it.
     "CVAP_REQUIRE_VERCMP_ORACLE": "set by CI/the test harness to require the vercmp oracle, not by .env",
+    # The operator-run measurement instrument's password-auth mode (S40). A
+    # password for a one-off run belongs in that shell, never in a .env template
+    # that gets copied around; documenting it would invite exactly that.
+    "CVAP_CREDSCAN_PASSWORD": "cvap-credscan instrument, passed in the shell for a one-off run, never .env",
+    # The re-exec trigger for the scan-point test that spawns the test binary
+    # as an engine child to prove the agent socket reaches fd 3. Set by the
+    # test's own wrapper script, read only by a _test.go.
+    "CVAP_TEST_HELPER_ENGINE": "set by credentialed_test.go's helper-process wrapper, never by .env",
     # Standard libpq and Docker variables the tooling passes through.
     "PGPASSWORD": "libpq, passed explicitly by tooling",
     "PGOPTIONS": "libpq, passed explicitly by tooling",

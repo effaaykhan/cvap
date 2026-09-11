@@ -94,17 +94,27 @@ func Run(ctx context.Context, cfg Config, agentConn net.Conn, emit Emit) error {
 	if port == 0 {
 		port = 22
 	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
 	for _, t := range cfg.Targets {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		read, err := credscan.ReadHost(ctx, credscan.SSHConfig{
+		// A deadline on the READ, not only the connect: a target that accepts
+		// the connection and stalls would otherwise hold the session, the
+		// engine and the job open — and with them the credential — for as
+		// long as it liked. The instrument bounds it the same way.
+		readCtx, cancel := context.WithTimeout(ctx, timeout+30*time.Second)
+		read, err := credscan.ReadHost(readCtx, credscan.SSHConfig{
 			Addr:            net.JoinHostPort(t.Value, fmt.Sprint(port)),
 			User:            cfg.User,
 			Auth:            auth,
 			HostKeyCallback: hkcb,
-			Timeout:         cfg.Timeout,
+			Timeout:         timeout,
 		})
+		cancel()
 		if err != nil {
 			return fmt.Errorf("credhost: reading %s: %w", t.Value, err)
 		}
@@ -136,62 +146,117 @@ func Run(ctx context.Context, cfg Config, agentConn net.Conn, emit Emit) error {
 	return nil
 }
 
+// hostTrust is what one line of trust material says about one host: the keys
+// (marshaled public-key bytes) and SHA256 fingerprints it may present.
+type hostTrust struct {
+	keys   [][]byte
+	prints map[string]bool
+}
+
 // hostKeyCallback builds an in-memory host-key verifier from the trust material the
 // runtime supplies. No file and no os import (engine invariant: nothing on disk).
 //
-// Two shapes are accepted, because CVAP has two sources of a host's key:
+// Two shapes of key field are accepted, because CVAP has two sources of a host's key:
 //   - Full known-hosts lines ("host keytype base64") — an operator-pinned trust root
 //     on the credential profile. Matched by marshaled public-key bytes.
-//   - SHA256 fingerprints ("SHA256:...") — what discovery already captured for the
-//     host (asset_identity_keys). A fingerprint cannot be turned back into a key, so
-//     it is matched by computing the presented key's own SHA256 fingerprint. This is
-//     a standard, secure SSH trust mechanism, and it lets the fleet path verify
+//   - SHA256 fingerprints ("host SHA256:...") — what discovery already captured for
+//     the host (asset_identity_keys). A fingerprint cannot be turned back into a key,
+//     so it is matched by computing the presented key's own SHA256 fingerprint. This
+//     is a standard, secure SSH trust mechanism, and it lets the fleet path verify
 //     against exactly what CVAP observed rather than requiring a re-capture.
 //
-// A fingerprint token may stand alone on a line or be the key field of a
-// known-hosts-style line ("host SHA256:...").
+// EVERY line is bound to the host(s) in its first field, and the callback checks
+// the key against the trust for the host it actually dialled. The first version
+// pooled every key in the job's material and accepted any of them for any target,
+// so the key observed for one host verified a connection to another — with 32
+// targets per job that was a 32-key any-of set, and with a fleet-wide operator pin
+// it was the fleet (scan-safety audit, ADR-091). A line with no host field binds to
+// nothing and is ignored; hashed (|1|...) hosts cannot be matched and are ignored.
 func hostKeyCallback(known string) (ssh.HostKeyCallback, error) {
-	var keys [][]byte
-	fprints := map[string]bool{}
+	byHost := map[string]*hostTrust{}
+	usable := 0
 	for _, line := range strings.Split(known, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		f := strings.Fields(line)
-		// A SHA256 fingerprint anywhere on the line is trust material on its own.
-		matchedFingerprint := false
-		for _, tok := range f {
-			if strings.HasPrefix(tok, "SHA256:") {
-				fprints[tok] = true
-				matchedFingerprint = true
+		if len(f) < 2 || strings.HasPrefix(f[0], "SHA256:") || strings.HasPrefix(f[0], "|") {
+			continue // no host to bind to
+		}
+		var keyBytes []byte
+		var print string
+		switch {
+		case strings.HasPrefix(f[1], "SHA256:"):
+			print = f[1]
+		case len(f) >= 3:
+			pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(f[1] + " " + f[2]))
+			if err != nil {
+				continue
 			}
-		}
-		if matchedFingerprint {
+			keyBytes = pub.Marshal()
+		default:
 			continue
 		}
-		if len(f) < 3 {
-			continue
+		for _, h := range strings.Split(f[0], ",") {
+			h = normaliseKnownHost(h)
+			if h == "" {
+				continue
+			}
+			t := byHost[h]
+			if t == nil {
+				t = &hostTrust{prints: map[string]bool{}}
+				byHost[h] = t
+			}
+			if print != "" {
+				t.prints[print] = true
+			} else {
+				t.keys = append(t.keys, keyBytes)
+			}
+			usable++
 		}
-		pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(f[1] + " " + f[2]))
-		if err != nil {
-			continue
-		}
-		keys = append(keys, pub.Marshal())
 	}
-	if len(keys) == 0 && len(fprints) == 0 {
+	if usable == 0 {
 		return nil, errors.New("no usable host keys supplied; refusing to connect without verification")
 	}
-	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
-		if fprints[ssh.FingerprintSHA256(key)] {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		// hostname is the address the engine dialled (host:port); the trust is
+		// looked up under the host alone and under host:port, nothing wider.
+		t := byHost[normaliseKnownHost(hostname)]
+		if t == nil {
+			return fmt.Errorf("no trust material for host %q", hostname)
+		}
+		if t.prints[ssh.FingerprintSHA256(key)] {
 			return nil
 		}
 		km := key.Marshal()
-		for _, k := range keys {
+		for _, k := range t.keys {
 			if bytes.Equal(k, km) {
 				return nil
 			}
 		}
 		return errors.New("host key mismatch")
 	}, nil
+}
+
+// normaliseKnownHost reduces the known_hosts host-field forms to one string:
+// "host", "[host]:port" and "host:22" (the default port is the bare host).
+func normaliseKnownHost(h string) string {
+	h = strings.TrimSpace(h)
+	if strings.HasPrefix(h, "[") {
+		if i := strings.LastIndex(h, "]:"); i > 0 {
+			host, port := h[1:i], h[i+2:]
+			if port == "22" {
+				return host
+			}
+			return host + ":" + port
+		}
+	}
+	if host, port, err := net.SplitHostPort(h); err == nil {
+		if port == "22" {
+			return host
+		}
+		return host + ":" + port
+	}
+	return h
 }

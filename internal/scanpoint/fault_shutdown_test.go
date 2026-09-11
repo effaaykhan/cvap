@@ -122,7 +122,8 @@ func (h *blockingHost) start(context.Context, []enginewire.Target, engineBudget)
 	close(h.started)
 	return nil
 }
-func (h *blockingHost) pump() {}
+func (h *blockingHost) authoriseAll([]enginewire.Target) error { return nil }
+func (h *blockingHost) pump()                                  {}
 func (h *blockingHost) wait() EngineOutcome {
 	<-h.stopped
 	return EngineStopped

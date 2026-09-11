@@ -260,3 +260,30 @@ The widest arm of every kill predicate is `scope NOT IN ('zone','scan')` rather 
 `scope = 'tenant'`, so a `kill_scope` a later migration adds is delivered to everyone and
 blocks every claim until someone teaches the predicate about it. That matches `killScope()`'s
 documented fail-safe, whose default branch was otherwise unreachable.
+
+## A host job is credentialed or it is refused (ADR-091)
+
+`offerWork` completes a `host` job's assignment through `credentialedAssignment`: the policy's ssh
+profile (`CredentialProfiles.SSHForJob`), its `username` as `JobAssignment.cred_user`, and the trust
+material as `known_hosts` in the `internal/hostkeytrust` shape — **per task**: the operator's pinned
+lines that name that task's address when the profile has a pin, otherwise the SHA256 fingerprint CVAP
+observed for that address (`AssetIdentityKeys.SSHHostKeyFingerprintsAt`, one token of one shape —
+a stored value with an embedded newline once composed a line for another host). A task with neither
+refuses the **whole job**; there is no per-host trust-on-first-use, and a pin for one host is never
+trust for another. Every refusable step runs before the secret is resolved.
+
+The secret is resolved last (`credsource.Resolver`, installed by `UseSecretResolver`; a Core without
+one refuses every host job naming `CVAP_CORE_SECRET_FILE_ROOT`), recorded as a `credential_grants` row
+and a `credential.granted` audit event (`trust_source` carries the same word the wire does) in the
+claim's transaction, and sent as a `CredentialGrant` **immediately behind its assignment on the same
+channel** — the runtime drops a grant for a job it is not running. **Every exit that is not a Send
+erases the material**: a transaction that rolls back after `Resolve` (the deferred discard covers
+grants never queued), an assignment refused by a full queue (its grant is discarded, never sent), a
+grant refused by the queue, a grant still queued when the stream dies (`Connect` waits for the pump
+and drains both channels), and — once `stream.Send` returns, either way — the send loop itself. The
+first version's deferred discard ran when `offerWork` returned, before the send loop had dequeued the
+grant, so the runtime would have received zeros; `credgrant_test.go` reads the bytes at `Send` and
+caught it. Refusals are terminal (`engine_failure`) with a `job.credential_refused` audit event, for
+the reason `refuseJob` gives. `onTerminal` sets `credential_grants.zeroised_at` only from the
+runtime's attestation and only for grants delivered to the attesting scan point's certificate; a
+terminal without it leaves the row open, which is the state an operator should see.

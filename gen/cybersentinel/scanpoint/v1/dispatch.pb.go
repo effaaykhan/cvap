@@ -778,8 +778,32 @@ type JobAssignment struct {
 	ReassignSafe     bool                   `protobuf:"varint,5,opt,name=reassign_safe,json=reassignSafe,proto3" json:"reassign_safe,omitempty"` // governs retry, never retention (ADR-026)
 	Constraints      *ScanConstraints       `protobuf:"bytes,6,opt,name=constraints,proto3" json:"constraints,omitempty"`
 	Tasks            []*Task                `protobuf:"bytes,7,rep,name=tasks,proto3" json:"tasks,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Credentialed-host jobs (engine "host"), ADR-091. Both fields are NON-SECRET
+	// and travel with the assignment rather than with the CredentialGrant that
+	// follows it: cred_user is the username column of the credential profile
+	// (migration 0042) and known_hosts is public key material by definition. The
+	// grant still carries the only secret on the wire.
+	//
+	// cred_user is the account the runtime's signing agent authenticates as. A
+	// host job that arrives without one is refused by the runtime (ENGINE_FAILURE
+	// with the reason in detail) rather than guessed at.
+	CredUser string `protobuf:"bytes,8,opt,name=cred_user,json=credUser,proto3" json:"cred_user,omitempty"`
+	// known_hosts is the host-key trust material the engine verifies the target
+	// against, in the shape internal/hostkeytrust defines: a first line
+	// "# cvap-trust-source: operator" or "# cvap-trust-source: observed", then
+	// known_hosts lines or SHA256 fingerprints. The header is what makes the
+	// sender's claim explicit — an operator-pinned trust root on the credential
+	// profile versus the fingerprint CVAP itself observed for the target on
+	// discovery — so the receiving side enforces the refusal against the claim and
+	// Core's audit event (credential.granted) records the same word.
+	//
+	// Trust-on-first-use is not a mode. A value with no material after the
+	// header, or with no header, is refused by the runtime before any engine
+	// process exists; Core refuses to compose one at all. Absent (an older Core)
+	// reads as "no material", which is the refusal, not a permission.
+	KnownHosts    string `protobuf:"bytes,9,opt,name=known_hosts,json=knownHosts,proto3" json:"known_hosts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *JobAssignment) Reset() {
@@ -859,6 +883,20 @@ func (x *JobAssignment) GetTasks() []*Task {
 		return x.Tasks
 	}
 	return nil
+}
+
+func (x *JobAssignment) GetCredUser() string {
+	if x != nil {
+		return x.CredUser
+	}
+	return ""
+}
+
+func (x *JobAssignment) GetKnownHosts() string {
+	if x != nil {
+		return x.KnownHosts
+	}
+	return ""
 }
 
 type Task struct {
@@ -2101,7 +2139,7 @@ const file_cybersentinel_scanpoint_v1_dispatch_proto_rawDesc = "" +
 	"\vServerHello\x12:\n" +
 	"\x19accepted_protocol_version\x18\x01 \x01(\tR\x17acceptedProtocolVersion\x122\n" +
 	"\x15min_supported_version\x18\x02 \x01(\tR\x13minSupportedVersion\x12-\n" +
-	"\x12deprecation_notice\x18\x03 \x01(\tR\x11deprecationNotice\"\xb9\x02\n" +
+	"\x12deprecation_notice\x18\x03 \x01(\tR\x11deprecationNotice\"\xf7\x02\n" +
 	"\rJobAssignment\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x16\n" +
 	"\x06engine\x18\x02 \x01(\tR\x06engine\x12\x1f\n" +
@@ -2110,7 +2148,10 @@ const file_cybersentinel_scanpoint_v1_dispatch_proto_rawDesc = "" +
 	"\x12lease_expires_unix\x18\x04 \x01(\x03R\x10leaseExpiresUnix\x12#\n" +
 	"\rreassign_safe\x18\x05 \x01(\bR\freassignSafe\x12M\n" +
 	"\vconstraints\x18\x06 \x01(\v2+.cybersentinel.scanpoint.v1.ScanConstraintsR\vconstraints\x126\n" +
-	"\x05tasks\x18\a \x03(\v2 .cybersentinel.scanpoint.v1.TaskR\x05tasks\"Q\n" +
+	"\x05tasks\x18\a \x03(\v2 .cybersentinel.scanpoint.v1.TaskR\x05tasks\x12\x1b\n" +
+	"\tcred_user\x18\b \x01(\tR\bcredUser\x12\x1f\n" +
+	"\vknown_hosts\x18\t \x01(\tR\n" +
+	"knownHosts\"Q\n" +
 	"\x04Task\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x16\n" +
 	"\x06target\x18\x02 \x01(\tR\x06target\x12\x18\n" +

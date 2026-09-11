@@ -131,6 +131,10 @@ GO_SUITES = [
     # Shutdown waits for results to be enqueued, not just for the engine to be
     # reaped — an in-process harness over the real shutdown path.
     "internal/scanpoint/fault_shutdown_test.go",
+    # ADR-091: severing a credentialed job zeroises the AGENT's copy of the key,
+    # not only the Credential's — the F9 shape, measured from the engine's end
+    # of the signing socket.
+    "internal/scanpoint/credentialed_test.go",
 ]
 
 # The declaration shape, in comments beside the tests:

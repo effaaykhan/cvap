@@ -15,7 +15,7 @@ internal/
   control/      control plane services (auth, tenancy, asset, scan, policy)
   dispatch/     job broker + dispatch + ingest
   scanpoint/    scan point runtime, lease client, engine host
-  engines/      discovery, fingerprint — separate processes (ADR-027). A scan-point
+  engines/      discovery, fingerprint, credhost — separate processes (ADR-027). A scan-point
                 `rules` engine (request-coupled checks, ADR-013) is not built yet;
                 the Core-side evidence-based rule engine is internal/rules
                 enginerate/ is the shared packet budget: ONE model, because
@@ -79,7 +79,9 @@ These are enforced by hooks and reviewed by subagents. Full detail: `/cvap-invar
 
 MVP scope is frozen in `docs/execution-plan.md` §2. Out of scope for the 8-week build: CVE matching,
 credentialed assessment, DAST, API testing, SAST, cloud, containers, agents, reporting engine, Kubernetes.
-If a change adds one of these, stop and say so rather than building it.
+If a change adds one of these, stop and say so rather than building it. Two of them have since been
+authorised by ADR: advisory matching (Phase 3, ADR-059 onward) and Linux/SSH credentialed inventory
+(Phase 4, ADR-081/084/086 onward) — those are in scope; the rest of the list still is not.
 
 ## Review
 

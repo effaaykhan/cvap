@@ -82,3 +82,17 @@ Two gotchas that cost time here:
   open; some may already be fixed.
 
 See [[recurring-findings]] for what these probes have turned up.
+
+**Scan-point probes.** Scratch files go in `internal/scanpoint/` as `package scanpoint`; name them
+`aareview_*_test.go` (the `zz_` prefix is picked up here, but `aareview_` is safe in every package
+including `internal/dispatch`). `credentialed_test.go` carries the pattern for a REAL child process:
+write a `#!/bin/sh` wrapper that re-execs `os.Executable()` with
+`-test.run='^TestHelperEngineProcess$'` and a trigger env var, because `engineEnv()` hands the child
+PATH/HOME/TZ/LANG only. `newEngineHost(log, binary, jobID, allowed, exclusions)` + `start(ctx,
+[]enginewire.Target{...}, engineBudget{SafetyMode:"safe", RatePPS:10})` drives the production spawn
+path in-process. To probe fd inheritance, have the fake engine run `ls -l /proc/self/fd`.
+In `internal/dispatch`, `export_test.go` already exports `OfferWorkForTest`; a second
+`package dispatch` file can export a clock setter (`s.now`) and an `onTerminal` driver — that is how
+to ask "what does a DIFFERENT scan point's session do to this job's rows" without forging a cert.
+The dev DB accumulates `disp-%` tenants from every dispatch run (144 before this session); the
+suite does not clean them and another agent may be mid-run, so leave them alone.

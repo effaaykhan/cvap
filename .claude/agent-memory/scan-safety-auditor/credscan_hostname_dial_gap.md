@@ -39,3 +39,7 @@ each resolved address (both against exclusions and allows) before dialing.
 Minor: `internal/credscan/ssh.go` `run()` command execution is not bound by the context/
 timeout (only `dialContext` is), so a host that stalls after connect holds the one
 connection open past the deadline. One host, one connection — blast radius still bounded.
+
+**Recurred 2026-09-11** on the fleet path: `internal/engines/credhost` dials the same way and
+`store.EngineHost` is missing from the planner's `dialsTargets` allowlist, so the hostname is not
+refused upstream either. See [[credhost-fleet-path-findings]].

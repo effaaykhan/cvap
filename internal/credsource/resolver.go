@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -104,31 +105,48 @@ func (f *FileResolver) Resolve(_ context.Context, ref string) ([]byte, error) {
 	// Resolve symlinks before the containment check so a link inside Root pointing
 	// out of it cannot escape. EvalSymlinks requires the file to exist, which is
 	// the case we care about; a missing file is a plain read error here.
+	// Errors below name the CAUSE and never the path: these messages land in
+	// job.credential_refused audit detail and in Core's log, and a secret_ref
+	// is Core's filesystem layout. os errors carry the path, so only their
+	// underlying errno travels.
 	resolved, err := filepath.EvalSymlinks(filepath.Clean(u.Path))
 	if err != nil {
-		return nil, fmt.Errorf("credsource: resolving secret path: %w", err)
+		return nil, fmt.Errorf("credsource: resolving secret path: %w", cause(err))
 	}
 	root, err := filepath.EvalSymlinks(f.Root)
 	if err != nil {
-		return nil, fmt.Errorf("credsource: resolving secret root: %w", err)
+		return nil, fmt.Errorf("credsource: resolving secret root: %w", cause(err))
 	}
 	rel, err := filepath.Rel(root, resolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, fmt.Errorf("credsource: secret_ref %q resolves outside the permitted root", ref)
+		return nil, errors.New("credsource: secret_ref resolves outside the permitted root")
 	}
 	info, err := os.Stat(resolved)
 	if err != nil {
-		return nil, fmt.Errorf("credsource: stat secret: %w", err)
+		return nil, fmt.Errorf("credsource: stat secret: %w", cause(err))
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("credsource: secret_ref %q is not a regular file", ref)
+		return nil, errors.New("credsource: secret_ref is not a regular file")
 	}
 	if f.MaxBytes > 0 && info.Size() > f.MaxBytes {
-		return nil, fmt.Errorf("credsource: secret at %q is %d bytes, over the %d cap", ref, info.Size(), f.MaxBytes)
+		return nil, fmt.Errorf("credsource: secret is %d bytes, over the %d cap", info.Size(), f.MaxBytes)
 	}
 	b, err := os.ReadFile(resolved)
 	if err != nil {
-		return nil, fmt.Errorf("credsource: reading secret: %w", err)
+		return nil, fmt.Errorf("credsource: reading secret: %w", cause(err))
 	}
 	return b, nil
+}
+
+// cause strips the path from an os error, keeping the errno.
+func cause(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return le.Err
+	}
+	return err
 }

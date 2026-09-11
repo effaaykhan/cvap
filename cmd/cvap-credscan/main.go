@@ -486,6 +486,8 @@ func loadCredential(host, keyPath string, ttl time.Duration) (*scanpoint.Credent
 	scopeHost := []string{host}
 	expires := time.Now().Add(ttl + time.Minute)
 	if keyPath != "" {
+		// #nosec G304 -- -key is an operator flag on a one-off instrument run by
+		// the person who owns the key; no request input reaches this path.
 		material, err := os.ReadFile(keyPath)
 		if err != nil {
 			return nil, fmt.Errorf("reading key %q: %w", keyPath, err)
@@ -522,6 +524,8 @@ func authMethod(cred *scanpoint.Credential) (ssh.AuthMethod, error) {
 // line; a leading '!' is an exclusion; '#' begins a comment; blanks are ignored.
 // This is the operator-written policy text scope.Permits parses on the rule side.
 func loadScope(path string) (allowed, exclusions []string, err error) {
+	// #nosec G304 -- -scope is an operator flag naming lab/scope.txt; the file
+	// is read to NARROW what the instrument may reach, not to widen it.
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("scope file: %w", err)

@@ -389,10 +389,11 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		var release string
 		var releaseConf float32
 		if facts, ok := credentialedAttribution(h); ok {
+			// applyCredentialedAttribution writes the family itself (ADR-090);
+			// nothing below reads the local, so it is not reassigned here.
 			if release, releaseConf, err = c.applyCredentialedAttribution(ctx, conn, assetID, facts); err != nil {
 				return err
 			}
-			family = facts.Family
 		} else if family != "" {
 			if release, releaseConf, err = c.deriveRelease(ctx, conn, assetID, h); err != nil {
 				return err

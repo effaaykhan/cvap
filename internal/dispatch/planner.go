@@ -206,6 +206,12 @@ func expandFor(engine store.Engine, declared string) ([]string, error) {
 var dialsTargets = map[store.Engine]bool{
 	store.EngineDiscovery:   true,
 	store.EngineFingerprint: true,
+	// credhost dials port 22 of what it is given (ADR-086). It was missing
+	// here when the fleet path first landed, and the scan-safety audit measured
+	// the consequence: a hostname host job was planned, both scope sites
+	// authorised the STRING, and the engine resolved the name itself and
+	// completed a TCP connect to an address no rule had seen (ADR-091).
+	store.EngineHost: true,
 }
 
 func isAddress(v string) bool {

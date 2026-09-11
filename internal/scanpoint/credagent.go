@@ -91,7 +91,10 @@ func (a *CredAgent) EngineFile() (*os.File, error) {
 	if a.zeroised {
 		return nil, errors.New("credagent: zeroised")
 	}
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	// SOCK_CLOEXEC: os/exec clears close-on-exec only for the fds it is told
+	// to pass (ExtraFiles), so the one engine this serves gets its dup and no
+	// engine spawned concurrently for another job inherits it.
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("credagent: socketpair: %w", err)
 	}
@@ -104,12 +107,34 @@ func (a *CredAgent) EngineFile() (*os.File, error) {
 		return nil, fmt.Errorf("credagent: fileconn: %w", err)
 	}
 	a.runtime = rc.(*net.UnixConn)
-	go func() { _ = agent.ServeAgent(a.keyring, a.runtime) }()
+	// The goroutine takes its own references. Zeroise nils both fields, and a
+	// zeroise that lands before this goroutine is scheduled — a job refused or
+	// severed between EngineFile and the spawn, which the runtime's scope
+	// refusal reliably produces — handed ServeAgent a nil conn and panicked the
+	// whole scan point (scan-safety audit, ADR-091). Closing rc in Zeroise is
+	// what stops the goroutine; it needs no field for that.
+	go func(kr agent.Agent, conn net.Conn) { _ = agent.ServeAgent(kr, conn) }(a.keyring, a.runtime)
 	return engineFile, nil
+}
+
+// Zeroised reports whether the key is gone. It is part of what backs
+// JobTerminal.credentials_zeroised: the agent holds the one retained copy of the
+// key (the Credential it was parsed from is a second, separately zeroised array),
+// so an attestation that answered only for the Credential would be true one layer
+// above where the key actually lives — the F9 shape (ADR-091).
+func (a *CredAgent) Zeroised() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.zeroised
 }
 
 // Zeroise overwrites the key backing array and tears down the agent. Idempotent;
 // safe on completion, lease loss and abort (ADR-020), and each of those may race.
+//
+// Closing the runtime end of the socket is what stops signing for the engine:
+// a request in flight fails, and no further one is answered. That is the
+// mechanism by which an engine whose job was severed loses the ability to
+// authenticate, independently of whether it has been killed yet.
 func (a *CredAgent) Zeroise() {
 	a.mu.Lock()
 	defer a.mu.Unlock()

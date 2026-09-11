@@ -16,10 +16,11 @@ Rules:
   An engine therefore holds no scope data: no allowlist, no exclusion list, no CIDR
   arithmetic. If an engine needs to know whether an address is in scope, the design is
   wrong — it should be asking the runtime, not deciding.
-- **Engines never receive raw credential material.** The runtime establishes the
-  authenticated session and passes a session handle, or a short-lived derived token
-  (ADR-020). An engine that crashes cannot leak what it never held. Core dumps are disabled
-  on engine processes.
+- **Engines never receive raw credential material.** The runtime holds the credential and
+  passes a session handle or a short-lived derived proof (ADR-020). For SSH the engine opens
+  the connection itself and authenticates over the runtime's signing-agent socket on fd 3 —
+  signatures, never the key (ADR-086). An engine that crashes cannot leak what it never held.
+  Core dumps are disabled on engine processes.
 - The runtime allocates a rate slice; the engine stays inside it and reports actual send
   counts. Engines do not read the platform ceiling and do not coordinate with each other —
   the aggregate is bounded by the runtime's allocation, not by cooperation (ADR-024).
@@ -31,9 +32,11 @@ Rules:
   finish a partial observation, not a veto.
 - Detection establishes evidence without achieving impact. See `/cvap-invariants`.
 
-## The two engines that send packets
+## The engines that send packets
 
-`discovery` holds `net` (ADR-047). `fingerprint` holds `net` plus four crypto imports (ADR-048),
+`credhost` holds `net` and `x/crypto/ssh` (ADR-086): it dials port 22 of a resolved target and
+runs two read-only commands over an authenticated session, emitting one `package` observation
+per host. `discovery` holds `net` (ADR-047). `fingerprint` holds `net` plus four crypto imports (ADR-048),
 and it is the only place in this repository where `InsecureSkipVerify` is correct — a verifying
 dial fails on exactly the certificates worth reporting, so it would return an error where the
 evidence should be. It appears **once**, in `inspectOnlyTLSConfig`, whose name is the argument,

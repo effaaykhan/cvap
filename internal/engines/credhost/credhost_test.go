@@ -26,16 +26,42 @@ func pub(t *testing.T, authorized string) ssh.PublicKey {
 }
 
 func TestHostKeyCallbackAcceptsMatchingFingerprint(t *testing.T) {
-	// The fleet default: Core supplies the SHA256 fingerprint CVAP captured.
-	cb, err := hostKeyCallback(fpA)
+	// The fleet default: Core supplies the SHA256 fingerprint CVAP captured,
+	// bound to the address it was captured for.
+	cb, err := hostKeyCallback("192.0.2.7 " + fpA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cb("host:22", &net.TCPAddr{}, pub(t, keyA)); err != nil {
+	if err := cb("192.0.2.7:22", &net.TCPAddr{}, pub(t, keyA)); err != nil {
 		t.Errorf("matching fingerprint rejected: %v", err)
 	}
-	if err := cb("host:22", &net.TCPAddr{}, pub(t, keyB)); err == nil {
+	if err := cb("192.0.2.7:22", &net.TCPAddr{}, pub(t, keyB)); err == nil {
 		t.Error("a different host key was accepted against fingerprint A")
+	}
+}
+
+// Trust is bound to the host on the line. The key observed for one target must
+// not verify a connection to another target in the same job, and a bare
+// fingerprint with no host binds to nothing.
+func TestHostKeyCallbackBindsTrustToTheHost(t *testing.T) {
+	cb, err := hostKeyCallback("192.0.2.7 " + fpA + "\n10.0.0.1 " + keyB + "\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cb("198.51.100.4:22", &net.TCPAddr{}, pub(t, keyA)); err == nil {
+		t.Error("the key observed for 192.0.2.7 verified a connection to 198.51.100.4")
+	}
+	if err := cb("192.0.2.7:22", &net.TCPAddr{}, pub(t, keyB)); err == nil {
+		t.Error("the operator pin for 10.0.0.1 verified a connection to 192.0.2.7")
+	}
+	if err := cb("10.0.0.1:22", &net.TCPAddr{}, pub(t, keyB)); err != nil {
+		t.Errorf("the pin for 10.0.0.1 did not verify 10.0.0.1: %v", err)
+	}
+	if err := cb("[192.0.2.7]:2222", &net.TCPAddr{}, pub(t, keyA)); err == nil {
+		t.Error("a line for port 22 verified a connection to port 2222")
+	}
+	if _, err := hostKeyCallback(fpA); err == nil {
+		t.Error("a bare fingerprint with no host was accepted as trust material")
 	}
 }
 
@@ -45,10 +71,10 @@ func TestHostKeyCallbackAcceptsFullKnownHostsLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cb("host:22", &net.TCPAddr{}, pub(t, keyA)); err != nil {
+	if err := cb("192.168.0.5:22", &net.TCPAddr{}, pub(t, keyA)); err != nil {
 		t.Errorf("matching full key rejected: %v", err)
 	}
-	if err := cb("host:22", &net.TCPAddr{}, pub(t, keyB)); err == nil {
+	if err := cb("192.168.0.5:22", &net.TCPAddr{}, pub(t, keyB)); err == nil {
 		t.Error("a different host key was accepted against a pinned full key")
 	}
 }
@@ -66,7 +92,7 @@ func TestHostKeyCallbackFingerprintOnHostLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cb("host:22", &net.TCPAddr{}, pub(t, keyA)); err != nil {
+	if err := cb("10.0.0.9:22", &net.TCPAddr{}, pub(t, keyA)); err != nil {
 		t.Errorf("fingerprint on a host line rejected: %v", err)
 	}
 }

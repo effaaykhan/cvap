@@ -97,6 +97,32 @@ message JobAssignment {
   bool reassign_safe = 5;  // governs retry, never retention (ADR-026)
   ScanConstraints constraints = 6;
   repeated Task tasks = 7;
+
+  // Credentialed-host jobs (engine "host"), ADR-091. Both fields are NON-SECRET
+  // and travel with the assignment rather than with the CredentialGrant that
+  // follows it: cred_user is the username column of the credential profile
+  // (migration 0042) and known_hosts is public key material by definition. The
+  // grant still carries the only secret on the wire.
+  //
+  // cred_user is the account the runtime's signing agent authenticates as. A
+  // host job that arrives without one is refused by the runtime (ENGINE_FAILURE
+  // with the reason in detail) rather than guessed at.
+  string cred_user = 8;
+
+  // known_hosts is the host-key trust material the engine verifies the target
+  // against, in the shape internal/hostkeytrust defines: a first line
+  // "# cvap-trust-source: operator" or "# cvap-trust-source: observed", then
+  // known_hosts lines or SHA256 fingerprints. The header is what makes the
+  // sender's claim explicit — an operator-pinned trust root on the credential
+  // profile versus the fingerprint CVAP itself observed for the target on
+  // discovery — so the receiving side enforces the refusal against the claim and
+  // Core's audit event (credential.granted) records the same word.
+  //
+  // Trust-on-first-use is not a mode. A value with no material after the
+  // header, or with no header, is refused by the runtime before any engine
+  // process exists; Core refuses to compose one at all. Absent (an older Core)
+  // reads as "no material", which is the refusal, not a permission.
+  string known_hosts = 9;
 }
 
 message Task {

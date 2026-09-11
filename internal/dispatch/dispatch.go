@@ -62,6 +62,7 @@ import (
 
 	scanpointv1 "github.com/effaaykhan/cvap/gen/cybersentinel/scanpoint/v1"
 	"github.com/effaaykhan/cvap/internal/control/enrollment"
+	"github.com/effaaykhan/cvap/internal/credsource"
 	"github.com/effaaykhan/cvap/internal/logging"
 	"github.com/effaaykhan/cvap/internal/scope"
 	"github.com/effaaykhan/cvap/internal/store"
@@ -99,6 +100,11 @@ type Service struct {
 	versions enrollment.VersionWindow
 	log      *slog.Logger
 	now      func() time.Time
+
+	// secrets resolves a credential profile's secret_ref at grant time
+	// (ADR-020, ADR-091). Nil means no credentialed job can be dispatched;
+	// see UseSecretResolver.
+	secrets credsource.Resolver
 }
 
 func New(db *store.DB, versions enrollment.VersionWindow, log *slog.Logger) *Service {
@@ -109,6 +115,11 @@ func New(db *store.DB, versions enrollment.VersionWindow, log *slog.Logger) *Ser
 type session struct {
 	tenant store.TenantID
 	spID   uuid.UUID
+
+	// fingerprint is the certificate the TLS layer authenticated. It is what a
+	// credential grant records as its recipient (migration 0006): the id above
+	// is resolved FROM it, and the fingerprint is the fact.
+	fingerprint string
 
 	// backpressure is the scan point's own signal (ADR-026). It is the ONLY
 	// half that can stop the buffer growing, because only dispatch can stop
@@ -149,7 +160,7 @@ func (s *Service) Connect(stream scanpointv1.Dispatch_ConnectServer) error {
 		return status.Error(codes.Internal, "dispatch unavailable")
 	}
 
-	sess := &session{tenant: tenant}
+	sess := &session{tenant: tenant, fingerprint: fingerprint}
 
 	// The handshake must be first. A scan point that starts sending heartbeats
 	// before Hello has not negotiated a version, and ADR-022 wants an
@@ -197,13 +208,38 @@ func (s *Service) Connect(stream scanpointv1.Dispatch_ConnectServer) error {
 	recvErr := make(chan error, 1)
 	go func() { recvErr <- s.receive(streamCtx, stream, sess, out) }()
 
-	go s.pump(streamCtx, sess, out, urgent)
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		s.pump(streamCtx, sess, out, urgent)
+	}()
 
 	err = s.sendLoop(streamCtx, stream, out, urgent, recvErr)
 	cancel()
 
+	// A grant the producer queued but the send loop never dequeued — the
+	// stream ended first — would otherwise sit in the channel buffer holding
+	// the secret until the collector reached it (ADR-091). Wait for the pump so
+	// nothing is queued after the drain, then erase whatever is left.
+	<-pumpDone
+	drainGrantMaterial(out)
+	drainGrantMaterial(urgent)
+
 	s.markOffline(context.WithoutCancel(ctx), sess)
 	return err
+}
+
+// drainGrantMaterial erases the material of every grant still queued on a
+// channel nobody will read again. Non-blocking: the producers have stopped.
+func drainGrantMaterial(ch <-chan *scanpointv1.CoreMessage) {
+	for {
+		select {
+		case m := <-ch:
+			eraseGrantMaterial(m)
+		default:
+			return
+		}
+	}
 }
 
 // sendLoop is the single writer, and it owns the handler goroutine.
@@ -212,7 +248,15 @@ func (s *Service) Connect(stream scanpointv1.Dispatch_ConnectServer) error {
 // the context is cancelled — and returning is what releases a peer that has
 // stopped reading.
 func (s *Service) sendLoop(ctx context.Context, stream scanpointv1.Dispatch_ConnectServer, out, urgent <-chan *scanpointv1.CoreMessage, recvErr <-chan error) error {
-	send := func(msg *scanpointv1.CoreMessage) error { return stream.Send(msg) }
+	send := func(msg *scanpointv1.CoreMessage) error {
+		err := stream.Send(msg)
+		// Core's copy of a grant ends here, whichever way Send went (ADR-091):
+		// the bytes are in the transport's buffer or they never will be, and
+		// the decoded message is otherwise the secret's last address in this
+		// process until the collector reaches it.
+		eraseGrantMaterial(msg)
+		return err
+	}
 
 	for {
 		// Drain urgent to empty first. A kill behind a queue of assignments is
@@ -694,6 +738,16 @@ func (s *Service) onTerminal(ctx context.Context, sess *session, t *scanpointv1.
 		// abort, and an invariant nothing ever asserts is one nothing notices
 		// the loss of. So an audit event when it is absent — an unchecked field
 		// would be worse than no field at all.
+		if t.GetCredentialsZeroised() {
+			// The attestation closes the grant record (migration 0006). Only
+			// the attestation, and only for grants delivered to THIS scan
+			// point's certificate: a terminal without it leaves zeroised_at
+			// NULL, which is the operator-visible "no confirmation" state, and
+			// a scan point cannot close a record of a secret it never received.
+			if err := (store.CredentialGrants{}).MarkZeroised(ctx, c, jobID, sess.fingerprint, s.now()); err != nil {
+				return err
+			}
+		}
 		if !t.GetCredentialsZeroised() {
 			if err := (store.AuditEvents{}).Record(ctx, c, store.AuditEvent{
 				ActorID:      &sess.spID,
@@ -943,8 +997,9 @@ var errOutOfScope = errors.New("dispatch: job refused by the Core-side scope che
 // The audit event is the point. A safety audit observed that the previous
 // version logged to slog and dispatched anyway, and that an operator reads the
 // audit log and the UI rather than Core's stdout — so a scan that stopped
-// because of a scope defect looked like a scan that had stalled. The lease is
-// released in the same transaction so the sweeper has nothing to find.
+// because of a scope defect looked like a scan that had stalled. The job is
+// terminal, and ExpireLeases only looks at assigned/running jobs, so the sweeper
+// has nothing to find; the lease row itself is left as it was.
 func (s *Service) refuseJob(ctx context.Context, c *store.Conn, jobID, spID uuid.UUID, policy *store.JobPolicy, why string) error {
 	s.log.ErrorContext(ctx, "job refused by the Core-side scope check",
 		slog.String("job_id", jobID.String()),
@@ -984,6 +1039,30 @@ func (s *Service) refuseJob(ctx context.Context, c *store.Conn, jobID, spID uuid
 // someone noticed.
 func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scanpointv1.CoreMessage, limit int) {
 	var assignments []*scanpointv1.JobAssignment
+
+	// grants are the credentialed assignments' secrets, resolved inside the
+	// transaction below and queued after it. Any exit from this function on
+	// which a grant was NOT queued discards it: a transaction that rolls back
+	// after Resolve is the resolve-then-abort window ADR-091 names, and the
+	// deferred discard is what closes it. A queued grant belongs to the send
+	// loop, which erases it the moment Send returns.
+	var grants []*pendingGrant
+	defer func() {
+		for _, g := range grants {
+			if !g.queued {
+				g.discard()
+			}
+		}
+	}()
+
+	// Credential refusals recorded inside the pass are rolled back with it if
+	// a LATER job in the same pass errors — the job returns to queued and is
+	// re-refused every poll with nothing in the audit log, which is the exact
+	// silence refuseJob argues against. Kept here and replayed in their own
+	// transaction on that path (security review, ADR-091). The job's terminal
+	// status cannot be replayed (the claim rolled back too) and is not: the
+	// next pass refuses it again, and this time the record already exists.
+	var refusals []store.AuditEvent
 
 	// One clock for the whole pass. Both the claim predicate and the
 	// window_ends_unix on the constraints are computed from it, so the two
@@ -1140,6 +1219,26 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 					Fragile: t.Fragile,
 				})
 			}
+
+			// A host job is credentialed or it is refused (ADR-091). There is
+			// no uncredentialed host engine to fall back to, and a job that
+			// silently ran without the credential its policy authorised would
+			// be under-scanning that looks like a clean run.
+			if j.Engine == store.EngineHost {
+				g, gerr := s.credentialedAssignment(ctx, c, sess, j, tasks, wire)
+				if errors.Is(gerr, errCredentialRefused) {
+					ev, err := s.refuseCredentialedJob(ctx, c, j.ID, sess.spID, policy, gerr.Error())
+					if err != nil {
+						return err
+					}
+					refusals = append(refusals, ev)
+					continue
+				}
+				if gerr != nil {
+					return gerr
+				}
+				grants = append(grants, g)
+			}
 			assignments = append(assignments, wire)
 
 		}
@@ -1147,13 +1246,53 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 	})
 	if err != nil {
 		s.log.ErrorContext(ctx, "job assignment failed", slog.Any("error", err))
+		if len(refusals) > 0 {
+			if rerr := s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+				for _, ev := range refusals {
+					if err := (store.AuditEvents{}).Record(ctx, c, ev); err != nil {
+						return err
+					}
+				}
+				return nil
+			}); rerr != nil {
+				s.log.ErrorContext(ctx, "credential refusals could not be recorded after the pass rolled back",
+					slog.Any("error", rerr))
+			}
+		}
 		return
 	}
 
+	byAssignment := make(map[*scanpointv1.JobAssignment]*pendingGrant, len(grants))
+	for _, g := range grants {
+		byAssignment[g.assignment] = g
+	}
 	for _, a := range assignments {
-		s.send(ctx, out, &scanpointv1.CoreMessage{
-			Msg: &scanpointv1.CoreMessage_Job{Job: a},
-		})
+		g := byAssignment[a]
+		if g == nil {
+			s.send(ctx, out, &scanpointv1.CoreMessage{
+				Msg: &scanpointv1.CoreMessage_Job{Job: a},
+			})
+			continue
+		}
+		// Assignment first, then its grant, on the same channel so the order
+		// holds: the runtime drops a grant for a job it is not running. Both
+		// are trySend rather than send, because a dropped assignment must not
+		// be followed by its secret, and a dropped grant must be erased now
+		// rather than when the collector finds it. The job itself is left for
+		// the sweeper either way, exactly as a dropped assignment is today.
+		if !s.trySend(out, &scanpointv1.CoreMessage{Msg: &scanpointv1.CoreMessage_Job{Job: a}}) {
+			s.log.WarnContext(ctx, "outbound queue full; credentialed assignment dropped with its grant",
+				slog.String("job_id", a.GetJobId()))
+			g.discard()
+			continue
+		}
+		if !s.trySend(out, &scanpointv1.CoreMessage{Msg: &scanpointv1.CoreMessage_Credential{Credential: g.grant}}) {
+			s.log.WarnContext(ctx, "outbound queue full; credential grant dropped after its assignment",
+				slog.String("job_id", a.GetJobId()), slog.String("grant_id", g.grant.GetGrantId()))
+			g.discard()
+			continue
+		}
+		g.queued = true
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -14,6 +15,7 @@ import (
 
 	scanpointv1 "github.com/effaaykhan/cvap/gen/cybersentinel/scanpoint/v1"
 	"github.com/effaaykhan/cvap/internal/enginewire"
+	"github.com/effaaykhan/cvap/internal/hostkeytrust"
 	"github.com/effaaykhan/cvap/internal/logging"
 )
 
@@ -460,6 +462,33 @@ func (r *Runtime) onAssignment(ctx context.Context, a *scanpointv1.JobAssignment
 		return
 	}
 
+	// A credentialed-host job is validated HERE, before it is visible and
+	// before anything can be spawned (ADR-091). The refusals are the ones the
+	// wire comment on JobAssignment promises: no user to authenticate as, or
+	// trust material that does not make its source explicit or carries no
+	// material at all — the trust-on-first-use shape. Refused with the reason
+	// in detail; a Core that composed such an assignment made a claim this
+	// runtime will not act on, and the audit event on Core's side needs to say
+	// so in words rather than show a job that never started.
+	var trust hostkeytrust.Source
+	needsCred := a.GetEngine() == EngineKindHost
+	if needsCred {
+		if a.GetCredUser() == "" {
+			r.sendTerminal(id, a.GetLeaseEpoch(), scanpointv1.TerminationReason_ENGINE_FAILURE,
+				"", true, true, "host job refused: no cred_user on the assignment")
+			return
+		}
+		var err error
+		trust, _, err = hostkeytrust.Parse(a.GetKnownHosts())
+		if err != nil {
+			r.log.Error("refusing a host job: its trust material is not acceptable",
+				slog.String("job_id", id), slog.Any("error", err))
+			r.sendTerminal(id, a.GetLeaseEpoch(), scanpointv1.TerminationReason_ENGINE_FAILURE,
+				"", true, true, "host job refused: "+err.Error())
+			return
+		}
+	}
+
 	jobCtx, cancel := context.WithCancel(ctx)
 	c := a.GetConstraints()
 	j := &job{
@@ -474,8 +503,19 @@ func (r *Runtime) onAssignment(ctx context.Context, a *scanpointv1.JobAssignment
 			c.GetAllowedTargets(), c.GetExclusions()),
 		done:       make(chan struct{}),
 		terminated: make(chan struct{}),
+		needsCred:  needsCred,
+		credUser:   a.GetCredUser(),
+		knownHosts: a.GetKnownHosts(),
+		trust:      trust,
+		credReady:  make(chan struct{}),
 	}
 	j.setExpiry(time.Unix(a.GetLeaseExpiresUnix(), 0))
+	if needsCred {
+		r.log.Info("credentialed host job accepted; waiting for its grant",
+			slog.String("job_id", id),
+			slog.String("cred_user", j.credUser),
+			slog.String("trust_source", string(j.trust)))
+	}
 
 	r.mu.Lock()
 	r.jobs[id] = j
@@ -496,7 +536,37 @@ func (r *Runtime) runJob(ctx context.Context, j *job) {
 
 	host := j.host
 
-	if err := host.start(ctx, j.wireTargets(), j.budget()); err != nil {
+	budget := j.budget()
+	if j.needsCred {
+		// Scope BEFORE the secret, the same order Core takes. Without this a
+		// job the runtime was about to refuse still took delivery of its
+		// grant, parsed the key into a keyring and opened an agent socket;
+		// and when the grant never came, the two-sites-disagree signal reached
+		// Core thirty seconds late, labelled as a missing credential.
+		if err := host.authoriseAll(j.wireTargets()); err != nil {
+			r.log.Error("refusing a credentialed job before its grant: a target is outside the authorised scope",
+				slog.String("job_id", j.id), slog.Any("error", err))
+			r.finish(j, scanpointv1.TerminationReason_SCOPE_VIOLATION_HALT, true, err.Error())
+			return
+		}
+		cred, err := r.awaitCredential(ctx, j)
+		if err != nil {
+			if errors.Is(err, errStopBeforeStart) {
+				return // an abort owns the terminal path; nothing was spawned
+			}
+			r.log.Error("credentialed host job cannot start", slog.String("job_id", j.id), slog.Any("error", err))
+			r.finish(j, scanpointv1.TerminationReason_ENGINE_FAILURE, true, err.Error())
+			return
+		}
+		budget.Cred = cred
+	}
+
+	if err := host.start(ctx, j.wireTargets(), budget); err != nil {
+		if budget.Cred != nil && budget.Cred.Agent != nil {
+			// start closes it on every path once it has reached the spawn; a
+			// refusal before that (a stop, a scope miss) leaves it to us.
+			_ = budget.Cred.Agent.Close()
+		}
 		if errors.Is(err, errStopBeforeStart) {
 			// A cancel, a kill or a lost lease got here first and already owns
 			// the terminal path. No engine was spawned, which is the whole
@@ -547,6 +617,67 @@ func (r *Runtime) runJob(ctx context.Context, j *job) {
 	}
 }
 
+// EngineKindHost is the engine a credentialed-host job names on the wire.
+// Compared as a string rather than imported from internal/store, which this
+// package may not reach (ADR-005).
+const EngineKindHost = "host"
+
+// CredentialGrantWait bounds how long a credentialed job waits for its grant
+// before it is failed. Core sends the grant immediately behind the assignment
+// on the same stream, so a wait this long means the grant was dropped or Core
+// refused after assigning — either way the job must not sit holding a lease
+// and renewing it for work it cannot start.
+var CredentialGrantWait = 30 * time.Second
+
+// awaitCredential is the credentialed half of spawning (ADR-086, ADR-091): wait
+// for the grant, build the signing agent from it, and hand back what the engine
+// is given — the user, the trust material, and the agent socket. The key itself
+// stays in the Credential and the CredAgent, both registered on the job so the
+// terminal path zeroises them in every outcome.
+//
+// errStopBeforeStart means an abort already owns the terminal path; the caller
+// returns without reporting. Any other error is the job's failure.
+func (r *Runtime) awaitCredential(ctx context.Context, j *job) (*engineCred, error) {
+	select {
+	case <-j.credReady:
+	case <-ctx.Done():
+		return nil, errStopBeforeStart
+	case <-time.After(CredentialGrantWait):
+		return nil, fmt.Errorf("no credential grant arrived within %s", CredentialGrantWait)
+	}
+	cred := j.firstCredential()
+	if cred == nil {
+		// credReady closed but the list is empty: the grant landed while the
+		// job was already aborting and was zeroised on arrival.
+		return nil, errStopBeforeStart
+	}
+	if !cred.Expires.IsZero() && r.now().After(cred.Expires) {
+		return nil, fmt.Errorf("credential grant %s expired before the engine started", cred.GrantID)
+	}
+	// The grant is scoped to targets (ADR-020) and the runtime holds both
+	// lists; an invariant nothing asserts is one nothing notices the loss of.
+	inScope := make(map[string]bool, len(cred.Scope))
+	for _, s := range cred.Scope {
+		inScope[s] = true
+	}
+	for _, t := range j.tasks {
+		if !inScope[t.GetTarget()] {
+			return nil, fmt.Errorf("credential grant %s is not scoped to task %s target %q",
+				cred.GrantID, t.GetTaskId(), t.GetTarget())
+		}
+	}
+	agent, err := NewCredAgent(cred)
+	if err != nil {
+		return nil, err
+	}
+	j.addAgent(agent)
+	file, err := agent.EngineFile()
+	if err != nil {
+		return nil, err
+	}
+	return &engineCred{User: j.credUser, KnownHosts: j.knownHosts, Agent: file}, nil
+}
+
 // finish submits and reports a job that ended without an abort.
 func (r *Runtime) finish(j *job, reason scanpointv1.TerminationReason, incomplete bool, detail string) {
 	if !j.beginAbort(reason) {
@@ -594,11 +725,14 @@ func (r *Runtime) terminate(j *job, reason scanpointv1.TerminationReason, incomp
 
 	// Zeroise first and independently of the submission below (ADR-020): the
 	// credential is not needed to upload, and the drain can block for minutes
-	// against an unreachable Core. When a credentialed engine's submission must
-	// carry a value DERIVED from the credential, that derivation goes BEFORE this
-	// zeroise, with the derived value carried into the assembly below — there is
-	// no such seam today, and adding it is the scheduled Phase 4 change ADR-057
-	// pre-decides. Do not move a credential read below this line.
+	// against an unreachable Core. ADR-057 pre-decided that if a credentialed
+	// engine's submission ever needs a value DERIVED from the credential, the
+	// derivation goes BEFORE this zeroise with the derived value carried into
+	// the assembly below. The first credentialed engine (credhost, ADR-091)
+	// derives nothing: its submission is the engine's package observation and
+	// nothing credential-shaped comes back over the engine wire, so the seam
+	// stays unbuilt by decision rather than by omission. Do not move a
+	// credential read below this line.
 	j.zeroiseCredentials()
 
 	var observations []*scanpointv1.Observation

@@ -82,6 +82,11 @@ func (o EngineOutcome) String() string {
 // than the observation-only treatment ADR-056 reserves for logic sealed inside a
 // separately-built binary.
 type engineHostRunner interface {
+	// authoriseAll is the runtime-site scope check on its own, so a job can be
+	// refused BEFORE anything expensive or secret happens — a credentialed job
+	// must not take delivery of its grant for a target it will not touch
+	// (ADR-091). start runs the same check again; one function, two callers.
+	authoriseAll(targets []enginewire.Target) error
 	start(ctx context.Context, targets []enginewire.Target, budget engineBudget) error
 	pump()
 	wait() EngineOutcome
@@ -235,6 +240,16 @@ func (h *engineHost) authorise(raw string) (bool, string) {
 	return scope.Permits(c, h.allowed, h.exclusions)
 }
 
+// authoriseAll refuses the job on the first target the runtime will not permit.
+func (h *engineHost) authoriseAll(targets []enginewire.Target) error {
+	for _, t := range targets {
+		if ok, why := h.authorise(t.Value); !ok {
+			return fmt.Errorf("%w: task %s target %q: %s", ErrOutOfScope, t.TaskID, t.Value, why)
+		}
+	}
+	return nil
+}
+
 // start spawns the engine and hands it the job.
 //
 // Every target is authorised first. A refusal returns ErrOutOfScope and no
@@ -253,10 +268,8 @@ func (h *engineHost) start(ctx context.Context, targets []enginewire.Target, bud
 		return errStopBeforeStart
 	}
 
-	for _, t := range targets {
-		if ok, why := h.authorise(t.Value); !ok {
-			return fmt.Errorf("%w: task %s target %q: %s", ErrOutOfScope, t.TaskID, t.Value, why)
-		}
+	if err := h.authoriseAll(targets); err != nil {
+		return err
 	}
 
 	// ========================================================================
@@ -294,6 +307,17 @@ func (h *engineHost) start(ctx context.Context, targets []enginewire.Target, bud
 		// real engine is the scanner still sending packets after the kill
 		// switch fired, well outside ADR-024's 10-second bound.
 		Setpgid: true,
+	}
+
+	// A credentialed job's signing agent rides as fd 3 (ADR-086). The engine
+	// receives a socket that answers signing challenges, never the key. The
+	// runtime's copy of that file is closed once the child has its dup — on
+	// every exit from here, including a failed Start — so the only handle left
+	// open in this process is the runtime end the agent serves, and Zeroise
+	// closes that one.
+	if budget.Cred != nil && budget.Cred.Agent != nil {
+		cmd.ExtraFiles = []*os.File{budget.Cred.Agent}
+		defer func() { _ = budget.Cred.Agent.Close() }()
 	}
 
 	stdin, err := cmd.StdinPipe()
@@ -346,7 +370,33 @@ func (h *engineHost) start(ctx context.Context, targets []enginewire.Target, bud
 		Probes:                 budget.Probes,
 		BannerMatches:          budget.BannerMatches,
 		MaxProbesPerPort:       budget.MaxProbesPerPort,
+		CredUser:               budget.credUser(),
+		KnownHosts:             budget.knownHosts(),
 	})
+}
+
+// engineCred is what a credentialed-host engine is handed (ADR-086, ADR-091):
+// the user to authenticate as, the trust material to verify the target against
+// (header included, so the engine's input says which mode applied too), and the
+// agent socket. No key material, by construction — there is no field for it.
+type engineCred struct {
+	User       string
+	KnownHosts string
+	Agent      *os.File
+}
+
+func (b engineBudget) credUser() string {
+	if b.Cred == nil {
+		return ""
+	}
+	return b.Cred.User
+}
+
+func (b engineBudget) knownHosts() string {
+	if b.Cred == nil {
+		return ""
+	}
+	return b.Cred.KnownHosts
 }
 
 // engineBudget is this engine's slice of the runtime's allocation (ADR-027).
@@ -383,6 +433,11 @@ type engineBudget struct {
 	// the engine for the reason the rate slice is: a bound the engine chooses is
 	// a bound the engine can get wrong.
 	MaxProbesPerPort uint32
+
+	// Cred is set for a credentialed-host job and nil otherwise. Not part of
+	// the rate budget, but carried with it because it is the other thing the
+	// runtime hands an engine at spawn and nothing after spawn may change it.
+	Cred *engineCred
 }
 
 // SafetyIntrusive is the one mode in which probes travel.

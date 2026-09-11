@@ -23,8 +23,10 @@ Rules:
   through `logging.Proto` / `logging.ProtoAttr`, which `make secret-logging` enforces. No
   interceptor, middleware or tracing layer may render message bodies (ADR-034).
 - **Credentials stop here.** Engine processes never receive raw credential material: the
-  runtime holds the credential, establishes the authenticated session, and passes the engine
-  a session handle or a short-lived derived token (ADR-020, ADR-027).
+  runtime holds the credential and passes the engine a session handle or a short-lived derived
+  proof (ADR-020, ADR-027). For SSH that proof is a signature: the engine opens the connection
+  (ADR-047) and authenticates over an agent socket the runtime serves, receiving signatures and
+  never the key (ADR-086).
 - **The runtime is the scan-point-side enforcement site, not the engine.** It applies the
   job's `ScanConstraints` on the send path — allowlist, exclusions, rate, concurrency,
   timeouts, the `fragile` cap — and it authorises any target an engine discovers mid-scan
@@ -108,6 +110,22 @@ the case table both sites are tested against.
 field — ADR-038, superseding ADR-035's `func() string`, because a Go string cannot be zeroised
 at all. `creds_test.go` repeats the verb enumeration in every position including an unexported
 field, which is the one place no method of ours can run.
+
+**A credentialed-host job (engine `host`, ADR-086/091) waits for its grant before it spawns.**
+`onAssignment` validates `cred_user` and `known_hosts` — the latter through `internal/hostkeytrust`,
+which requires the `# cvap-trust-source: operator|observed` header and at least one key line — and
+refuses the job with `ENGINE_FAILURE` and the reason in `detail` before it enters the table. There
+is no trust-on-first-use: a header with no material is refused by name. `runJob` then waits up to
+`CredentialGrantWait` for the `CredentialGrant`, builds a `CredAgent` from it, and hands the engine
+the agent socket as fd 3 with the user and trust material in the job message. **The agent is inside
+the zeroise set**: `job.agents` is zeroised and attested alongside `job.creds`, because the agent
+holds the one retained copy of the key and an attestation over the `Credential` alone answers one
+layer above where the key lives (the F9 shape). `credentialed_test.go` severs a running credentialed
+job through `LOST` and through `shutdown()` and probes the signing socket at `stop()` (must still
+sign), at `results()` (must already fail), and after (one submission, attested) — the order is
+measured from the engine's end, not read off the code. A grant that arrives once the job is aborting
+is zeroised on arrival (`addCredential`), which is the runtime's half of the resolve-then-abort
+window.
 
 ## The fingerprint corpus: signed content, static policy
 

@@ -1,6 +1,6 @@
 ---
 name: recurring-findings
-description: Recurring security defect classes found in CVAP reviews (38 classes), and the repo-specific constraints that shape acceptable fixes
+description: Recurring security defect classes found in CVAP reviews (41 classes), and the repo-specific constraints that shape acceptable fixes
 metadata:
   type: project
 ---
@@ -441,6 +441,41 @@ thing to establish, because every other property is moot if it does not compile.
 **Why:** a "" = unbounded convention is correct for range arithmetic and wrong for a fix version, and the two readings live in the same struct; the matcher trusts the content invariant instead of enforcing it.
 **How to apply:** for any range/affected/expiry check with an empty-means-unbounded sentinel, ask what a row with that field EMPTY does — if it flips the predicate to match-all, require the field non-empty at the use site, not just NOT NULL in the schema.
 
+**40. A file descriptor created without `CLOEXEC` and handed to ONE child is inherited by EVERY
+other child spawned in the window.** `scanpoint.CredAgent.EngineFile` builds the signing socket with
+`syscall.Socketpair(AF_UNIX, SOCK_STREAM, 0)` — no `SOCK_CLOEXEC` — and `os.NewFile` does not add it,
+so the engine end is a plain inheritable fd from `EngineFile()` until `engineHost.start`'s deferred
+close. Go's `forkAndExecInChild` does not close unlisted fds (it relies on every fd being CLOEXEC),
+and `syscall.ForkLock` does not help a descriptor created outside it. Measured: an UNCREDENTIALED
+engine started in the same dispatch pass saw the socket at fd 7 in 16-20 of 20 runs through the
+production `engineHost.start`, and a holder of that fd enumerated the key and got a 64-byte
+ed25519 signature over a chosen challenge. ADR-027's "engines never hold the credential" is about
+the KEY; the socket is the credential's power, and it crossed to a process that was granted nothing.
+**Why:** `cmd.ExtraFiles` is per-command and reads as the whole story, so nobody asks what the fd is
+doing between creation and hand-off. The window is short in wall time and still wins the race,
+because sibling engines start at the same instant by construction (one goroutine per assignment).
+**How to apply:** for every fd handed to a subprocess, check the creating syscall for `SOCK_CLOEXEC`
+/ `O_CLOEXEC` and measure with `ls -l /proc/self/fd` from an unrelated child. Test the concurrent
+case, not the single-job case.
+
+**41. Trust material composed per-HOST and consulted host-agnostically.** `dispatch.trustMaterial`
+composes `"<addr> <SHA256:fp>"` per task into one blob for a job of up to 32 targets
+(`planner.TasksPerJob`), and `credhost.hostKeyCallback` parses every line, ignores the host field
+entirely, and accepts any collected fingerprint/key for any target. Measured: host A's key accepted
+as host B; an operator pin written for 10.0.0.1 accepted at 192.0.2.99. So one compromised in-scope
+host authenticates as any of its 31 neighbours in the same credentialed job, and the engine's
+inventory for the impersonated host becomes attacker-chosen. Same shape one layer up:
+`SSHHostKeyFingerprintsAt` looks up the address tenant-wide, so two zones with overlapping RFC1918
+space contribute each other's keys. Compounding it, `key_value` is unvalidated `text` (no CHECK) fed
+from an observation payload, and the `strings.HasPrefix(fp, "SHA256:")` guard added mid-review is a
+PREFIX test on a value that may contain newlines — `"SHA256:legit\n10.9.9.9 SHA256:<attacker>"`
+passes it and injects a trusted line for a host that had none.
+**Why:** the composed line LOOKS host-scoped, so the binding appears to exist somewhere; and a
+prefix check reads as validation of the whole value.
+**How to apply:** for any trust store, ask what the verifier does with the SUBJECT field, and prove
+it by presenting the wrong subject. For any single-line field built from stored text, assert the
+absence of `\n` (and `\r`) at the composition site, not a prefix at the source.
+
 **Confirmed-good patterns worth NOT re-deriving.** Two properties this review measured and
 found correct, both of which earlier sessions got wrong: (a) the OIDC callback releases its
 pool connection BEFORE the network round trip to the IdP — 40 concurrent callbacks parked in a
@@ -534,3 +569,15 @@ the finding.
 **How to apply:** on any SSH/exec read from a scanned host, require an `io.LimitReader` (or MaxBytes cap that refuses, not truncates) on stdout AND stderr, and a deadline that actually interrupts the read (a goroutine closing the session on ctx.Done, since `ssh.Session.Run` takes no ctx).
 
 **credscan credential handling verified clean (S39, ADR-075/076):** for future credscan reviews, these were checked and held — zeroise is guaranteed on every return path by `defer cred.Zeroise()` registered immediately after construction (the explicit zeroises on the authMethod/knownhosts error paths and post-ReadHost are redundant backstops); scope gate (`scope.Permits` on `target.Canonicalise(host)`) runs before credential construction and before any dial, and the SAME `canon.Value` feeds the gate, the dial, and the cred scope (no TOCTOU); host-key verification is mandatory (`ReadHost` refuses nil `HostKeyCallback`, no `InsecureIgnoreHostKey` anywhere, only caller passes `knownhosts.New`); commands are static constants (no shell interpolation of host/user/port); `AdvisoryKeysForAsset` carries an explicit `tenant_id = $1` predicate AND runs inside a tenant-scoped `Read` (RLS), joining global `vulnerability_defs` per the ADR-030 pattern — no cross-tenant path. Residual Notes only: `ssh.Password(string(cred.Reveal()))` and `ParsePrivateKey` copy material into ssh-lib buffers that outlive Zeroise (the documented ADR-038 caveat), and an env-var password (`CVAP_CREDSCAN_PASSWORD`) persists in the process environment for the whole run beyond the credential's own zeroise.
+
+**S41 credential-grant path, measured clean (do not re-derive):** `logging.ProtoAttr` redacts
+`CredentialGrant.material` (marked `debug_redact` AND a bytes field, so "[REDACTED]" either way),
+including when the whole `CoreMessage` is passed; `make secret-logging` catches `slog.Any(msg)` /
+`g.String()` / `GetMaterial()` at a logging call and passed on the production code. No path puts
+material into an error, an audit detail or `JobTerminal.detail`: the only echo from `NewCredAgent`
+is x/crypto's `ssh: unsupported key type %q`, which renders the PEM BLOCK LABEL, never key bytes.
+`terminate()` zeroises before `results()`/`Enqueue` on every path, `Jobs.Terminate` and
+`Leases.Release` are holder-qualified, `SSHForJob` / `SSHHostKeyFingerprintsAt` /
+`CredentialGrants.*` are tenant-qualified under RLS, `credential_grants` has its policy and
+composite FKs, and deleting a tenant with grants still cascades despite the `ON DELETE RESTRICT`
+to `scan_jobs`.

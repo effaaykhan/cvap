@@ -46,6 +46,7 @@ import (
 	"github.com/effaaykhan/cvap/internal/control/ca"
 	"github.com/effaaykhan/cvap/internal/control/enrollment"
 	"github.com/effaaykhan/cvap/internal/correlate"
+	"github.com/effaaykhan/cvap/internal/credsource"
 	"github.com/effaaykhan/cvap/internal/dispatch"
 	"github.com/effaaykhan/cvap/internal/logging"
 	"github.com/effaaykhan/cvap/internal/store"
@@ -165,6 +166,26 @@ func run(log *slog.Logger) error {
 	enrollSvc := enrollment.New(db, authority, endpoints, versions, log)
 	dispatchSvc := dispatch.New(db, versions, log)
 	ingestSvc := dispatch.NewIngest(db, log)
+
+	// Where a credential profile's secret_ref resolves to bytes at grant time
+	// (ADR-020, ADR-091). Only file:// exists today, confined to this root; a
+	// deployment that has not set it dispatches no credentialed job, and each
+	// one it refuses is an audit event naming this variable rather than a scan
+	// that quietly ran uncredentialed. Lab-grade custody, and it says so in
+	// internal/credsource.
+	if root := os.Getenv("CVAP_CORE_SECRET_FILE_ROOT"); root != "" {
+		files, err := credsource.NewFileResolver(root)
+		if err != nil {
+			return fmt.Errorf("cvap-core: secret resolver: %w", err)
+		}
+		dispatchSvc.UseSecretResolver(credsource.NewSchemeResolver(map[string]credsource.Resolver{
+			"file": files,
+		}))
+		log.Info("secret resolver configured", slog.String("scheme", "file"), slog.String("root", files.Root))
+	} else {
+		log.Warn("no secret resolver configured; credentialed-host jobs will be refused",
+			slog.String("setting", "CVAP_CORE_SECRET_FILE_ROOT"))
+	}
 
 	// ------------------------------------------------------------------
 	// The enrollment listener: server TLS, no client certificate.

@@ -11,4 +11,5 @@
 - [Shutdown drain result loss](shutdown_drain_result_loss.md) — SIGTERM with a job in flight loses gathered results; drain declares "drained" before the abort enqueues. Measured 2026-09-05
 - [credscan hostname dial gap](credscan_hostname_dial_gap.md) — cvap-credscan dials canon.Value; a hostname target's resolved IP is never re-checked against exclusions (latent, not reachable via committed lab/scope.txt)
 - [Banner read timing ADR-083](banner_read_timing_adr083.md) — 5s read never delays kill (Background ctx + unhandled SIGTERM); ctx-deadline clamp is dead code; concurrency claim breaks in safe mode
+- [credhost fleet path findings](credhost_fleet_path_findings.md) — ADR-091: host engine missing from planner `dialsTargets` (hostname bypass), pooled host-key trust, agent nil-panic, no rate model. Measured 2026-09-11
 - [First-chunk retry fix + heartbeat drift](retry_first_chunk_and_heartbeat_drift.md) — submit.go fix complete incl. multi-chunk; no retry const shadows config; HeartbeatTimeout=90s duplicated as SQL literal in kill.go
