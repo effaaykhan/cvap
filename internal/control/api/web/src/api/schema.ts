@@ -868,6 +868,8 @@ export interface components {
             asset_id: string;
             category: string;
             confidence: number;
+            /** @description The CVE the finding is matched to, when it has a vulnerability definition. Absent for configuration and exposure rules. */
+            cve?: string;
             /** @description CVSS base score. Absent = unknown, NOT zero. */
             cvss?: number | null;
             cwe?: string;
@@ -912,6 +914,8 @@ export interface components {
             asset_id: string;
             category: string;
             confidence: number;
+            /** @description The CVE the finding is matched to, when it has a vulnerability definition. Absent for configuration and exposure rules. */
+            cve?: string;
             /** @description CVSS base score. Absent = unknown, NOT zero. */
             cvss?: number | null;
             /** @description FIRST EPSS probability of exploitation in 30 days (0..1). Absent = unscored, NOT low. */

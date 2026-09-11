@@ -525,6 +525,16 @@ tr.evidence-row .lbl { margin-bottom:.5rem; display:block; }
 
 /* triage: the page's severity strip above the table */
 .triage-strip { display:grid; grid-template-columns:1fr auto; gap:1.2rem; align-items:center; margin:.4rem 0 .8rem; padding:.6rem .8rem; background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); }
+.triage-strip .sev-counts { display:flex; gap:.45rem; align-items:center; flex-wrap:wrap; }
+.sev-count { display:inline-flex; align-items:baseline; gap:.35rem; padding:.18rem .55rem; border:1px solid var(--line); border-radius:999px; font-size:.72rem; background:var(--surface-2, transparent); }
+.sev-count .k { text-transform:lowercase; letter-spacing:.02em; }
+.sev-count b { font-family:var(--mono); font-size:.78rem; color:var(--fg); }
+.sev-count.zero { opacity:.45; }
+.sev-count.sev-critical { border-color:color-mix(in oklab, var(--sev-critical), transparent 50%); }
+.sev-count.sev-high     { border-color:color-mix(in oklab, var(--sev-high), transparent 50%); }
+.sev-count.sev-medium   { border-color:color-mix(in oklab, var(--sev-medium), transparent 50%); }
+.sev-count.sev-low      { border-color:color-mix(in oklab, var(--sev-low), transparent 50%); }
+.sev-counts .shown { margin-left:.35rem; font-family:var(--mono); font-size:.74rem; color:var(--muted); }
 .triage-strip .kevcount { font-family:var(--mono); font-size:.74rem; color:var(--muted); white-space:nowrap; }
 .triage-strip .kevcount b { color:var(--fg); }
 

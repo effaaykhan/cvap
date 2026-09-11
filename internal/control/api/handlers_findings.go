@@ -34,6 +34,7 @@ var validSeverities = map[string]bool{
 type FindingSummaryResponse struct {
 	ID            string    `json:"id"`
 	Rule          string    `json:"rule" doc:"The rule that raised the finding (ADR-009: every finding has one)."`
+	CVE           string    `json:"cve,omitempty" doc:"The CVE the finding is matched to, when it has a vulnerability definition. Absent for configuration and exposure rules."`
 	Category      string    `json:"category"`
 	Severity      string    `json:"severity"`
 	Status        string    `json:"status"`
@@ -295,7 +296,7 @@ func (s *Server) exposureByZone(w http.ResponseWriter, r *http.Request) {
 
 func findingSummaryResponse(f store.FindingSummary) FindingSummaryResponse {
 	return FindingSummaryResponse{
-		ID: f.ID.String(), Rule: f.RuleName, Category: f.Category,
+		ID: f.ID.String(), Rule: f.RuleName, CVE: f.CVE, Category: f.Category,
 		Severity: f.Severity, Status: f.Status, AssetID: f.AssetID.String(),
 		AssetHostname: f.AssetHostname, Locator: f.Locator, Confidence: f.Confidence,
 		ExposureZones: f.ExposureZones, FirstSeen: f.FirstSeen, LastSeen: f.LastSeen,

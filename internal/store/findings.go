@@ -353,6 +353,12 @@ type FindingSummary struct {
 	FirstSeen     time.Time
 	LastSeen      time.Time
 
+	// CVE is the vulnerability definition's id when the finding has one ("" for
+	// a configuration/exposure rule). The triage row is titled by it: an
+	// advisory match's rule name is the same for a thousand rows, the CVE is
+	// what an analyst reads.
+	CVE string
+
 	// Priority signals (P3.4, ADR-069). KEV/EPSS/CVSS are nullable-shaped: KEV is a
 	// membership bool (false = unlisted, never "unexploited"); EPSS and CVSS are
 	// pointers (nil = unscored/unknown, never 0). PriorityScore is the bit-packed
@@ -503,7 +509,7 @@ func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, beforeSc
 	// model says what it weighs rather than implying a precision the input lacks.
 	const q = `
 		SELECT * FROM (
-		  SELECT f.finding_id, r.name, r.category, f.severity::text, f.status::text,
+		  SELECT f.finding_id, r.name, r.category, f.severity::text, f.status::text, coalesce(vd.cve_id, '') AS cve,
 		         f.asset_id, coalesce(a.primary_hostname, ''), coalesce(f.instance_locator, ''),
 		         f.confidence,
 		         (SELECT count(DISTINCT fe.zone_id) FROM finding_exposure fe
@@ -555,7 +561,7 @@ func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, beforeSc
 	page := &FindingPage{}
 	for rows.Next() {
 		var s FindingSummary
-		if err := rows.Scan(&s.ID, &s.RuleName, &s.Category, &s.Severity, &s.Status,
+		if err := rows.Scan(&s.ID, &s.RuleName, &s.Category, &s.Severity, &s.Status, &s.CVE,
 			&s.AssetID, &s.AssetHostname, &s.Locator, &s.Confidence, &s.ExposureZones,
 			&s.FirstSeen, &s.LastSeen,
 			&s.KEV, &s.KEVRansomware, &s.KEVDateAdded, &s.EPSS, &s.EPSSPercentile, &s.CVSS,
@@ -786,7 +792,7 @@ func (Findings) ListForExport(ctx context.Context, c *Conn, f FindingListFilter,
 	}
 
 	const q = `
-		SELECT f.finding_id, r.name, r.category, f.severity::text, f.status::text,
+		SELECT f.finding_id, r.name, r.category, f.severity::text, f.status::text, coalesce(vd.cve_id, ''),
 		       f.asset_id, coalesce(a.primary_hostname, ''), coalesce(f.instance_locator, ''),
 		       f.confidence,
 		       (SELECT count(DISTINCT fe.zone_id) FROM finding_exposure fe
@@ -795,6 +801,7 @@ func (Findings) ListForExport(ctx context.Context, c *Conn, f FindingListFilter,
 		  FROM findings f
 		  JOIN rules r  ON r.rule_id = f.rule_id
 		  JOIN assets a ON a.tenant_id = f.tenant_id AND a.asset_id = f.asset_id
+		  LEFT JOIN vulnerability_defs vd ON vd.vuln_def_id = f.vuln_def_id
 		 WHERE f.tenant_id = $1
 		   AND ($2::finding_status IS NULL OR f.status = $2::finding_status)
 		   AND ($3::severity IS NULL OR f.severity = $3::severity)
@@ -812,7 +819,7 @@ func (Findings) ListForExport(ctx context.Context, c *Conn, f FindingListFilter,
 	var out []FindingSummary
 	for rows.Next() {
 		var s FindingSummary
-		if err := rows.Scan(&s.ID, &s.RuleName, &s.Category, &s.Severity, &s.Status,
+		if err := rows.Scan(&s.ID, &s.RuleName, &s.Category, &s.Severity, &s.Status, &s.CVE,
 			&s.AssetID, &s.AssetHostname, &s.Locator, &s.Confidence, &s.ExposureZones,
 			&s.FirstSeen, &s.LastSeen); err != nil {
 			return nil, mapError(err)

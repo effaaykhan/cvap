@@ -5,7 +5,6 @@ import { api, type FindingSummary } from "../lib/api";
 import { ExportButton } from "../components/ExportButton";
 import { EvidenceBlock } from "../components/Evidence";
 import { PageHead } from "../components/PageHead";
-import { SegmentBar, type SegmentSpec } from "../components/Charts";
 import { applyTriageFilter, confidenceBand, score, type TriageFilter } from "../lib/console";
 
 const STATUSES = ["open", "confirmed", "", "false_positive", "accepted_risk", "remediated", "closed"];
@@ -33,8 +32,8 @@ export function Findings() {
 
   const rows = data ? applyTriageFilter(data.findings, filter) : [];
   const truncated = data?.next_id != null;
-  const strip: SegmentSpec[] = ["critical", "high", "medium", "low", "info"].map((k) => ({
-    key: k, label: k, value: rows.filter((f) => f.severity === k).length, tone: k,
+  const counts = ["critical", "high", "medium", "low", "info"].map((k) => ({
+    key: k, value: rows.filter((f) => f.severity === k).length,
   }));
   const kevShown = rows.filter((f) => f.kev).length;
 
@@ -84,7 +83,14 @@ export function Findings() {
       {error && <p className="error">Could not load findings.</p>}
       {data && rows.length > 0 && (
         <div className="triage-strip">
-          <SegmentBar segments={strip} height={8} caption={`${rows.length} shown${truncated ? " of the first " + PAGE : ""}`} />
+          <div className="sev-counts" role="group" aria-label="shown by severity">
+            {counts.map((c) => (
+              <span key={c.key} className={`sev-count sev-${c.key}${c.value === 0 ? " zero" : ""}`}>
+                <span className="k">{c.key}</span><b>{c.value}</b>
+              </span>
+            ))}
+            <span className="shown">{rows.length} shown{truncated ? ` of the first ${PAGE}` : ""}</span>
+          </div>
           <span className="kevcount"><b>{kevShown}</b> in KEV · <b>{rows.filter((f) => f.epss != null && f.epss >= 0.5).length}</b> with EPSS ≥ 0.5</span>
         </div>
       )}
@@ -112,7 +118,6 @@ export function Findings() {
         <span className="lane"><span className="cdot cdot-high" />high ≥ 0.85</span>
         <span className="lane"><span className="cdot cdot-medium" />medium ≥ 0.60</span>
         <span className="lane"><span className="cdot cdot-low" />low</span>
-        <span className="end">a dash in EPSS or CVSS is unscored, never 0 · exposure is zone-derived, a coarse count of vantage points, not reachability</span>
       </div>
     </section>
   );
@@ -134,7 +139,10 @@ function Row({ f, rank, open, onToggle }: { f: FindingSummary; rank: number; ope
           <span className={`priority-basis${f.priority_basis === "unscored" ? " muted" : ""}`}>{f.priority_basis}</span>
         </td>
         <td><span className={`sev sev-${f.severity}`}>{f.severity}</span></td>
-        <td className="finding-cell"><Link to={`/findings/${f.id}`}>{f.rule}</Link><span className="cat small">{f.category}</span></td>
+        <td className="finding-cell" title={`${f.rule} · ${f.category}`}>
+          <Link to={`/findings/${f.id}`} className={f.cve ? "data" : undefined}>{f.cve || f.rule}</Link>
+          <span className="cat small">{f.cve ? "vulnerability" : "configuration"}</span>
+        </td>
         <td className="data">{f.asset_hostname || f.asset_id}</td>
         <td className="data">{f.instance_locator || "—"}</td>
         <td>
