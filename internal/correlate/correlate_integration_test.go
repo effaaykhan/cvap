@@ -396,7 +396,7 @@ func seedJobAndTask(ctx context.Context, c *store.Conn, scanPointID uuid.UUID) (
 	}
 	var scanID uuid.UUID
 	if err = c.QueryRow(ctx,
-		`INSERT INTO scans (tenant_id, policy_id, scan_type) VALUES ($1, $2, 'discovery')
+		`INSERT INTO scans (tenant_id, policy_id, scan_type, status) VALUES ($1, $2, 'discovery', 'running')
 		 RETURNING scan_id`, tenant, policyID).Scan(&scanID); err != nil {
 		return
 	}
@@ -479,5 +479,65 @@ func TestAttributionLandsOnTheAssetFromABannerHint(t *testing.T) {
 	}
 	if !contributedSSH || !ignoredSMB {
 		t.Errorf("provenance = %+v; want ssh->debian contributed and smb->windows overruled", sources)
+	}
+}
+
+// An asset inventoried before its host key was ever captured must gain the key
+// when a later scan sees it at the same address — otherwise it can never merge
+// across a DHCP change and the credentialed engine has nothing observed to
+// verify against (S42: all three Phase 4 hosts were in this state).
+func TestAnExistingAssetGainsTheKeysItIsLaterSeenWith(t *testing.T) {
+	db := testDB(t)
+	s := seed(t, db, "attach-keys")
+	c := correlate.New(db, quietLogger())
+	ctx := context.Background()
+	const (
+		hostKey = "SHA256:7OPmC9li/LOW+CaLyc0XlhArTqe7h/09uDJrxo7ailI"
+		certFP  = "SHA256:hQOoPjQWmTOqfArKQKuuXl9UdNAKdKB5y6RNZq0/GD0"
+	)
+	first := time.Now().UTC().Add(-2 * time.Hour)
+
+	// A safe-mode scan: an open port with no key. The asset exists by address.
+	s.observe(t, db, first, map[string]any{
+		"address": "10.10.0.20", "port": 80, "protocol": "tcp", "service": "http",
+		"method": "banner", "solicited": false, "safety_mode": "safe",
+	})
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := assetCount(t, db, s.tenant); got != 1 {
+		t.Fatalf("%d assets after the first scan, want 1", got)
+	}
+
+	// An intrusive pass at the SAME address captures the host key and a cert.
+	// The observations attach by address; the keys must land on the asset.
+	second := first.Add(30 * time.Minute)
+	s.observe(t, db, second, sshService("10.10.0.20", 22, hostKey))
+	s.observe(t, db, second, tlsService("10.10.0.20", 443, certFP))
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var keys int
+	if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
+		return c.QueryRow(ctx, `SELECT count(*) FROM asset_identity_keys WHERE tenant_id = $1 AND valid_to IS NULL AND strength >= 2`,
+			c.Tenant().UUID()).Scan(&keys)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if keys != 2 {
+		t.Fatalf("%d moderate keys recorded after the keyed scan attached by address, want 2 — "+
+			"an asset first seen without keys never gains them, so it can never merge across DHCP", keys)
+	}
+
+	// And now the host moves: the keys recorded on attach are what carry the
+	// merge, exactly as they would for a host first seen with them.
+	third := second.Add(30 * time.Minute)
+	s.observe(t, db, third, sshService("10.10.0.99", 22, hostKey))
+	s.observe(t, db, third, tlsService("10.10.0.99", 443, certFP))
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := assetCount(t, db, s.tenant); got != 1 {
+		t.Fatalf("%d assets after the address change, want 1", got)
 	}
 }

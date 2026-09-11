@@ -326,28 +326,36 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 			assetID = a.ID
 		}
 
-		// Attach and Merge both reach here, and the difference is what gets
-		// written: a merge records the identity keys that justified it, an
-		// attach records none. Weak evidence moves an observation onto an asset
-		// and never claims two hosts are one (ADR-007).
+		// Attach, Merge and NewAsset all reach here, and the difference is what
+		// gets written. A merge records the identity keys that JUSTIFIED it. A
+		// new asset records everything it was seen with, so the next scan has
+		// something to merge against. An attach — weak evidence, the address
+		// alone — never claims two hosts are one (ADR-007), but it DOES record
+		// the moderate keys the observation carried, for the same reason the new
+		// asset does: a host first inventoried before its host key was ever
+		// captured would otherwise never gain one, however many later scans saw
+		// it. Every one of the three Phase 4 hosts was in that state (S42,
+		// ADR-093): an intrusive fingerprint pass captured their ed25519 keys,
+		// the observations attached by address, and asset_identity_keys stayed
+		// empty — so the credentialed engine had nothing observed to verify
+		// against. Recording on attach is safe by construction: Record's
+		// ON CONFLICT keeps a key live on another asset where it is, and a key
+		// any live asset held would have made this a merge or a queue rather
+		// than an attach.
 		if v.Decision == domain.DecisionMerge || v.Decision == domain.DecisionNewAsset {
 			for _, k := range v.Agreeing {
 				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, now); err != nil {
 					return err
 				}
 			}
-			if v.Decision == domain.DecisionNewAsset {
-				// A new asset records everything it was seen with, so the NEXT
-				// scan has something to merge against. Without this the resolver
-				// would create a fresh asset on every pass and never accumulate
-				// the keys that stop it.
-				for _, k := range h.keys {
-					if k.Type.Strength() < 2 {
-						continue // weak keys are the address, held below
-					}
-					if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, now); err != nil {
-						return err
-					}
+		}
+		if v.Decision == domain.DecisionNewAsset || v.Decision == domain.DecisionAttach {
+			for _, k := range h.keys {
+				if k.Type.Strength() < 2 {
+					continue // weak keys are the address, held below
+				}
+				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, now); err != nil {
+					return err
 				}
 			}
 		}

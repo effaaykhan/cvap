@@ -59,6 +59,8 @@ func seedPolicyJob(t *testing.T, db *store.DB, tenant store.TenantID, safetyMode
 			return err
 		}
 		if err := c.QueryRow(ctx,
+			// PENDING, unlike the other job seeds: the safety-mode tests opt a
+			// scan in BEFORE it starts, which SetSafetyMode refuses once running.
 			`INSERT INTO scans (tenant_id, policy_id, scan_type) VALUES ($1,$2,'discovery')
 			 RETURNING scan_id`, tid, pj.PolicyID).Scan(&pj.ScanID); err != nil {
 			return err

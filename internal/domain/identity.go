@@ -173,10 +173,15 @@ const (
 	// never merges" made operational.
 	// ====================================================================
 	//
-	// An attach records no identity key. It says "this address currently belongs
-	// to that asset", which is a claim the address table already makes and which
-	// expires on its own. A merge says "these are the same host", which is
-	// permanent and interleaves two histories.
+	// An attach records no identity key AS EVIDENCE OF THE ATTACH. It says
+	// "this address currently belongs to that asset", which is a claim the
+	// address table already makes and which expires on its own. A merge says
+	// "these are the same host", which is permanent and interleaves two
+	// histories. The correlator does still record the moderate keys the
+	// attached observation carried on the asset — a host key seen at an address
+	// an asset holds is a fact about that asset, and the next scan needs it to
+	// merge across an address change (ADR-093); it is not evidence that two
+	// assets are one.
 	//
 	// Without this case the resolver has only bad options for the commonest
 	// observation in the system — an open port on a host with no TLS and no SSH:

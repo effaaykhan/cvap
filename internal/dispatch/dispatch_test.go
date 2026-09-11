@@ -264,7 +264,12 @@ func seedQueuedJob(t *testing.T, db *store.DB, tenant store.TenantID, reassignSa
 			return err
 		}
 		if err := c.QueryRow(ctx,
-			`INSERT INTO scans (tenant_id, policy_id, scan_type) VALUES ($1,$2,'discovery') RETURNING scan_id`,
+			// Seeded RUNNING, not pending: the job below is its plan. Left pending, a
+			// planner sharing the database — test/e2e's own Core under a full
+			// `go test ./...` — planned it again into 256 more tasks, and this
+			// scan point claimed one of those instead (S42: a dispatch test that
+			// failed under the full run and passed alone, i.e. a flaky gate).
+			`INSERT INTO scans (tenant_id, policy_id, scan_type, status) VALUES ($1,$2,'discovery','running') RETURNING scan_id`,
 			tid, policyID).Scan(&scanID); err != nil {
 			return err
 		}

@@ -27,7 +27,7 @@ func seedJob(t *testing.T, db *store.DB, tenant store.TenantID, scanPointID uuid
 			return err
 		}
 		if err := c.QueryRow(ctx,
-			`INSERT INTO scans (tenant_id, policy_id, scan_type) VALUES ($1,$2,'discovery')
+			`INSERT INTO scans (tenant_id, policy_id, scan_type, status) VALUES ($1,$2,'discovery','running')
 			 RETURNING scan_id`, tid, policyID).Scan(&scanID); err != nil {
 			return err
 		}
@@ -604,7 +604,7 @@ func TestUnauthorisedTargetsAreNeverAssigned(t *testing.T) {
 			return err
 		}
 		if err := c.QueryRow(ctx,
-			`INSERT INTO scans (tenant_id, policy_id, scan_type) VALUES ($1,$2,'discovery')
+			`INSERT INTO scans (tenant_id, policy_id, scan_type, status) VALUES ($1,$2,'discovery','running')
 			 RETURNING scan_id`, tid, policyID).Scan(&scanID); err != nil {
 			return err
 		}

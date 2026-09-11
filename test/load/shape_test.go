@@ -112,7 +112,7 @@ func seedJobAndTask(ctx context.Context, c *store.Conn, scanPointID uuid.UUID) (
 		tenant, "load-"+suffix).Scan(&policyID); err != nil {
 		return
 	}
-	if err = c.QueryRow(ctx, `INSERT INTO scans (tenant_id, policy_id, scan_type) VALUES ($1,$2,'discovery') RETURNING scan_id`,
+	if err = c.QueryRow(ctx, `INSERT INTO scans (tenant_id, policy_id, scan_type, status) VALUES ($1,$2,'discovery','running') RETURNING scan_id`,
 		tenant, policyID).Scan(&scanID); err != nil {
 		return
 	}

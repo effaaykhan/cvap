@@ -177,7 +177,9 @@ func (h *harness) seed() {
 			return err
 		}
 		if err := c.QueryRow(ctx,
-			`INSERT INTO scans (tenant_id, policy_id, scan_type) VALUES ($1,$2,'discovery')
+			// Running, not pending: the job below IS its plan, and this harness's
+			// own Core would otherwise plan the /24 again into eight more jobs.
+			`INSERT INTO scans (tenant_id, policy_id, scan_type, status) VALUES ($1,$2,'discovery','running')
 			 RETURNING scan_id`, tid, policyID).Scan(&h.scanID); err != nil {
 			return err
 		}

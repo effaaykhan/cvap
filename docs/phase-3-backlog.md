@@ -176,6 +176,12 @@ Everything below keeps its original section for provenance; the positions above 
 | 8 | **Kill-switch UI + safety-mode indicator.** `/v1/kill` and `/v1/scans/{id}/safety-mode` exist as API; the console cannot show or trigger either. Do alongside the admin surface from #5/#7. | `web` | Depends on #5's admin-console surface. | **Gap — no UI** |
 | 12 | **Enterprise-console rebuild (dedicated session, after P3.4).** The current UI reads as a developer's view of the data model, not a security console. A dedicated session, not incremental patching. Scope and ordering below. Placed after P3.4 per ADR-059 — the data must carry real confidence and priority distinctions first, or the triage view is designed twice. | `web` | P3.4 complete (CVE-matched findings with KEV/EPSS priority + the full weak-data confidence spectrum). | **Rebuild of all** |
 
+### Phase 4 — found and recorded, not fixed (S42)
+
+| # | Item | Owner | Unblocker | Dashboard surface |
+|---|---|---|---|---|
+| B35 | **The credentialed engine sits outside the rate and fragile model.** `cvap-engine-credhost` opens one SSH session per target back to back and reads none of the numbers the runtime hands it — `rate_budget_pps`, `max_concurrent_per_target`, the `fragile` cap — so ADR-024's ceilings do not reach it (ADR-091, recorded gap; scan-safety audit S42). ADR-024's ceilings exist because a scanner that ignores them takes down a printer, and a credentialed engine opening SSH sessions is not exempt from that reasoning. **It does not block a run against three lab VMs. It blocks anything pointed at a real estate**: no credentialed scan may be dispatched at a customer's estate until the engine paces sessions inside its slice, honours `max_concurrent_per_target` and refuses fragile targets, with `make safety` measuring it the way it measures discovery. | `engines/credhost` / `scanpoint` | An ADR-048 amendment naming SSH sessions in the packet-budget model, then the engine change and a safety-gate phase for it. | Health — none needed beyond the fleet strip |
+
 ### After Phase 3 — real, but not on the critical path
 
 | # | Item | Owner | Unblocker | Dashboard? |
