@@ -57,6 +57,9 @@ var permitted = []string{
 	"github.com/effaaykhan/cvap/internal/domain",
 	"github.com/effaaykhan/cvap/internal/logging",
 	"github.com/effaaykhan/cvap/internal/engines",
+	// The one host-key preference both SSH clients offer (ADR-091): a string
+	// list with no imports, so an engine taking it gains no capability.
+	"github.com/effaaykhan/cvap/internal/sshalgo",
 
 	// Third-party.
 	"github.com/google/uuid",

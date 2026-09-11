@@ -111,6 +111,9 @@ func (h *harness) buildBinaries() {
 		{"./cmd/cvap-engine-noop", "cvap-engine-noop", ""},
 		{"./cmd/cvap-engine-noop", "cvap-engine-noop-slow",
 			"-X main.perTargetDelay=" + slowPerTarget},
+		// The credentialed-host engine (ADR-086/091), for the suite that runs
+		// the grant over the real stream against the lab's Debian sshd.
+		{"./cmd/cvap-engine-credhost", "cvap-engine-credhost", ""},
 	} {
 		args := []string{"build", "-o", filepath.Join(h.dir, b.out)}
 		if b.ldflags != "" {
@@ -233,14 +236,15 @@ func freePort(t *testing.T) string {
 	return addr
 }
 
-func (h *harness) startCore() {
+func (h *harness) startCore(extraEnv ...string) {
 	h.t.Helper()
 	h.enrollAddr = freePort(h.t)
 	h.mtlsAddr = freePort(h.t)
 	h.apiAddr = freePort(h.t)
 
 	cmd := exec.Command(filepath.Join(h.dir, "cvap-core"))
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Env = append(cmd.Env,
 		"APP_DATABASE_URL="+os.Getenv("CVAP_TEST_DATABASE_URL"),
 		"CVAP_CORE_ENROLL_LISTEN="+h.enrollAddr,
 		"CVAP_CORE_MTLS_LISTEN="+h.mtlsAddr,

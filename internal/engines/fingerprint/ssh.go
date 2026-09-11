@@ -14,6 +14,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/effaaykhan/cvap/internal/sshalgo"
 )
 
 // Reading an SSH host key, and stopping the instant we have it.
@@ -269,12 +271,11 @@ func clientKexInit() []byte {
 	for _, list := range [][]string{
 		// KEX: curve25519 only. A narrower offer is a smaller implementation.
 		{"curve25519-sha256", "curve25519-sha256@libssh.org"},
-		// Host keys: broad, because what the server picks is the evidence.
-		{
-			"ssh-ed25519", "rsa-sha2-512", "rsa-sha2-256",
-			"ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
-			"ssh-rsa", "ssh-dss",
-		},
+		// Host keys: broad, because what the server picks is the evidence —
+		// and the SAME order the credentialed client offers (internal/sshalgo),
+		// because the key recorded here is what that client later verifies
+		// against; a different preference there would see a different key.
+		sshalgo.HostKeyPreference,
 		// Ciphers and MACs are offered because the message requires them and
 		// are never used: nothing past the host key is implemented.
 		{"aes128-ctr", "aes256-ctr", "chacha20-poly1305@openssh.com"},

@@ -154,9 +154,17 @@ services:
       # its auth method local, both set by cvap-cli bootstrap).
       CVAP_CORE_LOCAL_AUTH: ${CVAP_CORE_LOCAL_AUTH:-1}
       CVAP_CORE_SESSION_TTL_SECONDS: ${CVAP_CORE_SESSION_TTL_SECONDS:-28800}
+      # Where a credential profile's file:// secret_ref may resolve (ADR-091).
+      # Unset by default: every credentialed-host job is then refused with an
+      # audit event naming this setting, rather than scanning uncredentialed.
+      # Set to /secrets/creds and put the keys under ./secrets/creds (0600,
+      # owned by CVAP_UID); a profile's secret_ref is then
+      # file:///secrets/creds/<name>. Lab-grade custody, by its own account.
+      CVAP_CORE_SECRET_FILE_ROOT: ${CVAP_CORE_SECRET_FILE_ROOT:-}
     volumes:
       # The trust anchor, read-only. The key mints fleet identities: it is the
       # whole compromise if it leaks, so it is mounted, never baked into the image.
+      # ./secrets/creds, if present, rides in the same mount for ADR-091.
       - ./secrets:/secrets:ro
     ports:
       - "${CVAP_BIND_ADDR:-0.0.0.0}:8443:8443" # enrollment (server TLS)

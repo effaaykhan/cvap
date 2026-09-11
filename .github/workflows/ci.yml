@@ -536,6 +536,17 @@ jobs:
           CVAP_REQUIRE_LAB: "1"
         run: make corpus-check
 
+      # The credentialed route on real processes against the lab's Debian sshd
+      # (ADR-092): Core, scan point and credhost engine as separate binaries,
+      # the grant over mTLS, the inventory matched against the container's own
+      # dpkg-query. The plain e2e job has no lab, so the test skips there by
+      # name; here CVAP_REQUIRE_LAB makes the skip a failure.
+      - name: Credentialed inventory end to end
+        env:
+          CVAP_REQUIRE_LAB: "1"
+          CVAP_TEST_DATABASE_URL: ${{ env.APP_DATABASE_URL }}
+        run: go test ./test/e2e/ -run TestCredentialedInventoryOverTheWire -count=1 -timeout 10m
+
       - name: Tear down the lab
         if: always()
         run: make lab-down

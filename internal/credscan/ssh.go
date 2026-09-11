@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/effaaykhan/cvap/internal/sshalgo"
 )
 
 // The one host-dependent part of the instrument: an authenticated read of a Linux
@@ -67,6 +69,12 @@ func ReadHost(ctx context.Context, cfg SSHConfig) (HostRead, error) {
 		Auth:            []ssh.AuthMethod{cfg.Auth},
 		HostKeyCallback: cfg.HostKeyCallback,
 		Timeout:         timeout,
+		// The same host-key preference the fingerprint engine offers, so the
+		// key this handshake verifies is the key discovery recorded (ADR-091).
+		// With x/crypto's default order the server presented its ECDSA key
+		// against an ed25519 fingerprint, and the observed trust path could
+		// never succeed.
+		HostKeyAlgorithms: sshalgo.HostKeyPreference,
 	}
 
 	// Dial honouring the context: net.Dialer via a small helper so a cancelled ctx

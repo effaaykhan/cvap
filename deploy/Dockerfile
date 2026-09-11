@@ -47,6 +47,7 @@ RUN go build -trimpath -tags embedui -ldflags "-s -w -X main.version=${VERSION}"
  && go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/cvap-engine-noop        ./cmd/cvap-engine-noop \
  && go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/cvap-engine-discovery   ./cmd/cvap-engine-discovery \
  && go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/cvap-engine-fingerprint ./cmd/cvap-engine-fingerprint \
+ && go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/cvap-engine-credhost    ./cmd/cvap-engine-credhost \
  && go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/cvap-scanpoint ./cmd/cvap-scanpoint
 
 # ---- Stage 3: the runtime ---------------------------------------------------
