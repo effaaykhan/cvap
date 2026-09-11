@@ -1,5 +1,10 @@
 package version
 
+import (
+	"strconv"
+	"strings"
+)
+
 // Scheme selects a distribution's version-comparison semantics. dpkg and rpm are
 // different algorithms (ADR-014); the caller must know which family a package
 // came from, because comparing an RPM version with dpkg rules is silently wrong.
@@ -32,9 +37,52 @@ func SchemeByName(name string) (Scheme, bool) {
 // Compare dispatches to the scheme's comparator and returns -1, 0 or +1.
 func Compare(s Scheme, a, b string) int {
 	if s == SchemeRPM {
-		return CompareRPM(a, b)
+		return compareRPMEVR(a, b)
 	}
 	return CompareDpkg(a, b)
+}
+
+// compareRPMEVR compares two full RPM epoch:version-release strings the way rpm's
+// own rpmVersionCompare does, and the way CompareRPM (rpmvercmp) alone does NOT: it
+// compares the epoch NUMERICALLY first (an absent epoch is 0), then rpmvercmp on the
+// version, then rpmvercmp on the release. CompareRPM treats ':' and '-' as ordinary
+// separators, so handing it a full EVR compares the epoch digit against the first
+// version segment — which made a fully-patched host (installed "0:9.9p1-25…") read as
+// below an epoch-less advisory fix ("9.9p1-25…") and produced credentialed false
+// positives. Found by B26 — the rpm comparator against a real advisory on a real host
+// (ADR-062 validated rpmvercmp against rpm's corpus, but never the EVR layer around
+// it). CompareRPM (the validated rpmvercmp core) is unchanged; this adds the EVR
+// splitting rpm itself performs.
+func compareRPMEVR(a, b string) int {
+	ea, va, ra := splitEVR(a)
+	eb, vb, rb := splitEVR(b)
+	if ea != eb {
+		if ea < eb {
+			return -1
+		}
+		return 1
+	}
+	if c := CompareRPM(va, vb); c != 0 {
+		return c
+	}
+	return CompareRPM(ra, rb)
+}
+
+// splitEVR splits an RPM "[epoch:]version[-release]" into its parts. An absent epoch
+// is 0 (rpm's rule); a non-numeric or absent epoch is treated as 0. Version and
+// release split at the first '-' (an rpm version contains no '-'); an absent release
+// is "".
+func splitEVR(s string) (epoch int, version, release string) {
+	if i := strings.IndexByte(s, ':'); i >= 0 {
+		if e, err := strconv.Atoi(s[:i]); err == nil {
+			epoch = e
+		}
+		s = s[i+1:]
+	}
+	if i := strings.IndexByte(s, '-'); i >= 0 {
+		return epoch, s[:i], s[i+1:]
+	}
+	return epoch, s, ""
 }
 
 // Op is a comparison operator an advisory uses to bound an affected version set.

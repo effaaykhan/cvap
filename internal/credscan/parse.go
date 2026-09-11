@@ -62,6 +62,36 @@ func ParseDpkgQuery(out string) ([]Package, error) {
 	return pkgs, nil
 }
 
+// RpmQaCommand reads the rpm inventory on a RHEL-family host — name, epoch:version-
+// release, arch. EPOCHNUM prints 0 (not empty) when there is no epoch, so the version
+// is always a well-formed rpm version the CompareRPM comparator (ADR-062) can read.
+// A read, no impact (non-negotiable #9).
+const RpmQaCommand = `rpm -qa --qf '%{NAME}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\t%{ARCH}\n'`
+
+// ParseRpmQa parses RpmQaCommand output. rpm -qa lists BINARY package names; advisory
+// data (ALSA) keys on those names, so Source and Binary are both the rpm name. Same
+// refuse-don't-skip discipline as ParseDpkgQuery — a dropped line is silent
+// under-reporting of the ground truth.
+func ParseRpmQa(out string) ([]Package, error) {
+	var pkgs []Package
+	for i, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) != 3 {
+			return nil, fmt.Errorf("rpm -qa line %d has %d fields, want 3: %q", i+1, len(f), line)
+		}
+		name := strings.TrimSpace(f[0])
+		pkgs = append(pkgs, Package{
+			Source: name, Binary: name,
+			Version: strings.TrimSpace(f[1]), Arch: strings.TrimSpace(f[2]),
+		})
+	}
+	return pkgs, nil
+}
+
 // OSRelease is what /etc/os-release reports — the EXACT release, not band-inferred
 // (ADR-076). Codename is what advisory matching uses (hardy, jammy); VersionID and
 // ID are carried for legibility and family.
@@ -74,6 +104,19 @@ type OSRelease struct {
 
 // Get returns any os-release key (uppercase), for keys OSRelease does not name.
 func (r OSRelease) Get(key string) string { return r.raw[key] }
+
+// IsRPMFamily reports whether the host uses rpm (RHEL family) rather than dpkg. It
+// checks ID and ID_LIKE, so a derivative (AlmaLinux, Rocky) that sets ID_LIKE=rhel
+// is recognised without an exhaustive ID list.
+func (r OSRelease) IsRPMFamily() bool {
+	hay := " " + r.ID + " " + r.raw["ID_LIKE"] + " "
+	for _, k := range []string{"rhel", "fedora", "centos", "almalinux", "rocky", "suse"} {
+		if strings.Contains(hay, k) {
+			return true
+		}
+	}
+	return false
+}
 
 // ParseOsRelease parses /etc/os-release (KEY=VALUE, optionally quoted). It errors
 // only if ID cannot be found — a release with no ID is not a release this

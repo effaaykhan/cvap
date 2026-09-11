@@ -38,11 +38,13 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/effaaykhan/cvap/internal/credscan"
@@ -70,21 +72,26 @@ func run() error {
 		tenantStr  = flag.String("tenant", "", "tenant uuid")
 		assetStr   = flag.String("asset", "", "asset uuid (already scanned unauthenticated)")
 		timeout    = flag.Duration("timeout", 30*time.Second, "SSH connect/read timeout")
+		useAgent   = flag.Bool("agent", false, "authenticate via a runtime CredAgent signing proxy (ADR-086) instead of holding the key directly")
 		invOnly    = flag.Bool("inventory-only", false, "read and print the host's release and inventory; no database, no measurement")
+		truthOnly  = flag.Bool("truth-only", false, "read the host and print the credentialed advisory finding set (exact-version matching), with no unauthenticated Diff — used where no unauth scan exists (e.g. the rpm/B26 host)")
 		grep       = flag.String("grep", "", "with --inventory-only, list installed packages whose source or binary contains this substring")
 	)
 	flag.Parse()
 
-	// Inventory-only needs no tenant/asset (it does not touch the database).
+	// Inventory-only touches no database; truth-only reads the keyspace (needs a
+	// tenant for the transaction) but no unauth asset; the full measurement needs both.
 	required := *host == "" || *user == "" || *knownHosts == ""
-	if !*invOnly {
+	switch {
+	case *invOnly:
+		// host/user/known-hosts only
+	case *truthOnly:
+		required = required || *tenantStr == ""
+	default:
 		required = required || *tenantStr == "" || *assetStr == ""
 	}
 	if required {
-		if *invOnly {
-			return errors.New("--host, --user and --known-hosts are required")
-		}
-		return errors.New("--host, --user, --known-hosts, --tenant and --asset are all required")
+		return errors.New("credscan: missing required flags for this mode (--host/--user/--known-hosts always; --tenant unless --inventory-only; --asset for the full measurement)")
 	}
 
 	// --- Scope gate (non-negotiable #10): the same matcher Core uses. ---
@@ -112,7 +119,7 @@ func run() error {
 
 	var tenant store.TenantID
 	var assetID uuid.UUID
-	if !*invOnly {
+	if !*invOnly { // inventory-only touches no DB; truth-only and full both need a tenant
 		tenantUUID, err := uuid.Parse(*tenantStr)
 		if err != nil {
 			return fmt.Errorf("--tenant is not a uuid: %w", err)
@@ -121,9 +128,11 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		assetID, err = uuid.Parse(*assetStr)
-		if err != nil {
-			return fmt.Errorf("--asset is not a uuid: %w", err)
+		if !*truthOnly {
+			assetID, err = uuid.Parse(*assetStr)
+			if err != nil {
+				return fmt.Errorf("--asset is not a uuid: %w", err)
+			}
 		}
 	}
 
@@ -137,10 +146,40 @@ func run() error {
 	}
 	defer cred.Zeroise() // backstop; zeroised explicitly below once the read is done
 
-	auth, err := authMethod(cred)
-	if err != nil {
-		cred.Zeroise()
-		return err
+	// Auth. --agent routes through the runtime signing proxy (ADR-086): the key
+	// stays in the CredAgent and this read authenticates over the agent socket with
+	// signatures only — the same split the production engine uses, exercised here
+	// against a real host. Without --agent, the key is presented directly (the S39
+	// instrument path).
+	var auth ssh.AuthMethod
+	var credAgent *scanpoint.CredAgent
+	if *useAgent {
+		credAgent, err = scanpoint.NewCredAgent(cred)
+		if err != nil {
+			cred.Zeroise()
+			return err
+		}
+		defer credAgent.Zeroise()
+		sockFile, ferr := credAgent.EngineFile()
+		if ferr != nil {
+			cred.Zeroise()
+			return ferr
+		}
+		sockConn, cerr := net.FileConn(sockFile)
+		_ = sockFile.Close()
+		if cerr != nil {
+			cred.Zeroise()
+			return cerr
+		}
+		defer sockConn.Close()
+		agentClient := agent.NewClient(sockConn)
+		auth = ssh.PublicKeysCallback(agentClient.Signers)
+	} else {
+		auth, err = authMethod(cred)
+		if err != nil {
+			cred.Zeroise()
+			return err
+		}
 	}
 
 	hostKeyCallback, err := knownhosts.New(*knownHosts)
@@ -168,6 +207,12 @@ func run() error {
 	if *invOnly {
 		printInventory(read, *grep)
 		return nil
+	}
+
+	// --- Truth-only: the credentialed finding set from exact versions, no unauth
+	// Diff — for a host with no unauthenticated scan (the rpm/B26 host). ---
+	if *truthOnly {
+		return truthReport(ctx, tenant, read)
 	}
 
 	// --- The measurement: all store reads in one read-only tenant transaction. ---
@@ -342,6 +387,95 @@ func printInventory(read credscan.HostRead, grep string) {
 			fmt.Printf("    source=%-20s binary=%-24s version=%s\n", p.Source, p.Binary, p.Version)
 		}
 	}
+}
+
+// releaseKey is the advisory keyspace's key for a host's release: the codename for
+// dpkg distros (jammy/resolute), and ID+major for rpm distros, which carry no
+// codename (almalinux 10.2 -> "almalinux-10", matching the thin ALSA import).
+func releaseKey(rel credscan.OSRelease) string {
+	if rel.Codename != "" {
+		return rel.Codename
+	}
+	major := rel.VersionID
+	if i := strings.IndexByte(major, '.'); i >= 0 {
+		major = major[:i]
+	}
+	return rel.ID + "-" + major
+}
+
+// truthReport computes and prints the credentialed advisory finding set — exact
+// installed versions matched against the keyspace with the release's own comparator
+// (dpkg or rpm, ADR-062). No unauthenticated Diff: this is for a host with no unauth
+// scan (the rpm/B26 host), where the point is that the credentialed matcher runs
+// correctly against real advisories, not a comparison to inference.
+func truthReport(ctx context.Context, tenant store.TenantID, read credscan.HostRead) error {
+	dbURL := os.Getenv("APP_DATABASE_URL")
+	if dbURL == "" {
+		return errors.New("APP_DATABASE_URL is not set")
+	}
+	db, err := store.Open(ctx, store.Config{URL: dbURL})
+	if err != nil {
+		return fmt.Errorf("database: %w", err)
+	}
+	defer db.Close()
+
+	relKey := releaseKey(read.Release)
+	var truth credscan.TruthResult
+	err = db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		adv := store.Advisories{}
+		fixes := func(release, pkg string) ([]credscan.AdvisoryFix, error) {
+			rows, e := adv.FixesFor(ctx, c, release, pkg)
+			if e != nil {
+				return nil, e
+			}
+			out := make([]credscan.AdvisoryFix, len(rows))
+			for i, r := range rows {
+				out[i] = credscan.AdvisoryFix{AdvisoryRef: r.AdvisoryRef, FixedVersion: r.FixedVersion, Comparator: r.Comparator}
+			}
+			return out, nil
+		}
+		vulns := func(ref string) ([]string, error) {
+			rows, e := adv.AdvisoryVulnDefs(ctx, c, ref)
+			if e != nil {
+				return nil, e
+			}
+			cves := make([]string, len(rows))
+			for i, r := range rows {
+				cves[i] = r.CVE
+			}
+			return cves, nil
+		}
+		var e error
+		truth, e = credscan.CredentialedTruth(read.Packages, relKey, fixes, vulns)
+		return e
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Credentialed truth — %s (release key %q), %d packages read\n",
+		read.Release.Get("PRETTY_NAME"), relKey, len(read.Packages))
+	fmt.Printf("  credentialed advisory findings (exact installed version matched via %s comparator): %d\n",
+		map[bool]string{true: "rpm", false: "dpkg"}[read.Release.IsRPMFamily()], len(truth.Keys))
+	byPkg := map[string]int{}
+	for _, k := range truth.Keys {
+		byPkg[k.Package]++
+	}
+	pkgs := make([]string, 0, len(byPkg))
+	for p := range byPkg {
+		pkgs = append(pkgs, p)
+	}
+	sort.Strings(pkgs)
+	for _, p := range pkgs {
+		fmt.Printf("    %-16s %d\n", p, byPkg[p])
+	}
+	for _, k := range truth.Keys {
+		fmt.Printf("      %s  %s\n", k.Package, k.CVE)
+	}
+	if len(truth.Skipped) > 0 {
+		fmt.Printf("  could not judge %d candidate fix(es)\n", len(truth.Skipped))
+	}
+	return nil
 }
 
 // loadCredential reads the credential material into a runtime-held Credential

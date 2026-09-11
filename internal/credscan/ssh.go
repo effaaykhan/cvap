@@ -77,15 +77,7 @@ func ReadHost(ctx context.Context, cfg SSHConfig) (HostRead, error) {
 	}
 	defer conn.Close()
 
-	dpkgOut, err := run(ctx, conn, DpkgQueryCommand)
-	if err != nil {
-		return HostRead{}, fmt.Errorf("credscan: reading package inventory: %w", err)
-	}
-	pkgs, err := ParseDpkgQuery(dpkgOut)
-	if err != nil {
-		return HostRead{}, fmt.Errorf("credscan: %w", err)
-	}
-
+	// Release first — it decides which package manager to read (dpkg vs rpm).
 	osOut, err := run(ctx, conn, osReleaseCommand)
 	if err != nil {
 		return HostRead{}, fmt.Errorf("credscan: reading /etc/os-release: %w", err)
@@ -95,6 +87,24 @@ func ReadHost(ctx context.Context, cfg SSHConfig) (HostRead, error) {
 		return HostRead{}, fmt.Errorf("credscan: %w", err)
 	}
 
+	var pkgs []Package
+	if rel.IsRPMFamily() {
+		out, rerr := run(ctx, conn, RpmQaCommand)
+		if rerr != nil {
+			return HostRead{}, fmt.Errorf("credscan: reading rpm inventory: %w", rerr)
+		}
+		if pkgs, err = ParseRpmQa(out); err != nil {
+			return HostRead{}, fmt.Errorf("credscan: %w", err)
+		}
+	} else {
+		out, derr := run(ctx, conn, DpkgQueryCommand)
+		if derr != nil {
+			return HostRead{}, fmt.Errorf("credscan: reading package inventory: %w", derr)
+		}
+		if pkgs, err = ParseDpkgQuery(out); err != nil {
+			return HostRead{}, fmt.Errorf("credscan: %w", err)
+		}
+	}
 	return HostRead{Packages: pkgs, Release: rel}, nil
 }
 
