@@ -25,7 +25,8 @@ const (
 )
 
 // Engine mirrors the engine_kind enum. The first three exist as engine
-// processes; the rest are out of MVP scope (execution-plan §2) and carry no code.
+// processes, and host is the credentialed engine's job kind (ADR-081/084/086); the
+// rest are out of MVP scope (execution-plan §2) and carry no code.
 type Engine string
 
 const (
@@ -33,11 +34,15 @@ const (
 	EngineFingerprint Engine = "fingerprint"
 	EngineRules       Engine = "rules"
 
+	// EngineHost is the credentialed host engine's job kind: the binary is
+	// cvap-engine-credhost, the job it runs is a `host` job (ADR-081/084/086/091),
+	// and ingest accepts a `package` observation only from one (ADR-095).
+	EngineHost Engine = "host"
+
 	// The rest of the engine_kind enum. Out of MVP scope (execution-plan §2)
 	// and carrying no code, but present in the type because a scan point may
 	// declare one and Core must be able to say "recorded, and never dispatched"
 	// rather than failing the enrollment.
-	EngineHost  Engine = "host"
 	EngineDAST  Engine = "dast"
 	EngineAPI   Engine = "api"
 	EngineSAST  Engine = "sast"

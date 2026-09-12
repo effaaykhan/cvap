@@ -94,8 +94,12 @@ type ServiceObservation struct {
 	Service  string
 	Product  string
 	Version  string
-	Method   string
-	Evidence string
+	// Confidence is the observation's own confidence in what it reports — the
+	// banner's, for a banner-derived product+version — and is the version
+	// input to an advisory finding's composed confidence (ADR-072/073/095).
+	Confidence float64
+	Method     string
+	Evidence   string
 
 	TLS *TLSEvidence
 	SSH *SSHEvidence

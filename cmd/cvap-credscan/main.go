@@ -248,7 +248,7 @@ func measure(ctx context.Context, tenant store.TenantID, assetID uuid.UUID, read
 	}
 
 	report := credscan.Report{
-		Host:     read.Release.Get("PRETTY_NAME"),
+		Host:     printable(read.Release.Get("PRETTY_NAME")),
 		Release:  read.Release,
 		Packages: len(read.Packages),
 	}
@@ -374,7 +374,7 @@ func measure(ctx context.Context, tenant store.TenantID, assetID uuid.UUID, read
 // advisory pipeline. With grep set, it lists installed packages whose source or
 // binary name contains the substring.
 func printInventory(read credscan.HostRead, grep string) {
-	fmt.Printf("host read: %s\n", read.Release.Get("PRETTY_NAME"))
+	fmt.Printf("host read: %s\n", printable(read.Release.Get("PRETTY_NAME")))
 	fmt.Printf("  /etc/os-release: ID=%s VERSION_ID=%s VERSION_CODENAME=%s\n",
 		read.Release.ID, read.Release.VersionID, read.Release.Codename)
 	fmt.Printf("  packages installed: %d\n", len(read.Packages))
@@ -454,7 +454,7 @@ func truthReport(ctx context.Context, tenant store.TenantID, read credscan.HostR
 	}
 
 	fmt.Printf("Credentialed truth — %s (release key %q), %d packages read\n",
-		read.Release.Get("PRETTY_NAME"), relKey, len(read.Packages))
+		printable(read.Release.Get("PRETTY_NAME")), relKey, len(read.Packages))
 	fmt.Printf("  credentialed advisory findings (exact installed version matched via %s comparator): %d\n",
 		map[bool]string{true: "rpm", false: "dpkg"}[read.Release.IsRPMFamily()], len(truth.Keys))
 	byPkg := map[string]int{}
@@ -551,4 +551,16 @@ func loadScope(path string) (allowed, exclusions []string, err error) {
 		return nil, nil, fmt.Errorf("scope file: %w", err)
 	}
 	return allowed, exclusions, nil
+}
+
+// printable strips control characters from target-controlled text before it
+// reaches an operator's terminal: PRETTY_NAME is whatever the host wrote, and a
+// terminal escape in it is the host writing to the operator's screen.
+func printable(v string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, v)
 }

@@ -32,6 +32,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/effaaykhan/cvap/internal/credscan"
+	"github.com/effaaykhan/cvap/internal/domain"
 	"github.com/effaaykhan/cvap/internal/sshalgo"
 )
 
@@ -122,6 +123,13 @@ func Run(ctx context.Context, cfg Config, agentConn net.Conn, emit Emit) error {
 		cancel()
 		if err != nil {
 			return fmt.Errorf("credhost: reading %s: %w", t.Value, err)
+		}
+		// The composed release key (ID-major for rpm distros) is what Core pins;
+		// bound it here as the engine's site of the ADR-095 grammar, so a host
+		// whose fields pass individually but compose past the bound is refused
+		// at the read rather than silently dropped at Core.
+		if rel := read.Release.ReleaseKey(); !domain.ReleaseTokenValid(rel) || !domain.ReleaseTokenValid(read.Release.ID) {
+			return fmt.Errorf("credhost: reading %s: os-release names a release outside the attribution grammar", t.Value)
 		}
 		payload := packagePayload{
 			Address:       t.Value,

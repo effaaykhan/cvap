@@ -126,6 +126,26 @@ func (Submissions) RecordChunk(ctx context.Context, c *Conn, submissionID string
 	return nil
 }
 
+// Quarantine marks an IN-FLIGHT submission quarantined with a reason, so a
+// quarantine raised on a chunk after the first survives the stream that raised
+// it. Before this, the ledger status was written only on chunk 0 and a later
+// chunk's quarantine lived in the per-stream struct: reconnect, resume from the
+// next chunk, and the terminal promotion read "accepted" from the ledger —
+// the ADR-095 package gate, the zone check and the task check were all
+// launderable that way. A no-op on a submission already quarantined or done.
+func (Submissions) Quarantine(ctx context.Context, c *Conn, submissionID, reason string) error {
+	if reason == "" {
+		return errors.New("store: a quarantine needs a reason")
+	}
+	const q = `
+		UPDATE result_submissions
+		   SET status = 'accepted_quarantined', quarantine_reason = $3
+		 WHERE tenant_id = $1 AND submission_id = $2
+		   AND status = 'accepted' AND completed_at IS NULL`
+	_, err := c.Exec(ctx, q, c.Tenant().UUID(), submissionID, reason)
+	return mapError(err)
+}
+
 // Complete closes a submission out with its terminal status and reason.
 func (Submissions) Complete(ctx context.Context, c *Conn, submissionID string, status SubmitStatus, reason TerminationReason, quarantineReason string) error {
 	if status == SubmitAcceptedQuarantined && quarantineReason == "" {

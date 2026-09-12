@@ -360,7 +360,7 @@ func TestCoverageSurfaces(t *testing.T) {
 		}
 		assetID = a.ID
 		rel := "hardy"
-		return (store.Assets{}).SetAttribution(ctx, c, a.ID, "ubuntu", &rel, 0.9, []byte(`[]`))
+		return (store.Assets{}).SetAttribution(ctx, c, a.ID, "ubuntu", &rel, 0.9, []byte(`[]`), false)
 	}); err != nil {
 		t.Fatalf("seed asset: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestAdvisoryStatusOnTheWire(t *testing.T) {
 			if family == "" {
 				return nil // no attribution -> no release
 			}
-			return (store.Assets{}).SetAttribution(ctx, c, a.ID, family, release, 0.9, []byte(`[]`))
+			return (store.Assets{}).SetAttribution(ctx, c, a.ID, family, release, 0.9, []byte(`[]`), false)
 		}); err != nil {
 			t.Fatalf("seed asset: %v", err)
 		}
@@ -469,11 +469,11 @@ func TestAssetDetailCarriesReleaseProvenance(t *testing.T) {
 			return err
 		}
 		assetID = a.ID
-		if err := (store.Assets{}).SetAttribution(ctx, c, a.ID, "ubuntu", nil, 0.95, []byte(`[]`)); err != nil {
+		if err := (store.Assets{}).SetAttribution(ctx, c, a.ID, "ubuntu", nil, 0.95, []byte(`[]`), false); err != nil {
 			return err
 		}
 		rel := "hardy"
-		return (store.Assets{}).SetRelease(ctx, c, a.ID, &rel, 1.0, prov)
+		return (store.Assets{}).SetRelease(ctx, c, a.ID, &rel, 1.0, prov, false)
 	}); err != nil {
 		t.Fatalf("seed asset: %v", err)
 	}

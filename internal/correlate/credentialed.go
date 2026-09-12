@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/effaaykhan/cvap/internal/domain"
 	"github.com/effaaykhan/cvap/internal/store"
 	"github.com/effaaykhan/cvap/internal/version"
 )
@@ -128,6 +129,9 @@ func credentialedInventory(h host) *packagePayload {
 			continue
 		}
 		if p.ReleaseSource == "os-release" && len(p.Installed) > 0 {
+			if !domain.ReleaseTokenValid(p.Release) || !domain.ReleaseTokenValid(p.Family) {
+				continue // the same grammar credentialedAttribution applies (ADR-095): one field, one rule
+			}
 			return &p
 		}
 	}

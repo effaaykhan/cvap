@@ -3,6 +3,7 @@ package correlate_test
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 
@@ -122,12 +123,12 @@ func TestAdvisoryFindingProducedOnMetasploitable(t *testing.T) {
 		t.Errorf("severity = %q, not a valid band", got.severity)
 	}
 	// Confidence is COMPOSED, not a constant (ADR-072/073): min of release resolution
-	// (2 unanimous votes -> 0.80), version extraction (1.0 pass-through today), and the
-	// package map (1.0 pass-through today). Only release carries a real sub-1.0 value,
-	// so the finding is 0.80 — the release confidence alone. Not the old fixed 0.5, not
-	// 1.00: an inferred claim reads exactly as trustworthy as the one input we weigh.
+	// (2 unanimous votes -> 0.80), version extraction (the banner observation's own
+	// 0.95 since ADR-095), and the package map (1.0 pass-through today). Release is
+	// the weakest input here, so the finding is 0.80. Not the old fixed 0.5, not 1.00:
+	// an inferred claim reads exactly as trustworthy as its weakest input.
 	if got.confidence < 0.795 || got.confidence > 0.805 {
-		t.Errorf("confidence = %.3f, want ~0.80 (release binds; version/map are 1.0 pass-throughs)", got.confidence)
+		t.Errorf("confidence = %.3f, want ~0.80 (release binds; version is the banner's 0.95, map a 1.0 pass-through)", got.confidence)
 	}
 	// The evidence lets an analyst confirm the match by hand without re-scanning,
 	// AND shows the confidence breakdown (ADR-072/073).
@@ -136,18 +137,21 @@ func TestAdvisoryFindingProducedOnMetasploitable(t *testing.T) {
 			t.Errorf("evidence missing %q: %+v", k, got.evidence)
 		}
 	}
-	// The breakdown shows release_resolution binding, version/map as 1.0 pass-throughs
-	// — the coverage statement visible on the finding: only release is weighed today.
+	// The breakdown shows release_resolution binding here. version_extraction is
+	// the observation's OWN confidence in the banner it read (ADR-095 — the weak
+	// input ADR-073's review trigger was waiting for; this fixture's banners carry
+	// 0.95), package_map is still a 1.0 pass-through, and the composition is the
+	// minimum of the three (ADR-072).
 	if ci, ok := got.evidence["confidence_inputs"].(map[string]any); ok {
 		rel, _ := ci["release_resolution"].(float64)
 		ve, _ := ci["version_extraction"].(float64)
 		pm, _ := ci["package_map"].(float64)
 		composed, _ := ci["composed"].(float64)
-		if ve != 1.0 || pm != 1.0 {
-			t.Errorf("version_extraction (%.2f) and package_map (%.2f) should be 1.0 pass-throughs today", ve, pm)
+		if ve <= 0 || ve > 1 || pm != 1.0 {
+			t.Errorf("version_extraction (%.2f) must be the observation's confidence in (0,1]; package_map (%.2f) is still a 1.0 pass-through", ve, pm)
 		}
-		if composed != rel {
-			t.Errorf("composed (%.2f) should equal release_resolution (%.2f) — release is the only weighed input", composed, rel)
+		if want := math.Min(rel, math.Min(ve, pm)); math.Abs(composed-want) > 1e-6 {
+			t.Errorf("composed (%.2f) should be min(release %.2f, version %.2f, map %.2f) = %.2f", composed, rel, ve, pm, want)
 		}
 	} else {
 		t.Errorf("evidence confidence_inputs not a breakdown object: %+v", got.evidence["confidence_inputs"])

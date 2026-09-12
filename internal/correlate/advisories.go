@@ -36,6 +36,7 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 		comparator  string
 		product     string
 		installed   string
+		versionConf float64 // the observation's own confidence in the banner it read
 		zones       []uuid.UUID
 		obsID       uuid.UUID
 		observedAt  time.Time
@@ -90,6 +91,7 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 						m = &match{
 							pkg: pkg, vuln: v, advisoryRef: fix.AdvisoryRef, fixed: fix.FixedVersion,
 							comparator: fix.Comparator, product: so.Product, installed: so.Version,
+							versionConf: so.Confidence,
 						}
 						matches[key] = m
 					}
@@ -104,15 +106,22 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 	for key, m := range matches {
 		// The finding's confidence is the MINIMUM of its inference inputs, not a
 		// constant and not their product (ADR-072). The comparator is exact (ADR-062)
-		// and contributes 1.0, so it never binds. TODAY only release resolution
-		// (ADR-065) carries a real sub-1.0 value; version extraction and the
-		// product->package map are 1.0 pass-throughs — we have no principled sub-1.0
-		// number for either, and inventing one is the guess this design refuses
-		// (ADR-073). So min() is currently the release confidence alone: correct, and
-		// untested as a composition until a genuinely weak input appears (B28's
-		// response-shape version extraction is the expected first one). No floor: a
-		// low input passes through honestly rather than being raised to look better
-		// than its evidence.
+		// and contributes 1.0, so it never binds. Two inputs carry real values:
+		// release resolution (ADR-065, or 1.0 from an exact read) and version
+		// extraction — the observation's own confidence in the banner it read
+		// (ADR-095; ADR-073's review trigger, fired). The product->package map is
+		// still a 1.0 pass-through: we have no principled sub-1.0 number for it and
+		// inventing one is the guess this design refuses. No floor: a low input
+		// passes through honestly rather than being raised to look better than its
+		// evidence.
+		// The version input is the observation's own confidence in the banner
+		// it read (ADR-095): with the release now HELD from an earlier exact read
+		// on every sweep, a banner-derived version composed against 1.0 read as
+		// an exact claim. The service's confidence is the honest number.
+		versionExtractionConfidence := m.versionConf
+		if versionExtractionConfidence < 0 || versionExtractionConfidence > 1 {
+			versionExtractionConfidence = versionPassThrough // absent, not zero: zero composes as zero
+		}
 		conf := minConf(releaseConf, versionExtractionConfidence, packageMapConfidence)
 		id, _, err := (store.Findings{}).Upsert(ctx, conn, store.Finding{
 			AssetID:  assetID,
@@ -140,7 +149,7 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 		// the package, the two versions the comparator judged — and the confidence
 		// breakdown, so a finding shows WHICH input bound it (ADR-072/073), not just
 		// the number. The 1.0 pass-throughs make the coverage visible on the finding:
-		// only release is being weighed today.
+		// release and version extraction are weighed; package_map is a 1.0 pass-through.
 		if err := (store.Findings{}).ReplaceEvidence(ctx, conn, id, []store.FindingEvidence{{
 			ObservationID: m.obsID,
 			Type:          "response",
@@ -158,7 +167,7 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 					"package_map":        packageMapConfidence,
 					"comparator":         "exact (1.0)",
 					"composed":           conf,
-					"rule":               "min of the inputs; version/map are 1.0 pass-throughs today (ADR-073)",
+					"rule":               "min of the inputs (ADR-072): version_extraction is the observation's own confidence (ADR-095), package_map a 1.0 pass-through",
 				},
 			},
 			CapturedAt: m.observedAt,
@@ -178,14 +187,15 @@ func (c *Correlator) evaluateAdvisories(ctx context.Context, conn *store.Conn, a
 // the min mechanism is correct and UNTESTED as a composition, because there is no weak
 // input in the tree yet to exercise it.
 //
-// Review trigger: the first input that carries a real sub-1.0 confidence tests min()
-// as a composition rather than a pass-through. B28's service-identification work is the
-// expected source — a version extracted by response-shape rather than a volunteered
-// banner is exactly the weaker claim that should pull a finding's confidence down, and
-// that is when versionExtractionConfidence stops being a constant.
+// ADR-073's review trigger — "the first input that carries a real sub-1.0
+// confidence tests min() as a composition rather than a pass-through" — fired
+// with ADR-095: version extraction is the observation's confidence, so a banner
+// finding composes below 1.0 even against an exactly known release.
 const (
-	versionExtractionConfidence = 1.0
-	packageMapConfidence        = 1.0
+	// versionPassThrough is what an observation with no confidence composes
+	// at; a service observation normally carries its own (ADR-095).
+	versionPassThrough   = 1.0
+	packageMapConfidence = 1.0
 )
 
 // minConf returns the smallest of the confidences — the weakest-link composition

@@ -11,6 +11,8 @@ package credscan
 import (
 	"fmt"
 	"strings"
+
+	"github.com/effaaykhan/cvap/internal/domain"
 )
 
 // DpkgQueryFormat is the exact dpkg-query field format the instrument requests.
@@ -158,5 +160,29 @@ func ParseOsRelease(out string) (OSRelease, error) {
 	if r.ID == "" {
 		return OSRelease{}, fmt.Errorf("os-release has no ID field")
 	}
+	// The three fields that become attribution are TARGET-CONTROLLED strings
+	// that land on the asset at confidence 1.0 and, under ADR-095, are never
+	// overwritten by an inferred sweep. os-release specifies them as short
+	// lowercase tokens; anything else is not a release this instrument can
+	// attribute, and refusing the read is the honest outcome — a bound here is
+	// what keeps a lying host from pinning a novel or unbounded value forever.
+	for name, v := range map[string]string{"ID": r.ID, "VERSION_ID": r.VersionID, "VERSION_CODENAME": r.Codename} {
+		if err := checkReleaseToken(name, v); err != nil {
+			return OSRelease{}, err
+		}
+	}
 	return r, nil
+}
+
+// MaxReleaseTokenLen mirrors domain.MaxReleaseTokenLen for callers here.
+const MaxReleaseTokenLen = domain.MaxReleaseTokenLen
+
+// checkReleaseToken is the engine-side site of domain.ReleaseTokenValid
+// (ADR-095): a token outside [a-z0-9._-]{1,64} refuses the read. Core applies
+// the same rule when it consumes the observation.
+func checkReleaseToken(name, v string) error {
+	if domain.ReleaseTokenValid(v) {
+		return nil
+	}
+	return fmt.Errorf("os-release %s is not a short lowercase token ([a-z0-9._-], at most %d bytes); not attributable", name, MaxReleaseTokenLen)
 }

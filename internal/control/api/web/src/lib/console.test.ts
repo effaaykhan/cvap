@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { advisory, ageRatio, applyTriageFilter, attention, confidenceBand, kevInversion, scanReadiness, score, sparkPath, stackSegments, tally, trendGeometry, worstFirst, yTicks } from "./console";
+import { advisory, ageRatio, applyTriageFilter, attention, confidenceBand, kevInversion, scanReadiness, score, sparkPath, stackSegments, tally, trendGeometry, worstFirst, yTicks, exactRead, provenanceAge } from "./console";
 import type { FindingSummary, Health, KnowledgeFeed, ScanPoint } from "./api";
 
 const f = (over: Partial<FindingSummary>): FindingSummary => ({
@@ -147,5 +147,28 @@ describe("advisory and scan readiness", () => {
     on[0].capabilities = ["discovery"];
     expect(scanReadiness(on, "discovery", []).reasons[0]).toContain("no allow rule");
     expect(scanReadiness(on, "host", []).reasons[0]).toContain("no enrolled scan point has the host engine");
+  });
+});
+
+describe("exactRead (ADR-095)", () => {
+  it("recognises the object shape and ignores the vote array", () => {
+    expect(exactRead([{ service: "ssh", port: 22, family: "ubuntu", role: "contributed" }])).toBeNull();
+    expect(exactRead(null)).toBeNull();
+    expect(exactRead({ source: "band_vote" })).toBeNull();
+    expect(exactRead({ source: "package_manager", release: "jammy", read_at: "2026-09-11T16:11:43Z" }))
+      .toEqual({ source: "package_manager", readAt: "2026-09-11T16:11:43Z" });
+    expect(exactRead({ source: "os-release", family: "ubuntu" })).toEqual({ source: "os-release", readAt: undefined });
+  });
+});
+
+describe("provenanceAge", () => {
+  const now = Date.parse("2026-09-12T12:00:00Z");
+  it("reports days, then hours, then less than an hour", () => {
+    expect(provenanceAge("2026-09-09T12:00:00Z", now)).toBe("3 days ago");
+    expect(provenanceAge("2026-09-11T12:00:00Z", now)).toBe("1 day ago");
+    expect(provenanceAge("2026-09-12T09:30:00Z", now)).toBe("2 hours ago");
+    expect(provenanceAge("2026-09-12T11:50:00Z", now)).toBe("less than an hour ago");
+    expect(provenanceAge("2026-09-13T00:00:00Z", now)).toBe("just now");
+    expect(provenanceAge("not a date", now)).toBe("");
   });
 });

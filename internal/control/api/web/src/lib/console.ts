@@ -219,3 +219,28 @@ export function scanReadiness(points: ScanPoint[], engine: string, rules: ScopeR
   }
   return { ok: reasons.length === 0, reasons };
 }
+
+// exactRead recognises the object-shaped provenance an exact host read writes
+// (ADR-090/095): {source: "os-release" | "package_manager", read_at?: RFC3339}.
+// Inferred attribution is an ARRAY of votes; the two shapes must never be
+// confused, because an exact read outranks any later inference and a page that
+// assumed an array threw on the object.
+export function exactRead(p: unknown): { source: string; readAt?: string } | null {
+  if (!p || Array.isArray(p) || typeof p !== "object") return null;
+  const o = p as { source?: unknown; read_at?: unknown };
+  if (o.source !== "os-release" && o.source !== "package_manager") return null;
+  return { source: o.source, readAt: typeof o.read_at === "string" ? o.read_at : undefined };
+}
+
+// provenanceAge says how old an exact read is, in the coarsest unit that is
+// still honest: a host that stops answering credentialed keeps its last exact
+// value, and the operator must see the age grow rather than the value revert.
+export function provenanceAge(iso: string, now: number = Date.now()): string {
+  const ms = now - new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return ""; // unreadable: say nothing rather than claim freshness
+  if (ms < 0) return "just now";
+  const d = Math.floor(ms / 86_400_000);
+  if (d >= 1) return `${d} day${d === 1 ? "" : "s"} ago`;
+  const h = Math.floor(ms / 3_600_000);
+  return h >= 1 ? `${h} hour${h === 1 ? "" : "s"} ago` : "less than an hour ago";
+}

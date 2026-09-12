@@ -2,7 +2,9 @@ package correlate
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/effaaykhan/cvap/internal/store"
 )
@@ -50,5 +52,28 @@ func TestCredentialedAttributionIgnoresNonAuthoritativeSource(t *testing.T) {
 	}}
 	if f, ok := credentialedAttribution(h); ok {
 		t.Errorf("credentialedAttribution = (%+v, true) for non-authoritative/empty/family-less; want false", f)
+	}
+}
+
+// Core's site of the release token grammar (ADR-095): a `package` observation
+// whose family or release is outside [a-z0-9._-]{1,64} is not an attribution,
+// whatever build of the engine sent it — it falls through to band voting exactly
+// as a payload with no family does.
+func TestCredentialedAttributionRefusesTokensOutsideTheGrammar(t *testing.T) {
+	for name, payload := range map[string]string{
+		"html in family":  `{"address":"10.0.0.1","family":"ubuntu<script>","release":"noble","release_source":"os-release","installed":[]}`,
+		"path in release": `{"address":"10.0.0.1","family":"ubuntu","release":"../../etc/passwd","release_source":"os-release","installed":[]}`,
+		"uppercase":       `{"address":"10.0.0.1","family":"Ubuntu","release":"noble","release_source":"os-release","installed":[]}`,
+		"too long":        `{"address":"10.0.0.1","family":"ubuntu","release":"` + strings.Repeat("a", 65) + `","release_source":"os-release","installed":[]}`,
+	} {
+		h := host{obs: []store.Observation{{Type: store.ObsPackage, Payload: []byte(payload), ObservedAt: time.Now()}}}
+		if _, ok := credentialedAttribution(h); ok {
+			t.Errorf("%s: a token outside the grammar was accepted as an exact attribution", name)
+		}
+	}
+	good := host{obs: []store.Observation{{Type: store.ObsPackage, ObservedAt: time.Now(),
+		Payload: []byte(`{"address":"10.0.0.1","family":"ubuntu","release":"noble","release_source":"os-release","installed":[]}`)}}}
+	if _, ok := credentialedAttribution(good); !ok {
+		t.Fatal("a well-formed exact attribution was refused")
 	}
 }

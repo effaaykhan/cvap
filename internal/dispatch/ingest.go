@@ -225,6 +225,13 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 
 	var ack *scanpointv1.SubmitAck
 
+	// A quarantine raised in this chunk is recorded even if the chunk is then
+	// refused as malformed: errMalformed rolls the transaction back on purpose
+	// (a malformed chunk must not leave a ledger row nothing completes), and
+	// that rollback took the refusal record with it — a scan point could probe
+	// the gates at will and leave no trace. The record is rewritten in a fresh
+	// transaction on that path, the errConflictResume shape.
+	var quarantineRaised string
 	err = s.db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 		// ====================================================================
 		// The epoch check. Every chunk, not just the first.
@@ -357,6 +364,33 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 				sub.reason = "observation attributed to a task outside the submitted job"
 			}
 		}
+		// A `package` observation becomes an EXACT attribution at 1.0 that no
+		// inferred sweep will ever overwrite (ADR-095), so its provenance must be
+		// what it claims: emitted by a credentialed-engine job, for the task's own
+		// target. Any enrolled scan point could otherwise assert an exact
+		// attribution for any address. Quarantined, not dropped (ADR-026).
+		if !sub.quarantined {
+			reason, err := s.packageObservationsAreCredentialed(ctx, c, jobID, chunk)
+			if err != nil {
+				return err
+			}
+			if reason != "" {
+				sub.quarantined = true
+				sub.reason = reason
+			}
+		}
+		// A quarantine raised on any chunk after the first is written to the
+		// ledger NOW, in this transaction: the chunk-0 path writes it through
+		// Begin, and a later chunk's quarantine held only in this struct died
+		// with the stream — reconnect, resume, and the terminal promotion read
+		// "accepted" from the ledger. Measured by the ADR-095 review; the zone
+		// and task checks above had the same hole.
+		if sub.quarantined && sub.chunks > 0 {
+			if err := (store.Submissions{}).Quarantine(ctx, c, submissionID, sub.reason); err != nil {
+				return err
+			}
+			quarantineRaised = sub.reason
+		}
 
 		obs, err := s.toObservations(spID, enrolledZone, submissionID, chunk)
 		if err != nil {
@@ -467,6 +501,13 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 		}, nil
 	}
 	if errors.Is(err, errMalformed) {
+		if quarantineRaised != "" {
+			if qerr := s.db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+				return (store.Submissions{}).Quarantine(ctx, c, submissionID, quarantineRaised)
+			}); qerr != nil {
+				s.log.ErrorContext(ctx, "quarantine record lost with a malformed chunk", slog.Any("error", qerr))
+			}
+		}
 		return malformed(submissionID, strings.TrimPrefix(err.Error(), errMalformed.Error()+": ")), nil
 	}
 
@@ -615,6 +656,49 @@ func (s *IngestService) checkEpoch(ctx context.Context, c *store.Conn, spID, job
 	return "", nil
 }
 
+// packageObservationsAreCredentialed returns a quarantine reason when a chunk
+// carries a `package` observation that a credentialed-engine job did not emit,
+// or whose payload names an address other than its task's target. "" when the
+// chunk carries none, or all of them are what they claim.
+func (s *IngestService) packageObservationsAreCredentialed(ctx context.Context, c *store.Conn, jobID uuid.UUID, chunk *scanpointv1.ResultChunk) (string, error) {
+	var pkgs []*scanpointv1.Observation
+	for _, o := range chunk.GetObservations() {
+		if o.GetObservationType() == string(store.ObsPackage) {
+			pkgs = append(pkgs, o)
+		}
+	}
+	if len(pkgs) == 0 {
+		return "", nil
+	}
+	job, err := (store.Jobs{}).GetByID(ctx, c, jobID)
+	if err != nil {
+		return "", err
+	}
+	if job.Engine != store.EngineHost {
+		return "package observation from a job that is not credentialed", nil
+	}
+	tasks, err := (store.Jobs{}).Tasks(ctx, c, jobID)
+	if err != nil {
+		return "", err
+	}
+	target := make(map[string]string, len(tasks))
+	for _, t := range tasks {
+		target[t.ID.String()] = t.TaskTarget
+	}
+	for _, o := range pkgs {
+		var p struct {
+			Address string `json:"address"`
+		}
+		if err := json.Unmarshal(o.GetPayload(), &p); err != nil || p.Address == "" {
+			return "package observation carries no address", nil
+		}
+		if want, ok := target[o.GetTaskId()]; !ok || want != p.Address {
+			return "package observation names an address outside its task's target", nil
+		}
+	}
+	return "", nil
+}
+
 // tasksBelongToJob checks every task_id in the chunk against the job.
 func (s *IngestService) tasksBelongToJob(ctx context.Context, c *store.Conn, jobID uuid.UUID, chunk *scanpointv1.ResultChunk) (bool, error) {
 	seen := map[string]bool{}
@@ -687,6 +771,11 @@ func (s *IngestService) toObservations(spID, enrolledZone uuid.UUID, submissionI
 			// is not valid JSON.
 			return nil, fmt.Errorf("observation %d: payload is not valid JSON", i)
 		}
+		if hasNULEscape(o.GetPayload()) {
+			// Valid JSON that jsonb refuses: a NUL escape fails at the column,
+			// which would answer RETRY_LATER for input that can never succeed.
+			return nil, fmt.Errorf("observation %d: payload carries a NUL escape jsonb cannot store", i)
+		}
 
 		observed := s.now().UTC()
 		if ts := o.GetObservedAtUnix(); ts != 0 {
@@ -720,4 +809,29 @@ func malformed(submissionID, detail string) *scanpointv1.SubmitAck {
 		Status:       scanpointv1.SubmitStatus_REJECTED_MALFORMED,
 		Detail:       detail,
 	}
+}
+
+// hasNULEscape reports whether the JSON text carries a real \u0000 escape — an
+// odd run of backslashes before u0000 — as opposed to the six printable
+// characters \u0000 inside a string (encoded as \\u0000, an even run). The
+// first version matched the raw bytes, so a banner reading "OpenSSH \u0000 x"
+// — six printable characters the fingerprint sanitiser rightly leaves alone —
+// voided the whole submission as malformed: remote, target-triggered coverage
+// loss reporting as a completed scan. The review measured it.
+func hasNULEscape(b []byte) bool {
+	for i := 0; i+5 < len(b); i++ {
+		if b[i] != '\\' {
+			continue
+		}
+		run := 0
+		for i < len(b) && b[i] == '\\' {
+			run++
+			i++
+		}
+		if run%2 == 1 && i+4 < len(b) && b[i] == 'u' && b[i+1] == '0' && b[i+2] == '0' && b[i+3] == '0' && b[i+4] == '0' {
+			return true
+		}
+		i-- // the loop's own increment steps past the byte after the run
+	}
+	return false
 }

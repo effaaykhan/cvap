@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -289,13 +290,40 @@ func (Assets) SetFragile(ctx context.Context, c *Conn, id uuid.UUID, fragile boo
 // provenance is the JSON chain of which services contributed, agreed and were
 // ignored, cast to jsonb ($6::jsonb) so a []byte reaches the column as JSON
 // rather than bytea.
-func (Assets) SetAttribution(ctx context.Context, c *Conn, id uuid.UUID, distroFamily string, distroRelease *string, confidence float32, provenance []byte) error {
+//
+// exact says whether this attribution was READ on the host (/etc/os-release,
+// ADR-090) rather than inferred from banners. Provenance ranks regardless of
+// recency (ADR-095): an inferred write lands only where no exact attribution is
+// held — it fills an absence, it never overwrites — while an exact write always
+// lands and is superseded only by a later exact read. The rank is enforced here,
+// in the statement, so no later caller can forget it: the first fingerprint
+// sweep after the credentialed run silently put .138 and .146 back to a 0.9
+// band vote, and every further sweep would have kept doing it.
+func (Assets) SetAttribution(ctx context.Context, c *Conn, id uuid.UUID, distroFamily string, distroRelease *string, confidence float32, provenance []byte, exact bool) error {
+	if err := checkExactProvenance(exact, provenance, "os-release"); err != nil {
+		return err
+	}
+	// distro_release is written by BOTH setters, so its arm here also honours an
+	// exact release_provenance: an inferred family write must not null or
+	// replace a release a credentialed read established.
+	// The rank is read from the row's OWN columns inside the SET (pre-update
+	// values), not from a subselect: a subselect is evaluated against the
+	// statement snapshot and is not re-read when the row lock is granted, so
+	// an inferred write waiting behind a concurrent exact write would land on
+	// top of it. Self-referential, the CASE sees the committed row.
 	const q = `UPDATE assets
-	     SET distro_family = nullif($3,''), distro_release = $4,
-	         os_confidence = $5, os_provenance = $6::jsonb
+	     SET distro_family = CASE WHEN (NOT $7::bool) AND jsonb_typeof(os_provenance) = 'object' AND os_provenance ->> 'source' = 'os-release'
+	                             THEN distro_family ELSE nullif($3,'') END,
+	         distro_release = CASE WHEN (NOT $7::bool) AND ((jsonb_typeof(os_provenance) = 'object' AND os_provenance ->> 'source' = 'os-release')
+	                                                     OR (jsonb_typeof(release_provenance) = 'object' AND release_provenance ->> 'source' = 'package_manager'))
+	                             THEN distro_release ELSE $4 END,
+	         os_confidence = CASE WHEN (NOT $7::bool) AND jsonb_typeof(os_provenance) = 'object' AND os_provenance ->> 'source' = 'os-release'
+	                             THEN os_confidence ELSE $5 END,
+	         os_provenance = CASE WHEN (NOT $7::bool) AND jsonb_typeof(os_provenance) = 'object' AND os_provenance ->> 'source' = 'os-release'
+	                             THEN os_provenance ELSE $6::jsonb END
 	   WHERE tenant_id = $1 AND asset_id = $2`
 
-	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), id, distroFamily, distroRelease, confidence, string(provenance))
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), id, distroFamily, distroRelease, confidence, string(provenance), exact)
 	if err != nil {
 		return mapError(err)
 	}
@@ -303,6 +331,46 @@ func (Assets) SetAttribution(ctx context.Context, c *Conn, id uuid.UUID, distroF
 		return ErrNotFound
 	}
 	return nil
+}
+
+// checkExactProvenance keeps the two statements of one fact in step: the rank a
+// caller claims (exact) and the provenance shape the guard reads back. An exact
+// write must carry the canonical object with the source the guard looks for,
+// or a later inferred write would find nothing to hold and overwrite it.
+func checkExactProvenance(exact bool, provenance []byte, source string) error {
+	if !exact {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(provenance, &m); err != nil {
+		return fmt.Errorf("store: exact attribution needs an object provenance: %w", err)
+	}
+	if got, _ := m["source"].(string); got != source {
+		return fmt.Errorf("store: exact attribution provenance source = %q, want %q", got, source)
+	}
+	return nil
+}
+
+// ReleaseOf returns what the asset HOLDS as its release and confidence after the
+// ranked writes above — which is what advisory matching must key on (ADR-095):
+// a band vote the store refused to record must not be the release the same
+// sweep matches advisories against.
+//
+// found is false when the asset holds no release, or holds one with no
+// confidence: a release without a confidence cannot compose a finding's
+// confidence honestly (0.0 would be legal and invisible), so the caller keeps
+// its own value in that case rather than inheriting a zero.
+func (Assets) ReleaseOf(ctx context.Context, c *Conn, id uuid.UUID) (release string, confidence float32, found bool, err error) {
+	var rel *string
+	var conf *float32
+	if err := c.QueryRow(ctx, `SELECT distro_release, release_confidence FROM assets WHERE tenant_id = $1 AND asset_id = $2`,
+		c.Tenant().UUID(), id).Scan(&rel, &conf); err != nil {
+		return "", 0, false, mapError(err)
+	}
+	if rel == nil || conf == nil {
+		return "", 0, false, nil
+	}
+	return *rel, *conf, true, nil
 }
 
 // SetRelease records the release resolution on the asset (P3.3, ADR-064):
@@ -314,12 +382,23 @@ func (Assets) SetAttribution(ctx context.Context, c *Conn, id uuid.UUID, distroF
 // stored EVEN WHEN UNRESOLVED, so an operator can see why it did not resolve
 // (which services abstained and why) rather than facing a silent family-only.
 // Guarded by distro_family IS NOT NULL: resolution runs only under a known family.
-func (Assets) SetRelease(ctx context.Context, c *Conn, id uuid.UUID, release *string, confidence float32, provenance []byte) error {
+//
+// exact ranks the write as SetAttribution's does (ADR-095): a band vote never
+// overwrites a release read from the host; it only fills an absence.
+func (Assets) SetRelease(ctx context.Context, c *Conn, id uuid.UUID, release *string, confidence float32, provenance []byte, exact bool) error {
+	if err := checkExactProvenance(exact, provenance, "package_manager"); err != nil {
+		return err
+	}
 	const q = `UPDATE assets
-	     SET distro_release = $3, release_confidence = $4, release_provenance = $5::jsonb
+	     SET distro_release = CASE WHEN (NOT $6::bool) AND jsonb_typeof(release_provenance) = 'object' AND release_provenance ->> 'source' = 'package_manager'
+	                             THEN distro_release ELSE $3 END,
+	         release_confidence = CASE WHEN (NOT $6::bool) AND jsonb_typeof(release_provenance) = 'object' AND release_provenance ->> 'source' = 'package_manager'
+	                             THEN release_confidence ELSE $4 END,
+	         release_provenance = CASE WHEN (NOT $6::bool) AND jsonb_typeof(release_provenance) = 'object' AND release_provenance ->> 'source' = 'package_manager'
+	                             THEN release_provenance ELSE $5::jsonb END
 	   WHERE tenant_id = $1 AND asset_id = $2 AND distro_family IS NOT NULL`
 
-	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), id, release, confidence, string(provenance))
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), id, release, confidence, string(provenance), exact)
 	if err != nil {
 		return mapError(err)
 	}

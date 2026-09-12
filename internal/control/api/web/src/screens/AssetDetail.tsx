@@ -1,7 +1,7 @@
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { advisory, score } from "../lib/console";
+import { advisory, score, exactRead, provenanceAge } from "../lib/console";
 
 // AttributionSource mirrors the provenance rows the API embeds (ADR-061). The
 // API types it as opaque JSON, so it is narrowed here at the one place it is read.
@@ -35,8 +35,14 @@ export function AssetDetail() {
   if (isLoading) return <p>Loading…</p>;
   if (error || !a) return <p className="error">Could not load this asset.</p>;
 
-  const provenance = (a.os_provenance as AttributionSource[] | undefined) ?? [];
-  const releaseProvenance = (a.release_provenance as ReleaseSource[] | undefined) ?? [];
+  // Provenance has two shapes (ADR-095): an ARRAY of banner votes when the
+  // attribution was inferred, an OBJECT with a source and read_at when it was
+  // read on the host. An exact read outranks any later inference and carries its
+  // age, so the page says when it was read rather than showing a vote table.
+  const osExact = exactRead(a.os_provenance);
+  const releaseExact = exactRead(a.release_provenance);
+  const provenance = Array.isArray(a.os_provenance) ? (a.os_provenance as unknown as AttributionSource[]) : [];
+  const releaseProvenance = Array.isArray(a.release_provenance) ? (a.release_provenance as unknown as ReleaseSource[]) : [];
 
   return (
     <section className="detail">
@@ -60,7 +66,18 @@ export function AssetDetail() {
         <div className="kv"><dt>Last seen</dt><dd>{fmt(a.last_seen)}</dd></div>
       </dl>
 
-      {a.distro_family ? (
+      {a.distro_family && osExact ? (
+        <>
+          <h2>How the OS was concluded</h2>
+          <p className="note">
+            Read on the host from <span className="data">/etc/os-release</span> by a credentialed pass
+            {osExact.readAt ? <> on <span className="data">{fmt(osExact.readAt)}</span> {provenanceAge(osExact.readAt) ? ` (${provenanceAge(osExact.readAt)})` : ""}</> : null}.
+            An exact read outranks anything a banner suggests, however recent the banner (ADR-095); if the host
+            stops answering credentialed, this value stays and its age grows rather than reverting to a guess.
+          </p>
+        </>
+      ) : null}
+      {a.distro_family && !osExact ? (
         <>
           <h2>How the OS was concluded</h2>
           <table className="provenance"><thead><tr><th>Service</th><th>Suggested</th><th>Role</th></tr></thead>
@@ -83,7 +100,17 @@ export function AssetDetail() {
         </>
       ) : null}
 
-      {releaseProvenance.length ? (
+      {releaseExact ? (
+        <>
+          <h2>How the release was concluded</h2>
+          <p className="note">
+            Resolved release: <span className="data">{a.distro_release}</span>{releaseConfidence(a.release_confidence ?? undefined)} — read exactly
+            from the host{releaseExact.readAt ? <> on <span className="data">{fmt(releaseExact.readAt)}</span> {provenanceAge(releaseExact.readAt) ? ` (${provenanceAge(releaseExact.readAt)})` : ""}</> : null}, not
+            inferred from version bands. A later band vote never overwrites this (ADR-095).
+          </p>
+        </>
+      ) : null}
+      {!releaseExact && releaseProvenance.length ? (
         <>
           <h2>How the release was concluded</h2>
           <p className="note">

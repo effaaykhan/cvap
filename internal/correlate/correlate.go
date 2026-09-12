@@ -558,6 +558,18 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		// plus a service's banner version, matched against the advisory keyspace,
 		// becomes a finding carrying its CVE. Same transaction, after the release is
 		// written. Skipped when the release did not resolve or the seed is absent.
+		//
+		// The release matched against is what the asset HOLDS after the ranked
+		// writes (ADR-095), not what this sweep's vote decided: a band vote the
+		// store refused to record must not be the release the same sweep keys the
+		// keyspace on (the review raised a hardy-only CVE on a host held at jammy),
+		// and an inferred sweep with no family hint must still match against the
+		// exact release a credentialed pass established.
+		if held, heldConf, found, err := (store.Assets{}).ReleaseOf(ctx, conn, assetID); err != nil {
+			return err
+		} else if found {
+			release, releaseConf = held, heldConf
+		}
 		if release != "" && c.advisoryRuleID != uuid.Nil {
 			if err := c.evaluateAdvisories(ctx, conn, assetID, release, float64(releaseConf), h, now); err != nil {
 				return err
@@ -754,7 +766,8 @@ func (c *Correlator) deriveAttribution(ctx context.Context, conn *store.Conn, as
 	if err != nil {
 		return "", err
 	}
-	if err := (store.Assets{}).SetAttribution(ctx, conn, assetID, a.DistroFamily, a.DistroRelease, a.Confidence, prov); err != nil {
+	// Inferred: fills an absence, never overwrites an exact read (ADR-095).
+	if err := (store.Assets{}).SetAttribution(ctx, conn, assetID, a.DistroFamily, a.DistroRelease, a.Confidence, prov, false); err != nil {
 		return "", err
 	}
 	return a.DistroFamily, nil
@@ -844,7 +857,8 @@ func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetI
 	if err != nil {
 		return "", 0, err
 	}
-	if err := (store.Assets{}).SetRelease(ctx, conn, assetID, res.Release, res.Confidence, prov); err != nil {
+	// Inferred: fills an absence, never overwrites an exact read (ADR-095).
+	if err := (store.Assets{}).SetRelease(ctx, conn, assetID, res.Release, res.Confidence, prov, false); err != nil {
 		return "", 0, err
 	}
 	// res.Release is nil when band voting did not resolve (ADR-064); "" then, which
@@ -859,8 +873,9 @@ func (c *Correlator) deriveRelease(ctx context.Context, conn *store.Conn, assetI
 // credentialed host: both the family (ID) and the release. Ground truth — it
 // outranks the service-inferred family and the band-vote release alike.
 type credentialedFacts struct {
-	Family  string // os-release ID, e.g. "ubuntu"
-	Release string // release key (codename, or ID-major for rpm)
+	Family  string    // os-release ID, e.g. "ubuntu"
+	Release string    // release key (codename, or ID-major for rpm)
+	ReadAt  time.Time // when the host was read — the age an exact attribution carries (ADR-095)
 }
 
 // credentialedAttribution returns the exact family+release read from a credentialed
@@ -880,7 +895,13 @@ func credentialedAttribution(h host) (credentialedFacts, bool) {
 			continue // a malformed package payload is not attribution we can trust
 		}
 		if p.ReleaseSource == "os-release" && p.Release != "" && p.Family != "" {
-			return credentialedFacts{Family: p.Family, Release: p.Release}, true
+			// Core's site of the token grammar (ADR-095): the engine refuses a
+			// read outside it, and a scan point running an older or altered
+			// build must not be able to pin what the engine would have refused.
+			if !domain.ReleaseTokenValid(p.Family) || !domain.ReleaseTokenValid(p.Release) {
+				continue
+			}
+			return credentialedFacts{Family: p.Family, Release: p.Release, ReadAt: o.ObservedAt}, true
 		}
 	}
 	return credentialedFacts{}, false
@@ -893,26 +914,31 @@ func credentialedAttribution(h host) (credentialedFacts, bool) {
 // band vote — the exact read is the whole answer.
 func (c *Correlator) applyCredentialedAttribution(ctx context.Context, conn *store.Conn, assetID uuid.UUID, f credentialedFacts) (string, float32, error) {
 	rel := f.Release
+	// read_at is the age an exact attribution carries (ADR-095): a host that
+	// stops answering credentialed keeps its last exact value, and the
+	// operator sees how old it is rather than watching it revert to a guess.
 	famProv, err := json.Marshal(map[string]any{
-		"source": "os-release",
-		"family": f.Family,
-		"basis":  "exact /etc/os-release ID read on the host; outranks service-inferred attribution (ADR-089)",
+		"source":  "os-release",
+		"family":  f.Family,
+		"read_at": f.ReadAt.UTC().Format(time.RFC3339),
+		"basis":   "exact /etc/os-release ID read on the host; outranks service-inferred attribution (ADR-089)",
 	})
 	if err != nil {
 		return "", 0, err
 	}
-	if err := (store.Assets{}).SetAttribution(ctx, conn, assetID, f.Family, &rel, 1.0, famProv); err != nil {
+	if err := (store.Assets{}).SetAttribution(ctx, conn, assetID, f.Family, &rel, 1.0, famProv, true); err != nil {
 		return "", 0, err
 	}
 	relProv, err := json.Marshal(map[string]any{
 		"source":  "package_manager",
 		"release": f.Release,
+		"read_at": f.ReadAt.UTC().Format(time.RFC3339),
 		"basis":   "exact release read from /etc/os-release; outranks band voting (ADR-076/077/089)",
 	})
 	if err != nil {
 		return "", 0, err
 	}
-	if err := (store.Assets{}).SetRelease(ctx, conn, assetID, &rel, 1.0, relProv); err != nil {
+	if err := (store.Assets{}).SetRelease(ctx, conn, assetID, &rel, 1.0, relProv, true); err != nil {
 		return "", 0, err
 	}
 	return f.Release, 1.0, nil

@@ -147,6 +147,7 @@ func serviceObservations(h host) []rules.ServiceObservation {
 			Service:       p.Service,
 			Product:       p.Product,
 			Version:       p.Version,
+			Confidence:    confidenceOf(o),
 			Method:        p.Method,
 			Evidence:      p.Evidence,
 		}
@@ -206,4 +207,16 @@ func withProvenance(f rules.Finding) map[string]any {
 		ev[k] = v
 	}
 	return ev
+}
+
+// confidenceOf is the observation's own confidence, or -1 when the row carries
+// none (a hand-built row; ingest always stores one). Absent and zero are
+// different facts: zero is the weakest possible claim and composes as zero,
+// absent composes at the pass-through. The first cut folded 0 into "absent"
+// and promoted the weakest claim to the strongest.
+func confidenceOf(o store.Observation) float64 {
+	if o.Confidence == nil {
+		return -1
+	}
+	return *o.Confidence
 }

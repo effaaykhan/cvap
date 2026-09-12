@@ -594,3 +594,27 @@ func sortedKeys(m map[string]bool) []string {
 	sort.Strings(out)
 	return out
 }
+
+// MaxReleaseTokenLen bounds an os-release attribution field (ID, VERSION_ID,
+// VERSION_CODENAME) that becomes an exact attribution at 1.0 which no inferred
+// sweep overwrites (ADR-095).
+const MaxReleaseTokenLen = 64
+
+// ReleaseTokenValid accepts "" or a short lowercase token: [a-z0-9._-]{1,64}.
+// os-release specifies these as such; anything else is target-controlled text
+// that must not be pinned. Enforced at the engine when the host is read AND at
+// Core when the observation is applied — a months-old or compromised scan
+// point build is the reason the second site exists.
+func ReleaseTokenValid(v string) bool {
+	if len(v) > MaxReleaseTokenLen {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}

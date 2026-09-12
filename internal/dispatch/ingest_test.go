@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -700,5 +701,100 @@ func TestIncompleteSubmissionResumesWhileCompletedIsDuplicate(t *testing.T) {
 	fs3 := runIngest(t, svc, leaf, chunk(subID, jobID, epoch, 0, true, taskID, zoneID, 1))
 	if got := fs3.lastAck(t).GetStatus(); got != scanpointv1.SubmitStatus_REJECTED_DUPLICATE {
 		t.Errorf("re-sending a completed submission = %v, want REJECTED_DUPLICATE", got)
+	}
+}
+
+// A `package` observation becomes an exact attribution at 1.0 that no inferred
+// sweep will overwrite (ADR-095), so ingest holds it to what it claims: emitted
+// by a credentialed-engine job, for the task's own target. Otherwise any
+// enrolled scan point could pin any address's family and release. Quarantined,
+// never dropped (ADR-026), with the reason on the ack and the ledger.
+func TestPackageObservationsAreHeldToTheirCredentialedJob(t *testing.T) {
+	db := testDB(t)
+	svc := newIngestService(t, db)
+	tenant, leaf, spID := enrolledScanPoint(t, db)
+	jobID, taskID, zoneID, epoch := leased(t, db, tenant, spID)
+
+	var target string
+	if err := db.Read(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		return c.QueryRow(ctx, `SELECT task_target FROM scan_tasks WHERE tenant_id = $1 AND task_id = $2`,
+			c.Tenant().UUID(), taskID).Scan(&target)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pkg := func(subID string, address string) *scanpointv1.ResultChunk {
+		return &scanpointv1.ResultChunk{
+			SubmissionId: subID, JobId: jobID.String(), LeaseEpoch: epoch, ChunkIndex: 0, Final: true,
+			Observations: []*scanpointv1.Observation{{
+				ObservationId: uuid.NewString(), TaskId: taskID.String(), ZoneId: zoneID.String(),
+				ObservationType: "package", Confidence: 1.0, ObservedAtUnix: time.Now().Unix(),
+				Payload: []byte(`{"address":"` + address + `","family":"ubuntu","release":"noble","release_source":"os-release","installed":[]}`),
+			}},
+		}
+	}
+
+	// The leased job is a discovery job: a package observation from it is not
+	// what it claims to be.
+	ack := runIngest(t, svc, leaf, pkg("sub-"+uuid.NewString(), target)).lastAck(t)
+	if ack.GetStatus() != scanpointv1.SubmitStatus_ACCEPTED_QUARANTINED || !strings.Contains(ack.GetDetail(), "not credentialed") {
+		t.Fatalf("package observation from a discovery job: ack %v %q, want ACCEPTED_QUARANTINED naming the job", ack.GetStatus(), ack.GetDetail())
+	}
+
+	// Make it a credentialed job: an address outside the task's target is still
+	// refused, the task's own target is accepted.
+	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		_, err := c.Exec(ctx, `UPDATE scan_jobs SET engine = 'host' WHERE tenant_id = $1 AND job_id = $2`, c.Tenant().UUID(), jobID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ack = runIngest(t, svc, leaf, pkg("sub-"+uuid.NewString(), "203.0.113.9")).lastAck(t)
+	if ack.GetStatus() != scanpointv1.SubmitStatus_ACCEPTED_QUARANTINED || !strings.Contains(ack.GetDetail(), "outside its task") {
+		t.Fatalf("package observation for another address: ack %v %q, want ACCEPTED_QUARANTINED naming the target", ack.GetStatus(), ack.GetDetail())
+	}
+	ack = runIngest(t, svc, leaf, pkg("sub-"+uuid.NewString(), target)).lastAck(t)
+	if ack.GetStatus() != scanpointv1.SubmitStatus_ACCEPTED {
+		t.Fatalf("package observation from a credentialed job for its own target: ack %v %q, want ACCEPTED", ack.GetStatus(), ack.GetDetail())
+	}
+}
+
+// A quarantine raised on a chunk AFTER the first must survive the stream that
+// raised it (ADR-095): only chunk 0 wrote the ledger status, so a scan point
+// could raise the quarantine on chunk 1, drop the stream, resume from chunk 2
+// on a new one, and have the terminal promotion read "accepted" from the
+// ledger. Measured by the ADR-095 review against the package gate; the zone and
+// task checks had the same hole.
+func TestAQuarantineRaisedMidStreamSurvivesAReconnect(t *testing.T) {
+	db := testDB(t)
+	svc := newIngestService(t, db)
+	tenant, leaf, spID := enrolledScanPoint(t, db)
+	jobID, taskID, zoneID, epoch := leased(t, db, tenant, spID)
+
+	subID := "sub-" + uuid.NewString()
+	bad := chunk(subID, jobID, epoch, 1, false, taskID, zoneID, 1)
+	bad.Observations[0].ObservationType = "package"
+	bad.Observations[0].Payload = []byte(`{"address":"203.0.113.77","family":"ubuntu","release":"hardy","release_source":"os-release","installed":[]}`)
+
+	// Stream 1: a clean chunk 0, then the offending chunk 1, no final.
+	runIngest(t, svc, leaf,
+		chunk(subID, jobID, epoch, 0, false, taskID, zoneID, 1),
+		bad)
+	// Stream 2: resume with a clean final chunk.
+	ack := runIngest(t, svc, leaf, chunk(subID, jobID, epoch, 2, true, taskID, zoneID, 1)).lastAck(t)
+	if ack.GetStatus() != scanpointv1.SubmitStatus_ACCEPTED_QUARANTINED {
+		t.Fatalf("resumed submission promoted as %v; a quarantine raised on chunk 1 must reach the ledger and survive the reconnect", ack.GetStatus())
+	}
+	if err := db.Read(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
+		var accepted int
+		if err := c.QueryRow(ctx, `SELECT count(*) FROM observations WHERE tenant_id = $1 AND submission_id = $2 AND ingest_state = 'accepted'`,
+			c.Tenant().UUID(), subID).Scan(&accepted); err != nil {
+			return err
+		}
+		if accepted != 0 {
+			t.Errorf("%d observations promoted to accepted under a mid-stream quarantine; want none", accepted)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -1057,3 +1057,56 @@ port, nor the same asset's key on another port; it is only ever called for `KeyS
 payload carries no port is never retired — unreachable from correlate, which always has one.
 A retired key is not tombstoned: `Record`'s `ON CONFLICT ... WHERE valid_to IS NULL` inserts a new
 row, so a victim's retired certificate returns as a fresh row the next time it is observed.
+
+
+**58. A refusal held in PER-CONNECTION MEMORY, with a reconnect path that rehydrates from a
+store that was never told.** `IngestService.handleChunk` set `sub.quarantined` on a struct that
+lives for one gRPC stream; the ledger row's `status` was written only by `Begin` (chunk 0) and
+`Complete` (final chunk), and `RecordChunk` never touched it. A quarantine raised on chunk 1 was
+therefore invisible to `resume()`, which reads the ledger — so a scan point sent the offending
+chunk, hung up before `final`, reconnected, and the terminal promotion read "accepted" and
+promoted the offending observations into the finding pipeline. Measured on all three content
+guards (the ADR-095 `package` gate, the ADR-008 zone check and `tasksBelongToJob`); only the
+epoch check self-healed, because its condition is DURABLE and re-evaluates identically on the
+resumed stream. Fixed by `store.Submissions.Quarantine`, an UPDATE on every chunk after the
+first.
+**Why:** the code's own comments said "quarantine is sticky" and "quarantine carries across
+streams"; both were true only for a quarantine raised on chunk 0, and the shipped test only ever
+sent one stream.
+**How to apply:** for any flag that means "we refused something", ask where it lives between two
+network round trips and what the RECOVERY path reads. The discriminator is a probe that ends the
+stream WITHOUT the terminal message and reconnects — assert on the ledger row and the row state,
+not on the ack.
+
+**59. Two refusals in one transaction: the second one's ROLLBACK discards the first one's
+record.** Class 3, new shape. After the fix for class 58, `Submissions.Quarantine` is written
+inside the chunk's `db.Write`, and `toObservations` runs AFTER it and returns `errMalformed` — a
+refusal, deliberately a sentinel so the transaction rolls back. A scan point that appends one
+observation with `confidence: 2.0` to the chunk carrying its gate violation therefore gets
+REJECTED_MALFORMED and leaves the ledger at `accepted`, with no `result_submissions` row, no
+audit event and nothing on the quarantine queue: the attempt is measurable only on the wire.
+Measured 2026-09-12: `ledger=accepted` after the violation, `ACCEPTED` after the reconnect.
+**Why:** the repo's own rule (internal/store/CLAUDE.md) is that a refusal must not ride a
+transaction that a later refusal aborts; the fix for one refusal was placed upstream of another.
+**How to apply:** after adding any refusal RECORD inside a `db.Write`, enumerate every `return
+err` below it and classify each as fault (must roll back) or refusal (must not). Where the abort
+is unavoidable, the record has to move to a fresh transaction — the precedent is ingest's own
+ledger-conflict resume.
+
+**60. A hostile-input guard written as a byte-substring match on the ENCODED form.** ADR-095's
+review produced a fix for "a NUL escape fails at the jsonb column and answers RETRY_LATER for
+input that can never succeed": `bytes.Contains(payload, []byte("\\u0000"))` in
+`toObservations`. That matches the raw wire bytes, so a JSON string whose DECODED text is the six
+characters backslash-u-0000 (encoded on the wire as backslash-backslash-u-0000) matches too — and
+that text survives the fingerprint engine's `sanitise`, which only replaces bytes below 0x20.
+A single hostile banner therefore returns REJECTED_MALFORMED for the WHOLE submission, which
+tells the scan point to clear its buffer: up to 5,000 observations covering 32 hosts discarded,
+with no ledger row, against ADR-026's "results are always stored, never discarded". Measured
+2026-09-12: one such observation among five, `ack=REJECTED_MALFORMED`, `ledger=<no row>`.
+**Why:** the quantity the column rejects is a property of the DECODED value; the check was
+written against the transport encoding, where an escaped backslash is indistinguishable from an
+escape.
+**How to apply:** any validation of attacker-supplied JSON must run on the decoded value (or
+track escape state), never on `bytes.Contains` over the raw payload. And any refusal that
+discards a whole submission needs the blast radius named: one host must not be able to void a
+32-host job.
