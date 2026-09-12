@@ -979,12 +979,16 @@ export interface components {
             blocked_scans: components["schemas"]["BlockedScanResponse"][];
             /** Format: date-time */
             computed_at: string;
+            /** @description Distinct addresses with a pending resolution item — the number of hosts an operator would act on; each is a host whose inventory has stopped moving. */
+            contested_addresses: number;
             /** @description Credential releases past their expiry with no zeroisation attestation from the scan point that received them (migration 0006). */
             credential_grants_unconfirmed: number;
             /** @description Observations still pending — never attested complete by a terminal ack — older than one hour, within the last 7 days (ADR-026 keeps them; this makes the count visible). */
             ingest_backlog: number;
             /** @description active when any kill is unresolved; inactive otherwise. The control is always armed; this is whether it is pressed. */
             kill_switch_state: string;
+            /** @description Items in the identity resolution queue awaiting an operator (ADR-007/094): one per (observation, key) parked because the evidence at an address contradicts what the asset holds — several per host per scan. No operator verb exists yet (B39); an item leaves only when a later scan classifies the contradiction as a key rotation (ADR-096). See contested_addresses for the host count. */
+            resolution_queue_pending: number;
             /** @description Always 2 (Core at planning, the scan point on the send path — ADR-024). A property of the design asserted by the safety gate, reported so the surface says what is measured and what is not. */
             scope_enforcement_sites: number;
             /** @description Accepted observations in the last 7 days that correlation has not attached to an asset yet. */

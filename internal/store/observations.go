@@ -269,7 +269,7 @@ func (Observations) ListUnresolved(ctx context.Context, c *Conn, since, until ti
 		         SELECT 1 FROM asset_resolution_queue q
 		          WHERE q.tenant_id = observations.tenant_id
 		            AND q.observation_id = observations.observation_id
-		            AND q.state = 'pending')
+		            AND q.state IN ('pending', 'expired', 'discarded'))
 		   ORDER BY observed_at
 		   LIMIT $4`
 

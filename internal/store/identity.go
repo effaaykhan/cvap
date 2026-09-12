@@ -30,7 +30,7 @@ func (AssetAddresses) LiveHolder(ctx context.Context, c *Conn, ip string) (uuid.
 	const q = `
 		SELECT asset_id, valid_from
 		  FROM asset_addresses
-		 WHERE tenant_id = $1 AND ip_address = $2::inet AND valid_to IS NULL`
+		 WHERE tenant_id = $1 AND ip_address = host($2::inet)::inet AND valid_to IS NULL`
 
 	var (
 		id   uuid.UUID
@@ -44,6 +44,12 @@ func (AssetAddresses) LiveHolder(ctx context.Context, c *Conn, ip string) (uuid.
 }
 
 // Open starts an interval, closing any other asset's hold on the address first.
+//
+// The address is stored as a bare host (`host(x)::inet`): inet equality
+// includes the mask, so `10.44.3.10/24` and `10.44.3.10` were two live rows
+// under migration 0031's unique index, on two assets, and every by-address
+// read keyed on the spelling (measured). Correlation canonicalises before it
+// gets here; the write normalises again so no other caller can reintroduce it.
 //
 // ============================================================================
 // The close and the open are ONE statement pair in ONE transaction, because a
@@ -62,7 +68,7 @@ func (AssetAddresses) Open(ctx context.Context, c *Conn, assetID uuid.UUID, ip s
 	const closeOthers = `
 		UPDATE asset_addresses
 		   SET valid_to = $4
-		 WHERE tenant_id = $1 AND ip_address = $2::inet AND valid_to IS NULL
+		 WHERE tenant_id = $1 AND ip_address = host($2::inet)::inet AND valid_to IS NULL
 		   AND asset_id <> $3`
 	if _, err := c.Exec(ctx, closeOthers, c.Tenant().UUID(), ip, assetID, at); err != nil {
 		return mapError(err)
@@ -70,10 +76,10 @@ func (AssetAddresses) Open(ctx context.Context, c *Conn, assetID uuid.UUID, ip s
 
 	const open = `
 		INSERT INTO asset_addresses (tenant_id, asset_id, ip_address, valid_from)
-		SELECT $1, $2, $3::inet, $4
+		SELECT $1, $2, host($3::inet)::inet, $4
 		 WHERE NOT EXISTS (
 		     SELECT 1 FROM asset_addresses
-		      WHERE tenant_id = $1 AND asset_id = $2 AND ip_address = $3::inet
+		      WHERE tenant_id = $1 AND asset_id = $2 AND ip_address = host($3::inet)::inet
 		        AND valid_to IS NULL)`
 	if _, err := c.Exec(ctx, open, c.Tenant().UUID(), assetID, ip, at); err != nil {
 		return mapError(err)
@@ -87,7 +93,7 @@ func (AssetAddresses) TouchLive(ctx context.Context, c *Conn, assetID uuid.UUID,
 	const q = `
 		UPDATE asset_addresses
 		   SET valid_from = $4
-		 WHERE tenant_id = $1 AND asset_id = $2 AND ip_address = $3::inet
+		 WHERE tenant_id = $1 AND asset_id = $2 AND ip_address = host($3::inet)::inet
 		   AND valid_to IS NULL AND valid_from < $4`
 	_, err := c.Exec(ctx, q, c.Tenant().UUID(), assetID, ip, at)
 	return mapError(err)
@@ -112,11 +118,30 @@ func (AssetAddresses) TouchLive(ctx context.Context, c *Conn, assetID uuid.UUID,
 //
 // Closing is an UPDATE. The row stays, because the history is what makes an old
 // finding's locator meaningful.
+//
+// A CONTESTED address does not age out (ADR-096): a park touches no address
+// interval, so the occupant's hold on an address where a contradiction is
+// pending would lapse after the window, and the next sighting of the
+// contradicting host — no candidate by key, none by address — would become a
+// NEW asset there, with a key the trust root does not exclude. The review
+// measured exactly that: seven days of holding tcp/22 was cheaper than passing
+// the classification. While an item PARKED INSIDE THE WINDOW names the holder,
+// the address stays held and every later sighting there is judged against it.
+// Bounded by the same window as everything else here: an unbounded hold was
+// measured keeping a dead occupant's address for ever — a genuine newcomer
+// never inventoried, and a third host attaching to the dead asset on the
+// address alone. A stale park ages out like any other silence.
 func (AssetAddresses) CloseStale(ctx context.Context, c *Conn, before, at time.Time) (int64, error) {
 	const q = `
-		UPDATE asset_addresses
+		UPDATE asset_addresses a
 		   SET valid_to = $3
-		 WHERE tenant_id = $1 AND valid_to IS NULL AND valid_from < $2`
+		 WHERE a.tenant_id = $1 AND a.valid_to IS NULL AND a.valid_from < $2
+		   AND NOT EXISTS (
+		       SELECT 1 FROM asset_resolution_queue q
+		        WHERE q.tenant_id = a.tenant_id AND q.state = 'pending'
+		          AND q.address = a.ip_address
+		          AND a.asset_id = ANY (q.candidate_asset_ids)
+		          AND q.enqueued_at >= $2)`
 	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), before, at)
 	if err != nil {
 		return 0, mapError(err)
@@ -166,6 +191,19 @@ func (AssetIdentityKeys) LiveByValue(ctx context.Context, c *Conn, t domain.Iden
 // fleets too large to pin. Keys from before ADR-094 have no sightings and are
 // trusted nowhere until seen twice.
 //
+// A key recorded by a ROTATION or a LAPSE (ADR-096) is excluded whatever its
+// sightings — a lapse is the same contest one window later, and recording it
+// as trust was measured buying the root with one window of holding tcp/22
+// against a live host. A rotation is excluded
+// the classification sees banners only, and a takeover of the SSH port alone at
+// the address across two scans is indistinguishable from a real rotation — the
+// security review measured the attacker's key becoming this trust root three
+// scans after taking port 22 while the host kept answering everything else. A
+// contradiction is the signal the trust root exists to catch, so it is never
+// re-rooted by the thing that observed the contradiction; the operator pins the
+// new key (ADR-091 §4) or confirms the rotation (B39), and until then the
+// credentialed job at that host refuses. Inventory moves; trust does not.
+//
 // Scoped to the SERVICE the key was observed on: the engine dials one port, and
 // a key from a second sshd on 2222 says nothing about the daemon on 22 — nor is
 // a key on 2222 a "contradiction" of the one on 22 for domain.Resolve, so the
@@ -195,8 +233,9 @@ func (AssetIdentityKeys) SSHHostKeyFingerprintsAt(ctx context.Context, c *Conn, 
 		    ON k.tenant_id = a.tenant_id AND k.asset_id = a.asset_id
 		  JOIN asset_identity_key_sightings s
 		    ON s.tenant_id = k.tenant_id AND s.identity_key_id = k.identity_key_id
-		 WHERE a.tenant_id = $1 AND a.ip_address = $2::inet AND a.valid_to IS NULL
+		 WHERE a.tenant_id = $1 AND a.ip_address = host($2::inet)::inet AND a.valid_to IS NULL
 		   AND k.key_type = 'ssh_hostkey'::identity_key_type AND k.valid_to IS NULL
+		   AND k.provenance NOT IN ('rotation', 'lapsed')
 		   AND s.address = $2::inet AND s.port = $3 AND s.scans_seen >= 2
 		   AND s.last_seen_at >= $4`
 
@@ -234,7 +273,7 @@ func (AssetIdentityKeys) ForAsset(ctx context.Context, c *Conn, assetID uuid.UUI
 		SELECT key_type, key_value,
 		       CASE WHEN merge_evidence_payload ? 'port'
 		            THEN (merge_evidence_payload ->> 'port') || '/' ||
-		                 coalesce(merge_evidence_payload ->> 'protocol', 'tcp')
+		                 coalesce(nullif(merge_evidence_payload ->> 'protocol', ''), 'tcp')
 		            ELSE '' END
 		  FROM asset_identity_keys
 		 WHERE tenant_id = $1 AND asset_id = $2 AND valid_to IS NULL`
@@ -272,6 +311,13 @@ const (
 	KeyFromMerge    KeyProvenance = "merge"
 	KeyFromNewAsset KeyProvenance = "new_asset"
 	KeyFromAttach   KeyProvenance = "attach"
+	// KeyFromRotation: recorded by an attach that classified a same-service
+	// SSH host-key contradiction as a key rotation (ADR-096, migration 0045).
+	KeyFromRotation KeyProvenance = "rotation"
+	// KeyFromLapsed: recorded by a new asset that displaced an address holder
+	// whose key had been silent for a full window under a fresh contest
+	// (ADR-096). Excluded from the trust root like a rotation.
+	KeyFromLapsed KeyProvenance = "lapsed"
 )
 
 // Record writes a key with its merge evidence.
@@ -341,7 +387,7 @@ func (AssetIdentityKeys) Record(ctx context.Context, c *Conn, assetID uuid.UUID,
 	const sight = `
 		INSERT INTO asset_identity_key_sightings
 		    (tenant_id, identity_key_id, address, port, scans_seen, last_seen_scan, last_seen_at)
-		SELECT $1, k.identity_key_id, $5::inet, $8, 1, $3, $4
+		SELECT $1, k.identity_key_id, host($5::inet)::inet, $8, 1, $3, $4
 		  FROM asset_identity_keys k
 		 WHERE k.tenant_id = $1 AND k.asset_id = $2 AND k.key_type = $6::identity_key_type
 		   AND k.key_value = $7 AND k.valid_to IS NULL
@@ -371,6 +417,15 @@ func (AssetIdentityKeys) Record(ctx context.Context, c *Conn, assetID uuid.UUID,
 // cannot corroborate a contradiction (ADR-094): an attach can write what the
 // asset holds, so an attacker who planted a key one scan earlier would
 // otherwise corroborate their own certificate with it the next.
+//
+// A key recorded by a ROTATION or a LAPSE never establishes, however many
+// scans see it (ADR-096): the same bar the trust root sets, for the same
+// reason — the review measured a rotation key, withheld from the trust root,
+// reaching two sightings on a scan where the attacker withheld 443 and then
+// corroborating its own certificate against the victim's, which handed the
+// attacker two moderate keys of trusting provenance on the victim's asset and
+// a merge at any address it controlled. Until an operator confirms, such a
+// key corroborates nothing.
 func (AssetIdentityKeys) EstablishedAt(ctx context.Context, c *Conn, assetID uuid.UUID, k domain.IdentityKey, address string, port int, within time.Duration) (bool, error) {
 	const q = `
 		SELECT EXISTS (
@@ -379,7 +434,8 @@ func (AssetIdentityKeys) EstablishedAt(ctx context.Context, c *Conn, assetID uui
 		        ON s.tenant_id = k.tenant_id AND s.identity_key_id = k.identity_key_id
 		     WHERE k.tenant_id = $1 AND k.asset_id = $2 AND k.key_type = $3::identity_key_type
 		       AND k.key_value = $4 AND k.valid_to IS NULL
-		       AND s.address = $5::inet AND s.port = $6 AND s.scans_seen >= 2
+		       AND k.provenance NOT IN ('rotation', 'lapsed')
+		       AND s.address = host($5::inet)::inet AND s.port = $6 AND s.scans_seen >= 2
 		       AND s.last_seen_at >= $7)`
 	var ok bool
 	if err := c.QueryRow(ctx, q, c.Tenant().UUID(), assetID, string(k.Type), k.Value, address, port,
@@ -387,6 +443,29 @@ func (AssetIdentityKeys) EstablishedAt(ctx context.Context, c *Conn, assetID uui
 		return false, mapError(err)
 	}
 	return ok, nil
+}
+
+// LastSeenAt is ADR-096's second continuity fact: when the live key of one
+// type the asset holds from one service was last sighted at an address. found
+// is false when the asset holds no such key or it was never sighted there.
+func (AssetIdentityKeys) LastSeenAt(ctx context.Context, c *Conn, assetID uuid.UUID, t domain.IdentityKeyType, port int, address string) (at time.Time, found bool, err error) {
+	const q = `
+		SELECT max(s.last_seen_at)
+		  FROM asset_identity_keys k
+		  JOIN asset_identity_key_sightings s
+		    ON s.tenant_id = k.tenant_id AND s.identity_key_id = k.identity_key_id
+		 WHERE k.tenant_id = $1 AND k.asset_id = $2 AND k.key_type = $3::identity_key_type
+		   AND k.valid_to IS NULL
+		   AND k.merge_evidence_payload -> 'port' = to_jsonb($4::int)
+		   AND s.address = $5::inet AND s.port = $4`
+	var last *time.Time
+	if err := c.QueryRow(ctx, q, c.Tenant().UUID(), assetID, string(t), port, address).Scan(&last); err != nil {
+		return time.Time{}, false, mapError(err)
+	}
+	if last == nil {
+		return time.Time{}, false, nil
+	}
+	return *last, true, nil
 }
 
 // Retire closes the live key of one type the asset holds from one service
@@ -417,15 +496,19 @@ type ResolutionQueue struct{}
 // referenced: a queue item must stay adjudicable after the observation that
 // raised it has aged out, or the queue silently empties itself of anything older
 // than 90 days.
-func (ResolutionQueue) Enqueue(ctx context.Context, c *Conn, v domain.Verdict, k domain.IdentityKey, at time.Time) error {
+//
+// Returns whether an item was written: a repeat of the same (observation, key)
+// is a no-op, and the caller raises the operator-facing signal only for the
+// first (ADR-096 — a park that nothing announces is a disappearance).
+func (ResolutionQueue) Enqueue(ctx context.Context, c *Conn, v domain.Verdict, k domain.IdentityKey, address string, at time.Time) (bool, error) {
 	// One pending item per (observation, key): migration 0013 built
 	// asset_resolution_queue_by_key_idx for exactly this check and the check
 	// was never written, so one flapping key became a queue entry per sweep.
 	const q = `
 		INSERT INTO asset_resolution_queue
 		    (tenant_id, observation_id, observed_payload, key_type, key_value,
-		     candidate_asset_ids, conflict_reason, enqueued_at)
-		SELECT $1, $2, $3, $4::identity_key_type, $5, $6, $7, $8
+		     candidate_asset_ids, conflict_reason, enqueued_at, address)
+		SELECT $1, $2, $3, $4::identity_key_type, $5, $6, $7, $8, host($9::inet)::inet
 		 WHERE NOT EXISTS (
 		     SELECT 1 FROM asset_resolution_queue q
 		      WHERE q.tenant_id = $1 AND q.observation_id IS NOT DISTINCT FROM $2::uuid
@@ -442,10 +525,20 @@ func (ResolutionQueue) Enqueue(ctx context.Context, c *Conn, v domain.Verdict, k
 	if k.ObservationID != uuid.Nil {
 		obsID = k.ObservationID
 	}
+	// An item may name NO candidate (two hosts answering on one port at an
+	// address nothing holds, ADR-096): the column is NOT NULL, the array is
+	// empty, and the item reads "unplaceable" rather than "choose one".
+	cands := v.Candidates
+	if cands == nil {
+		cands = []uuid.UUID{}
+	}
 
-	_, err := c.Exec(ctx, q, c.Tenant().UUID(), obsID, payload,
-		string(k.Type), k.Value, v.Candidates, v.Reason, at)
-	return mapError(err)
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), obsID, payload,
+		string(k.Type), k.Value, cands, v.Reason, at, address)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // PendingCount is what a health surface reports: a queue nobody works is a queue
@@ -456,4 +549,237 @@ func (ResolutionQueue) PendingCount(ctx context.Context, c *Conn) (int64, error)
 	var n int64
 	err := c.QueryRow(ctx, q, c.Tenant().UUID()).Scan(&n)
 	return n, mapError(err)
+}
+
+// A queue item's address is the normalised `address inet` column (migration
+// 0045), written once by Enqueue and backfilled for older rows from the copied
+// payload or the ip_window key value. Every by-address read compares inet to
+// inet: the first draft compared the payload's TEXT to host(inet), and the
+// review measured a non-canonical spelling ageing the occupant out of its
+// address and handing the trust root to the newcomer. A row whose address
+// could not be parsed at backfill is NULL and counts for nothing.
+
+// PendingAddresses counts the ADDRESSES with a pending item — the number an
+// operator acts on (one contested host, however many observations it parked).
+// The DISTINCT runs in a subquery over the extracted text, not as
+// count(DISTINCT expr) over the row: the latter sorts every pending row with
+// its jsonb payload (measured: 296 ms and 115 MB of disk sort at 100k items,
+// on a route any scan.read caller can hit), the former 79 ms and 2 MB.
+func (ResolutionQueue) PendingAddresses(ctx context.Context, c *Conn) (int64, error) {
+	const q = `SELECT count(*) FROM (
+	              SELECT DISTINCT address
+	                FROM asset_resolution_queue
+	               WHERE tenant_id = $1 AND state = 'pending') x
+	            WHERE x.address IS NOT NULL`
+	var n int64
+	err := c.QueryRow(ctx, q, c.Tenant().UUID()).Scan(&n)
+	return n, mapError(err)
+}
+
+// PendingAtAddress reports whether an item is pending at the address naming
+// the asset among its candidates (ADR-096): a weak-only sighting there then
+// waits with the contradiction instead of attaching.
+func (ResolutionQueue) PendingAtAddress(ctx context.Context, c *Conn, address string, assetID uuid.UUID) (bool, error) {
+	const q = `SELECT EXISTS (
+	              SELECT 1 FROM asset_resolution_queue
+	               WHERE tenant_id = $1 AND state = 'pending'
+	                 AND address = host($2::inet)::inet
+	                 AND $3 = ANY (candidate_asset_ids))`
+	var ok bool
+	err := c.QueryRow(ctx, q, c.Tenant().UUID(), address, assetID).Scan(&ok)
+	return ok, mapError(err)
+}
+
+// ContradictionLastSeen is when a CONTRADICTING key was last parked at the
+// address naming the asset (ADR-096): a key of a type the asset holds live
+// FROM THE SAME PORT with a different value — domain.Resolve's definition of
+// a conflict at the held address, which carves CERTIFICATES out (a renewal is
+// the same host, ADR-094) and this read carves them out too: a renewed
+// certificate parked with a contested group would otherwise be "a different
+// value on the same port" on every scan and keep the contest fresh for ever
+// (measured, six weeks). Named by exclusion, not `= 'ssh_hostkey'`, so a
+// strong key type this build cannot yet observe still counts. And a key the
+// asset ITSELF holds live is never a contradiction, whatever else it holds:
+// migration 0045's one-live-key-per-port index makes that state unreachable,
+// and the predicate says so anyway (measured: an asset holding two keys on
+// one port kept its own park fresh with its own key for ever). Zero, found=false, when no such item is pending. A key the
+// asset merely has not recorded (TLS the occupant enabled after the park, a
+// second sshd) contradicts nothing and must not keep the contest fresh; the
+// review measured the first draft's "not held" predicate freezing an
+// occupant on its own evidence for six weeks. The domain decides from this
+// whether the contest is still fresh: a contradiction nobody has re-presented
+// for a full window has gone stale, and a park with no expiry would freeze
+// the host for ever on one drive-by packet.
+func (ResolutionQueue) ContradictionLastSeen(ctx context.Context, c *Conn, address string, assetID uuid.UUID) (time.Time, bool, error) {
+	const q = `
+		SELECT max(q.enqueued_at) FROM asset_resolution_queue q
+		 WHERE q.tenant_id = $1 AND q.state = 'pending'
+		   AND q.address = host($2::inet)::inet
+		   AND $3 = ANY (q.candidate_asset_ids)
+		   AND q.key_type NOT IN ('ip_window', 'service_cert_fp')
+		   AND EXISTS (SELECT 1 FROM asset_identity_keys k
+		                WHERE k.tenant_id = q.tenant_id AND k.asset_id = $3 AND k.valid_to IS NULL
+		                  AND k.key_type = q.key_type AND k.key_value <> q.key_value
+		                  AND k.merge_evidence_payload -> 'port' = q.observed_payload -> 'port')
+		   AND NOT EXISTS (SELECT 1 FROM asset_identity_keys k2
+		                    WHERE k2.tenant_id = q.tenant_id AND k2.asset_id = $3 AND k2.valid_to IS NULL
+		                      AND k2.key_type = q.key_type AND k2.key_value = q.key_value)`
+	var last *time.Time
+	if err := c.QueryRow(ctx, q, c.Tenant().UUID(), address, assetID).Scan(&last); err != nil {
+		return time.Time{}, false, mapError(err)
+	}
+	if last == nil {
+		return time.Time{}, false, nil
+	}
+	return *last, true, nil
+}
+
+// CloseExpired closes every pending item at the address naming the asset as
+// `expired`: the domain judged the contest stale and the sighting attached
+// (ADR-096). The parked observations do NOT re-enter the sweep — ListUnresolved
+// excludes expired items — because released, the same contradicting
+// observation re-parked itself with a fresh timestamp and renewed the freeze
+// for ever (measured). What the freeze withheld is gone; what the host still
+// answers is re-derived by the sighting that attached. Returns how many.
+func (ResolutionQueue) CloseExpired(ctx context.Context, c *Conn, address string, assetID uuid.UUID, at time.Time) (int64, error) {
+	const q = `
+		UPDATE asset_resolution_queue
+		   SET state = 'expired', resolved_at = $4
+		 WHERE tenant_id = $1 AND state = 'pending'
+		   AND address = host($2::inet)::inet
+		   AND $3 = ANY (candidate_asset_ids)`
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), address, assetID, at)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// ExpireUnplaceable closes, as `expired`, pending items parked before
+// `before` that no transition can reach any more (ADR-096): items naming NO
+// candidate (two hosts answered on one port at an address nothing held —
+// nobody was ever going to be chosen), and items none of whose candidates
+// still holds the address live (the occupant aged out and another host took
+// the address; CloseExpired and CloseRotated are keyed on the named asset
+// attaching THERE, which it never will). Both were measured pending for
+// sixty days with the Health chip amber and nothing an operator could do.
+// Nothing is lost — the observations were never placeable. Returns how many.
+// Returns the distinct addresses whose items closed, so the caller can
+// announce them: a close-out nothing records is a refusal that vanished.
+func (ResolutionQueue) ExpireUnplaceable(ctx context.Context, c *Conn, before, at time.Time) ([]string, error) {
+	const q = `
+		UPDATE asset_resolution_queue q
+		   SET state = 'expired', resolved_at = $3
+		 WHERE q.tenant_id = $1 AND q.state = 'pending'
+		   AND q.enqueued_at < $2
+		   AND (cardinality(q.candidate_asset_ids) = 0
+		        OR NOT EXISTS (SELECT 1 FROM asset_addresses a
+		                        WHERE a.tenant_id = q.tenant_id AND a.valid_to IS NULL
+		                          AND a.ip_address = q.address
+		                          AND a.asset_id = ANY (q.candidate_asset_ids)))
+		 RETURNING host(q.address)`
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), before, at)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	var out []string
+	for rows.Next() {
+		var a *string
+		if err := rows.Scan(&a); err != nil {
+			return nil, mapError(err)
+		}
+		if a == nil || seen[*a] {
+			continue
+		}
+		seen[*a] = true
+		out = append(out, *a)
+	}
+	return out, mapError(rows.Err())
+}
+
+// KeyScansPending is ADR-096's key history from the queue: the DISTINCT scans
+// on which a key was seen at an address and parked, and the earliest and
+// latest of those sightings. It serves BOTH sides of the comparison — the
+// newcomer's scans and the held key's last answer — because a scan that parks
+// writes no sighting row, and a held key that answered during a parked scan
+// is exactly what the comparison must see (the review measured it missed). The occasion is the observation's scan, read through the task —
+// the same occasion a recorded key's sighting counts (ADR-094) — so the
+// observations must still exist: bounded by `since`, the address window,
+// inside which they do. An item whose observation has aged out counts for
+// nothing, which is the conservative direction.
+func (ResolutionQueue) KeyScansPending(ctx context.Context, c *Conn, t domain.IdentityKeyType, value, address string, since time.Time) (scans []uuid.UUID, first, last time.Time, err error) {
+	const q = `
+		SELECT DISTINCT j.scan_id, min(o.observed_at) OVER (), max(o.observed_at) OVER ()
+		  FROM asset_resolution_queue q
+		  JOIN observations o ON o.tenant_id = q.tenant_id AND o.observation_id = q.observation_id
+		  JOIN scan_tasks t ON t.tenant_id = o.tenant_id AND t.task_id = o.task_id
+		  JOIN scan_jobs j ON j.tenant_id = t.tenant_id AND j.job_id = t.job_id
+		 WHERE q.tenant_id = $1 AND q.state = 'pending'
+		   AND q.key_type = $2::identity_key_type AND q.key_value = $3
+		   AND q.address = host($4::inet)::inet
+		   AND q.enqueued_at >= $5 AND o.observed_at >= $5`
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), string(t), value, address, since)
+	if err != nil {
+		return nil, time.Time{}, time.Time{}, mapError(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id, &first, &last); err != nil {
+			return nil, time.Time{}, time.Time{}, mapError(err)
+		}
+		scans = append(scans, id)
+	}
+	return scans, first, last, mapError(rows.Err())
+}
+
+// CloseRotated closes, as `rotated`, the pending items at an address that
+// name the asset AND that the rotation examined: items carrying a key the
+// asset now holds live (the classified key, just recorded; a key that agreed
+// all along — a park enqueues every key in the group), items carrying a
+// certificate the verdict forgave as a renewal (left to the establishment
+// gate, not recorded here), and the address-only items whose park (same
+// address, same enqueue instant — one park is one transaction) carried no
+// keyed item left unexamined: the siblings of the classified keys, and the
+// keyless stragglers parked on the address alone because the contest was
+// fresh. An item parked for a DIFFERENT contradiction stays pending, and so
+// do the keyless siblings parked with it: the classification never examined
+// it, and closing it would let the queue assert a decision nobody made (the
+// review measured six closed for two classified). An item that nothing could
+// ever close would keep the address contested forever (measured too).
+// resolved_by stays NULL: no operator chose. The parked observations then
+// re-enter the sweep and attach on the next pass. Returns how many closed.
+func (ResolutionQueue) CloseRotated(ctx context.Context, c *Conn, address string, assetID uuid.UUID, examined []domain.IdentityKey, at time.Time) (int64, error) {
+	keys := make([]string, 0, len(examined))
+	for _, k := range examined {
+		keys = append(keys, string(k.Type)+":"+k.Value)
+	}
+	const q = `
+		UPDATE asset_resolution_queue q
+		   SET state = 'rotated', resolved_asset_id = $3, resolved_at = $4
+		 WHERE q.tenant_id = $1 AND q.state = 'pending'
+		   AND q.address = host($2::inet)::inet
+		   AND $3 = ANY (q.candidate_asset_ids)
+		   AND (q.key_type::text || ':' || q.key_value = ANY ($5::text[])
+		        OR EXISTS (SELECT 1 FROM asset_identity_keys k
+		                    WHERE k.tenant_id = q.tenant_id AND k.asset_id = $3
+		                      AND k.key_type = q.key_type AND k.key_value = q.key_value
+		                      AND k.valid_to IS NULL)
+		        OR (q.key_type = 'ip_window' AND NOT EXISTS (
+		                SELECT 1 FROM asset_resolution_queue x
+		                 WHERE x.tenant_id = q.tenant_id AND x.state = 'pending'
+		                   AND x.address = q.address AND x.enqueued_at = q.enqueued_at
+		                   AND x.key_type <> 'ip_window'
+		                   AND NOT (x.key_type::text || ':' || x.key_value = ANY ($5::text[]))
+		                   AND NOT EXISTS (SELECT 1 FROM asset_identity_keys k
+		                                    WHERE k.tenant_id = x.tenant_id AND k.asset_id = $3
+		                                      AND k.key_type = x.key_type AND k.key_value = x.key_value
+		                                      AND k.valid_to IS NULL))))`
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), address, assetID, at, keys)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return tag.RowsAffected(), nil
 }

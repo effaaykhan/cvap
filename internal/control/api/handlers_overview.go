@@ -100,6 +100,8 @@ type HealthResponse struct {
 
 	IngestBacklog          int64 `json:"ingest_backlog" doc:"Observations still pending — never attested complete by a terminal ack — older than one hour, within the last 7 days (ADR-026 keeps them; this makes the count visible)."`
 	UnresolvedObservations int64 `json:"unresolved_observations" doc:"Accepted observations in the last 7 days that correlation has not attached to an asset yet."`
+	ResolutionQueuePending int64 `json:"resolution_queue_pending" doc:"Items in the identity resolution queue awaiting an operator (ADR-007/094): one per (observation, key) parked because the evidence at an address contradicts what the asset holds — several per host per scan. No operator verb exists yet (B39); an item leaves only when a later scan classifies the contradiction as a key rotation (ADR-096). See contested_addresses for the host count."`
+	ContestedAddresses     int64 `json:"contested_addresses" doc:"Distinct addresses with a pending resolution item — the number of hosts an operator would act on; each is a host whose inventory has stopped moving."`
 
 	KillSwitchState string               `json:"kill_switch_state" doc:"active when any kill is unresolved; inactive otherwise. The control is always armed; this is whether it is pressed."`
 	ActiveKills     []ActiveKillResponse `json:"active_kills"`
@@ -229,6 +231,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if out.UnresolvedObservations, err = (store.Observations{}).CountUnresolved(ctx, c, now.Add(-healthLookback), now); err != nil {
+			return err
+		}
+		if out.ResolutionQueuePending, err = (store.ResolutionQueue{}).PendingCount(ctx, c); err != nil {
+			return err
+		}
+		if out.ContestedAddresses, err = (store.ResolutionQueue{}).PendingAddresses(ctx, c); err != nil {
 			return err
 		}
 

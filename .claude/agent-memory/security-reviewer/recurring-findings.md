@@ -1,6 +1,6 @@
 ---
 name: recurring-findings
-description: Recurring security defect classes found in CVAP reviews (57 classes), and the repo-specific constraints that shape acceptable fixes
+description: Recurring security defect classes found in CVAP reviews (91 classes), and the repo-specific constraints that shape acceptable fixes
 metadata:
   type: project
 ---
@@ -1110,3 +1110,645 @@ escape.
 track escape state), never on `bytes.Contains` over the raw payload. And any refusal that
 discards a whole submission needs the blast radius named: one host must not be able to void a
 32-host job.
+
+**61. A quarantine scoped to the SWEEP BATCH, not to the thing it protects.** ADR-094 parks a
+contested host group: `correlate.resolveHost`'s queue branch enqueues an item per observation in
+`h.obs`, and `Observations.ListUnresolved` then excludes observations that HAVE a pending item.
+The park therefore covers exactly the observations that happened to be in that sweep's 500-row
+batch (`correlate.Batch`). Any observation of the SAME scan at the SAME address that arrives in a
+later sweep re-groups alone, carries only `ip_window`, finds the address holder, and ATTACHES —
+writing the newcomer's services onto the previous occupant's asset, which is the back door the
+branch's own comment says the whole-group park closes. Measured 2026-09-12: one host answering on
+521 ports at a held address with a contradicting host key on 22 parked 500 observations and
+raised one `identity.contested` event, then the next sweep attached the remaining 21 and wrote 21
+service rows onto the occupant's asset. Fully target-controlled: a group larger than `Batch`
+cannot fit in one sweep, so the overflow always attaches.
+**Why:** the exclusion that makes the re-sweep a no-op (and the new audit event fire once) is
+per-observation; the property being protected is per-ADDRESS. Any filter that parks "the rows I
+just saw" leaks the rows I did not.
+**How to apply:** when a guard parks a SET, ask what identifies the set (address, asset, job) and
+whether the park is expressed in those terms or in terms of the rows in hand. Probe by delivering
+one member of the set a sweep/batch later than the rest — the batch limit makes that free.
+
+**62. A health aggregate that filters out the rows it cannot interpret, with the UI chip keyed
+off the filtered count.** `ResolutionQueue.PendingAddresses` counts
+`DISTINCT observed_payload ->> 'address'` under `WHERE ... observed_payload ? 'address'`, and
+`Health.tsx` colours the row green when that count is 0 while printing the unfiltered item count
+beside it. `Enqueue` writes `{}` when a key carries no payload, so those items vanish from the
+address count: 141 of 348 pending rows in the dev database (40%, all written the previous day by
+the pre-ADR-094 code path, `observation_id IS NULL`) are exactly that shape. A tenant whose
+pending items are all of that vintage reads "0 hosts · N items" in the OK colour.
+**Why:** two numbers describing one queue, derived by different predicates, presented as one
+sentence — and the reassuring one is the one that can silently drop rows.
+**How to apply:** any `count(DISTINCT payload->>'x') ... WHERE payload ? 'x'` needs a third
+number for the rows the filter dropped, or a COALESCE to a column that is always present
+(`key_value` here). Also measure the cost: `count(DISTINCT expr)` sorts the WHOLE row (jsonb and
+all) — 100k items took 296 ms and spilled 115 MB of temp per call, versus 79 ms / 2 MB for
+`SELECT count(*) FROM (SELECT DISTINCT expr ...)`, on a table an attacker can grow and an
+authenticated endpoint reads.
+
+**63. A "did the rightful holder answer" fact read from a table only the SUCCESS path writes.**
+ADR-096's rotation refuses when the held SSH key "has answered at the address since the newcomer's
+first sighting", and measures it with `AssetIdentityKeys.LastSeenAt` over
+`asset_identity_key_sightings`. That table is written only by `Record`, which runs only on an
+attach/merge — so every scan that PARKS (and a park is exactly what a contested address does),
+and every attach that takes the `uncorroborated` branch, leaves no trace there at all. Measured
+2026-09-12: victim answers port 22 with its own key on the scan between the newcomer's two
+sightings, the group parks because the attacker contradicted a second port, and the next scan
+classifies a rotation with `held key seen since=false` — the victim's key retired, and the
+attacker's key the trust root one scan later. The same blindness covers THIS scan: the held key
+present in `observed` on the very scan being resolved does not stop the classification either
+(`rotation()` never looks at `agreeing`).
+**Why:** the evidence for "they were here" lives in the queue items (key value + observation +
+observed_at) and in the observations themselves; the sightings table is a record of DECISIONS, not
+of sightings, and the two diverge precisely when the decision was "do not decide".
+**How to apply:** when a rule says "X was not seen", find the write path of the table that would
+have recorded X and ask which branches skip it. If any branch that skips it is reachable by the
+same attacker, the fact is a free lunch. Read both sides of a comparison from the SAME source —
+here `KeyScansPending` already reads the queue for the newcomer; the held key needed the same
+query, not a different table.
+
+**64. Continuity/corroboration facts satisfied by the VICTIM's own concurrent answers.**
+ADR-096 attaches a contradicting SSH host key as a "rotation" when the service surface and OS hint
+are continuous — facts measured over the whole address GROUP, which contains the legitimate host's
+observations as well as the attacker's. Measured 2026-09-12: an attacker who holds ONLY tcp/22 at
+an address (victim still answering 443 with its own certificate and product) gets
+`services continuous=true` from the victim's own banner, supplies `OS agrees=true` from its own
+port-22 banner, and re-roots the ADR-091 trust material to its key in three scans. The ADR's risk
+section prices the attack as "holds the address while the occupant is SILENT, answers on every
+port, reproduces the OS hint" — none of which was needed.
+**Why:** an aggregate computed over a set that mixes trusted and untrusted members is evidence
+about the set, not about the member under scrutiny.
+**How to apply:** for any "the rest of the host still looks the same" test, ask which observations
+in the set the attacker had to produce. If the corroborating ones are the victim's, the test
+measures the victim's liveness, not the attacker's cost — and a live victim makes it EASIER, which
+inverts the intent. Cross-check the ADR's stated attack cost by building the cheapest attacker that
+still passes, not the one the ADR describes.
+
+**65. A write that silently does nothing on conflict, after an irreversible write that assumed it
+would succeed.** `AssetIdentityKeys.Record` is `ON CONFLICT (tenant_id, key_type, key_value) WHERE
+valid_to IS NULL DO NOTHING` and returns nil either way. ADR-096's rotation calls `Retire` (closes
+the held key) and then `Record` (the newcomer). When the newcomer's value is already live on
+ANOTHER asset — the attacker enrolled it on their own host first, or a cloned VM template shares a
+host key — Retire succeeds, Record no-ops, and the asset ends holding NO SSH key, while the
+`identity.rotated` audit event lists the key under `"recorded"`. Measured 2026-09-12; the trust
+root then reads empty and `dispatch.trustMaterial` refuses the credentialed job (fail-closed), so
+the cost is a durable denial plus an audit record that states the opposite of what happened.
+**Why:** `DO NOTHING` turns a uniqueness violation into a silent no-op, and a two-statement
+"replace" has no transaction-level guarantee that the second half happened.
+**How to apply:** any `DO NOTHING` upsert that a caller treats as "the row now exists" must return
+`RowsAffected`; a caller that already destroyed the old value must abort (and let the queue keep
+the refusal) when it gets 0. Assert on the row, not on the returned error.
+
+**66. A close-out verb scoped to the ADDRESS when the classification was scoped to one KEY.**
+`ResolutionQueue.CloseRotated` closes every pending item at the address naming the asset as
+`state='rotated', resolved_asset_id=<asset>`. A rotation classified for one key on one port
+therefore closes items parked for contradictions it never examined. Measured 2026-09-12: six items
+closed, of which two were the classified newcomer's — the rest included the VICTIM's own key items
+and a second-port contradiction. The observations re-enter the sweep and re-park (nothing is lost),
+but the queue's history now asserts a classification that was never made, and the re-park raises a
+fresh `identity.contested` for an operator who already saw one.
+**Why:** the release has to be at least as wide as the park (the park is per-address) but the
+DECISION was per-key; using the park's scope for the decision's outcome relabels other people's
+refusals.
+**How to apply:** when a carve-out closes a queue, diff the set it closes against the set the
+decision actually covered, and give the remainder its own state (or leave it pending).
+
+**67. A trust exclusion keyed on the VERDICT LABEL, defeated by declining the verdict.** ADR-096's
+fix for #64 was `SSHHostKeyFingerprintsAt ... AND k.provenance <> 'rotation'` — a key recorded by a
+rotation is never credentialed trust material. Measured 2026-09-12: an attacker who deliberately
+FAILS the classification (change one product banner) keeps the group parked; a park touches no
+address, so after `AddressWindow` `AssetAddresses.CloseStale` closes the occupant's interval, the
+next sweep finds no candidate by key OR by address, `Resolve` returns `DecisionNewAsset`, and the
+attacker's key is recorded with provenance `new_asset` — which the exclusion does not cover. Two
+scans later it is the trust root at the victim's address. Worse, it is the INEVITABLE end state of
+any park that outlasts the window, not a corner case: `Services.ProductsSince(now-window)` returns
+nothing once the occupant's service rows stop being touched, so `servicesContinuous` can never pass
+again either. Cost: hold tcp/22 for 7 days plus two scans — cheaper than passing the test, so the
+control creates an incentive to fail it.
+**Why:** the label records WHICH BRANCH wrote the row, and an attacker chooses the branch. The fact
+that matters is a property of the evidence (this key was first seen while a contradiction was
+pending at this address), not of the verdict that happened to record it.
+**How to apply:** for any exclusion written as `provenance <> X` / `source <> X` / `reason <> X`,
+enumerate every other value the same attacker can steer the row to, and time-travel: run the
+scenario past every window the code owns (`AddressWindow`, `SightingWindow`, a partition drop) and
+re-measure. The two cheapest probes are "decline the classification and wait" and "let the park
+outlive the window".
+
+**68. A park whose escape hatch is corroboration, at an address where corroboration is public.**
+ADR-096 parks a weak-only sighting at a contested address (`c.PendingContested &&
+len(corroborated)==0`). Measured 2026-09-12: one AGREEING moderate key defeats it — the occupant's
+own TLS leaf fingerprint or SSH host-key fingerprint, both readable by anyone who can reach the
+host — and the newcomer's services were written onto the occupant's asset while the contradiction
+was still pending, bumping the echoed key's sighting count on the way through.
+**Why:** the park exists because identity at the address is an OPEN QUESTION; an echo of a public
+value is not an answer to it, and `agreeing` does not distinguish "the host answered" from "someone
+replayed what the host says".
+**How to apply:** a guard of the form `if <contested> && <nothing agrees>` is really `if
+<contested>` with an attacker-controlled escape. Either drop the escape or require the corroborator
+to be ESTABLISHED (two scans) *and* absent from the pending items at that address.
+*Fixed and re-measured 2026-09-12:* `Candidate.PendingContested` now parks EVERY sighting short of
+a merge, the occupant's own agreeing key included — the single-echo straggler parks and writes no
+service. What still walks through is a MERGE-grade echo (two agreeing moderate keys): measured, the
+newcomer's service row landed on the occupant's asset. That half is conceded as B40/B44 — but see
+#72: only the SSH half of the echo is actually free, because a TLS leaf fingerprint costs the
+victim's private key.
+
+**69. A down migration that rewrites a refusal marker to "the nearest older word".**
+`0045_rotation_states.down.sql` does `UPDATE asset_identity_keys SET provenance='attach' WHERE
+provenance='rotation'` so the enum can be rebuilt. Measured 2026-09-12 on a scratch round-trip: a
+down+up cycle leaves every rotation-recorded key reading `attach`, and the trust-root exclusion that
+was the entire control silently stops applying. The relabel is a true statement of lineage and a
+false statement of trust.
+**Why:** enum removal forces a value rewrite, and the natural choice is the semantically closest
+surviving label — which for a refusal marker is always the permissive one.
+**How to apply:** when a down migration rewrites rows carrying a value some query REFUSES on, the
+safe rewrite is the one that keeps refusing: close the row (`valid_to = now()`), delete it, or move
+it to a state nothing trusts. Round-trip the migration with rows present (scratch DB + `for f in
+migrations/*.up.sql`) and re-run the security query afterwards, not just the schema diff.
+*Fixed and re-measured 2026-09-12:* the down now `UPDATE ... SET valid_to = now()` before the
+relabel. Scratch round-trip with rows present: the key comes back `attach` AND retired, the trust
+predicate returns 0 rows before and after a fresh one-sighting re-record, so the key needs two new
+sightings to matter again. The queue-item half (`rotated` -> `merged`) still asserts an operator
+decision that never happened; `resolved_by` stays NULL, which is the only tell.
+
+
+**70. A guard that keeps the ROW alive without keeping the FACT alive — the fix one layer below
+the decision.**
+The fix for #67 was `AssetAddresses.CloseStale` skipping an address with a pending item naming its
+holder (`internal/store/identity.go`), so the contested interval never ages out. Re-measured
+2026-09-12, end to end: the interval does stay `valid_to IS NULL` — and the attack is unchanged.
+`domain.Resolve` does not ask "is the interval open"; it asks
+`holdsAddressInWindow(c, now, window)`, i.e. `AddressLastSeen` (= `asset_addresses.valid_from`,
+rewritten only by `TouchLive` on an attach) within `AddressWindow`. A park touches no address, so
+after 7 days the holder stops being "at the held address", `atHeldAddress` is false, the whole
+ADR-096 branch — handover, rotation classification and `PendingContested` alike — is skipped, and
+the newcomer is `DecisionNewAsset` with `new_asset` provenance. Domain probe, same inputs, one
+field changed: held 1h ago + pending item -> `queue`; held 8d ago + pending item -> `new_asset`,
+reason "no candidate matched any observed key". The pending flag is COMPUTED and handed to the
+decision (`candidatesFor` sets `PendingContested` from `LiveHolder`, which has no window) and then
+read only inside the branch the window already closed.
+**Why:** a relationship is stored in two places — the row's existence and a freshness timestamp on
+it — and the guard was added to the one the attacker was not using. "The row survives" and "the row
+still counts" are different claims, and only the second is a control.
+**How to apply:** when a fix extends the LIFETIME of a row, find every predicate that decides
+whether that row still COUNTS (a `last_seen >= now-window`, a `scans_seen >= N`, a decay reset) and
+check the fix reaches all of them. Then re-run the original end-to-end scenario past the window —
+the store-level assertion ("the interval is still live") passes while the decision-level assertion
+("the trust root is still empty") fails, and only the second one is the finding.
+
+**71. A park with no expiry, no operator verb, and now no way to age out.**
+Same change, other direction. With #70's `CloseStale` skip in place a pending item pins its address
+for ever: measured 2026-09-12, one drive-by SSH contradiction against an SSH-ONLY host freezes that
+host permanently — every later sighting parks (`PendingContested`), `services` stops at the
+pre-attack row, `asset_identity_key_sightings` stops bumping, and after `SightingWindow` the
+address's trust root is empty, so credentialed work refuses for ever. Cost per scan while frozen:
++2 pending items, +1 `identity.contested` event, +2 unresolved observations, unbounded. Nothing can
+clear it: the rotation classifier needs the newcomer on two scans (it never returns) and needs
+`Services.ProductsSince(now-window)` to be non-empty (the frozen rows age out), and B39's operator
+verb does not exist. A merge-grade host (two agreeing moderate keys) is not frozen — it merges
+straight through the park, which is #68's other half.
+**Why:** a refusal that is correct at the moment it fires becomes a denial of service when nothing
+bounds it and nothing can retract it. "Fail closed" needs an owner.
+**How to apply:** for every park/quarantine/lockout, ask three questions and measure each: what
+clears it, how long can it last if the attacker never returns, and what does the protected subject
+lose per scan while it lasts. If the answer to the first is "an operator verb we have not built",
+the change is not shippable without a bound (an expiry, an auto-close, or a re-derivation path).
+
+**72. A stated weakness that is stronger than stated — measure the library, not the intent.**
+Backlog B44 says "the SSH and TLS fingerprint engines record the host key and the certificate
+without completing the exchange that proves the peer holds the private key", and ADR-096 leans on
+it ("every identity key this build can observe is an ECHO") to justify parking the occupant's own
+agreeing sighting. Measured 2026-09-12: true for SSH (`internal/engines/fingerprint/ssh.go` reads
+the host-key blob out of `SSH_MSG_KEX_ECDH_REPLY`, hashes it, and abandons — the signature field is
+never parsed), FALSE for TLS. `dialTLS` calls `tls.Client(...).HandshakeContext`, and Go verifies
+the server's key-exchange signature / CertificateVerify even under `InsecureSkipVerify` (which
+skips chain building and hostname matching only). Probe: serve the victim's DER with the attacker's
+private key -> `tls handshake: tls: invalid signature by the server certificate: ECDSA verification
+failure`; the observation is never produced. `service_cert_fp` is `Chain[0]`, so the key that
+matters is the one that was proved.
+**Why:** a security note written from the code's intent ("this engine does no verification") can be
+wrong about what the standard library did anyway, and an overstated weakness misdirects the fix and
+understates the value of evidence the system already has.
+**How to apply:** before writing or accepting "X is not verified", run the negative case. For TLS,
+present a certificate with the wrong private key; for SSH, corrupt the signature field. A backlog
+row that names a missing check is a claim about behaviour and should be measured like one.
+
+**73. An expiry that re-arms itself from the evidence it just released.**
+The fix for #71 was an expiry: a contest whose last contradiction is older than the window closes
+(`ResolutionQueue.CloseExpired`, state `expired`) on the next agreeing sighting, and "the parked
+observations re-enter the sweep". Measured 2026-09-12: they re-enter, re-group at the same address,
+contradict the same live key, and are parked AGAIN — with `enqueued_at = now`. Freshness is read
+from `enqueued_at` (when the row was written), not from `observed_at` (when the host was seen), so
+replaying a week-old observation mints a brand-new contest. One packet bought three measured cycles
+of freeze -> one attach -> re-freeze, and the cycle only ends when the observation ages out of
+`observedWindow` (90 days). The shipped test ran the release sweep and asserted only `assets == 1`
+and `rotatedEvents == 0`, both true either way (#57's shape).
+**Why:** closing a refusal record and releasing the input that caused it are two different acts. If
+the released input is re-judged by the same rule, the system oscillates instead of converging, and
+the bound the ADR advertises ("a window, not for ever") is not the bound that exists.
+**How to apply:** for any close/expire/release verb, sweep ONE MORE TIME with no new input and
+assert the terminal state (`pending = 0`, `unresolved = 0`), not just that nothing new broke. Then
+ask what stops the released input from recreating the state that was just closed — an age check on
+the EVIDENCE (`observed_at`), a "do not re-enqueue what was expired" guard, or resolving the
+observation rather than releasing it.
+
+**74. Freshness keyed on "the asset does not hold this key" instead of "this key contradicts".**
+`ResolutionQueue.ContradictionLastSeen` decides whether a contest is still fresh by taking
+`max(enqueued_at)` over pending items whose key is not `ip_window` and not live on the asset. A park
+enqueues EVERY key in the group, and a park records nothing — so any key the occupant starts
+presenting after the contest began (TLS enabled on 443, a renewed certificate, a second sshd on
+2222) is permanently "not held", counts as a contradiction, and refreshes the contest on every
+scan. Measured 2026-09-12: one drive-by packet plus the victim's own new certificate = 21 scans
+over 42 simulated days, 43 pending items, 43 unresolved observations, zero expiries, the 443
+service row never written. The victim freezes itself with its own evidence, and the attacker is
+long gone. A key on a port the asset holds nothing for contradicts nothing under `domain.compare`,
+which is the definition the freshness read should have used.
+**Why:** "not recorded" and "in conflict" coincide only while the recording path is open; the park
+closes it, so the two definitions diverge exactly when the guard matters.
+**How to apply:** when a store read is named after a domain concept (contradiction, conflict,
+disagreement), diff its SQL predicate against the domain function that defines the concept. Here:
+same type AND same source/port AND a different live value — not `NOT EXISTS (live key with this
+value)`.
+
+**75. Two "independent" sites where the second is reached only through the first, and a guard that
+compares normalised data to raw text.**
+ADR-096 §3 claims two sites keep a contested address from ageing out: `AssetAddresses.CloseStale`
+skips it, and `domain.Resolve` extends the hold via `Candidate.PendingContested`. They are not
+independent — `PendingContested` is set only for the address's `LiveHolder`, so if the first site
+closes the interval the second is never consulted. And the first site compares the queue item's
+payload address as TEXT (`observed_payload ->> 'address'`) against `host(a.ip_address)`, while
+every other site casts to `inet`. Measured 2026-09-12: with the payload address written
+`2001:0db8:0077:0000:0000:0000:0000:0020` (or `10.77.6.010`) the skip never matches, the victim's
+interval ages out, the contradicting host becomes a SECOND asset at the victim's address and its
+key lands in `SSHHostKeyFingerprintsAt` — the ADR-091 credentialed trust root — after two scans.
+Canonical spelling of the same scenario: one asset, empty trust root. Not reachable from a
+well-behaved scan point (`target.Canonicalise` normalises task targets) but ingest checks payload
+addresses only for `package` observations, so a compromised scan point or a future engine that
+reports a learned address reaches it.
+**Why:** a defence-in-depth claim is only true if either site alone holds; and inet data compared
+as text has as many spellings as the sender chooses.
+**How to apply:** for each "two sites" claim, delete site 1 on paper and check site 2 still fires.
+For any address/identifier compared in SQL, compare in the TYPED domain (`= a.ip_address` with the
+text cast on the other side, or a normalised column written at insert) — and remember a bare
+`::inet` cast on stored text raises 22P02 on garbage, which in a per-tenant sweep query is its own
+denial of service, so normalise at write time.
+
+**76. A carve-out in the decision that the freshness read does not repeat — the victim's own
+scheduled renewal sustains the refusal.**
+`domain.Resolve` at a held address moves a same-service CERTIFICATE change out of `s.conflicts`
+into `Contradicted`: an ACME renewal is a renewal, not a different host. `ResolutionQueue.
+ContradictionLastSeen` — whose doc comment claims to be "domain.compare's definition of a
+conflict" — has no such carve-out: same type, different value, same payload port, live key. So a
+renewed certificate IS a contradiction to the freshness read and IS NOT one to the decision.
+Measured 2026-09-12 on the dev DB: one drive-by packet on tcp/22, attacker gone the same day, the
+victim renews its certificate once inside the window — 21 scans over 42 simulated days, 43 pending
+items, 43 unresolved observations, 22 `identity.contested` events, ZERO expiries, `services.last_seen`
+frozen at day 0. The park prevents the renewal ever being recorded, so the new value stays
+"different from the held one" for ever and re-parks itself on every scan. Control with a steady
+certificate expired on day 8, as designed. This is defect #74 one level down: #74's fix replaced
+"not held" with "different value, same port", which is exactly what a renewal is.
+**Why:** a carve-out is part of the definition. A second site that re-implements the relation
+without the carve-out implements a different relation with the same name — and the direction of
+the divergence decides whether a bounded refusal becomes unbounded.
+**How to apply:** when a store read is named after a domain relation, enumerate every EXCEPTION the
+domain applies to that relation (here: cert-at-held-address, key-from-another-port, key-the-asset-
+does-not-hold) and check each one is in the SQL. Then measure the refusal's expiry with the
+NON-ADVERSARIAL event that the exception exists for — a scheduled renewal, an upgrade, a reimage —
+not only with the attacker's input.
+
+**77. A per-service measurement map keyed on the service, with two contradicting values on one
+service.** `Continuity.Keys` is `map[string]KeyContinuity` keyed on `k.Source` ("22/tcp"), and
+`correlate.continuityFor` writes one entry per contradicting key — so two host keys contradicting
+on one port share whichever measurement was written last. Measured 2026-09-12 (`internal/domain`,
+pure unit): a key seen on ONE scan attaches as a rotation on a second key's two-scan history,
+`RotationScans` defeated, and the `identity.rotated` audit event lists both as "recorded" while the
+apply loop's second `Retire(type, port)` closes the first one in the same transaction. The ADR's
+own rule refuses "two keys answering on one port" when one of them is the HELD key; two
+CONTRADICTING keys on one port is the same shape and is not refused. Contrast: a contradiction on a
+port with no measurement fails closed ("no measurement for 2222/tcp") — the collision case is the
+one without a guard.
+**Why:** a map keyed on a value that is not unique across the set silently discards measurements,
+and the discarded one is the one that would have refused.
+**How to apply:** for any `map[X]Y` built by a loop, ask whether two elements can share X. If they
+can, either key on the full identity (source+value) or refuse the multi-valued case outright.
+
+**78. `inet` equality includes the netmask, so `host()`-identical addresses are different keys.**
+Measured 2026-09-12: a payload address of `10.44.3.10/24` beside `10.44.3.10` produced TWO live
+`asset_addresses` rows that both render `10.44.3.10`, on two assets, coexisting under migration
+0031's partial unique index on `(tenant_id, ip_address)`. Every ADR-096 by-address read
+(`PendingAtAddress`, `ContradictionLastSeen`, `CloseStale`'s `q.address = a.ip_address`,
+`CloseExpired`, `CloseRotated`) keys on that same inet value, so a `/24` spelling routes around the
+whole contest. NOT a trust-root takeover: `credgrant` parses the target with `netip.ParseAddr` and
+queries the bare `/32`, so the second asset's key never qualifies — fail-closed. Reachable only
+from a compromised scan point or an engine that reports a learned address (`target.Canonicalise`
+normalises task targets, and ingest checks payload addresses only for `package` observations).
+Separately: a payload address `::inet` cannot parse (`not-an-address`) errors `LiveHolder`, the
+group is logged and skipped — the tenant is NOT stalled — but the observation stays unresolved for
+ever and keeps its slot in the `Batch = 500` `ListUnresolved` window.
+**Why:** "normalise at write time" (#75) is only half the job; `inet` is not a host address, and the
+uniqueness the schema advertises is uniqueness of (address, masklen).
+**How to apply:** normalise to `host(x)::inet` / `set_masklen(x, 32|128)` at every write of an
+address the identity model keys on, or reject a non-bare address at ingest. Check the partial
+unique index actually constrains what you think it constrains before leaning on it.
+
+*(#78 follow-up, 2026-09-12: the fix normalises at every WRITE — `groupByAddress` canonicalises
+with `netip.ParseAddr(...).Unmap()`, `Open`/`LiveHolder`/`TouchLive`/`Enqueue`/`Record` wrap
+`host($n::inet)::inet` — and is measured correct for new rows. It does NOT normalise rows already
+in the table: migration 0045's backfill writes `r.a::inet` unwrapped, so a legacy payload of
+`10.44.3.10/24` backfills as `/24` and matches no by-address read, and no migration rewrites
+existing `asset_addresses.ip_address` / `asset_identity_key_sightings.address`. A masked live
+address row is invisible to `LiveHolder` and to `Open`'s closeOthers — measured 2026-09-12 — so
+the second live holder it was meant to prevent opens beside it. When a fix normalises at write,
+ask what the already-written rows do.)*
+
+**79. A "different from what the asset holds" relation evaluated against a SET that can hold two
+values for one slot — the victim's own key becomes the contradiction that sustains its own park.**
+`ContradictionLastSeen` calls a pending item a contradiction when the asset holds a live key of the
+same type and payload port with a DIFFERENT value. An asset can hold TWO live `ssh_hostkey` rows
+for one port: `correlate.resolveHost`'s new-asset/attach record loop writes every moderate key in
+the host group, and a group is by ADDRESS only — two hosts answering one address in one sweep (two
+zones with overlapping RFC1918 space, a batch-overflow deferral, a correlator that was down, or one
+hostile SSH answer) puts two different keys on port 22 on one asset, no park, no announcement.
+From then on the OCCUPANT's own key is "different from" the other held row, so every park the
+occupant's own scans raise re-arms `ContestFresh`, `CloseExpired` never fires, `CloseStale` skips
+the address for ever, and no observation at that address ever correlates again. Measured
+2026-09-12 on the dev DB, both by new asset and by attach to a TLS-only asset: 21 days of the
+occupant alone = 21 pending items, 21 uncorrelated observations, 0 expiries, empty trust root at
+the address, `services.last_seen` never moving. One hostile observation, permanent, and with no
+operator verb (B39) nothing can clear it. Counterfactual measured in SQL: adding `AND NOT EXISTS
+(live key with the SAME value)` drops the 21 matching items to 0.
+**Why:** `x <> held` is a refusal predicate only while `held` is single-valued. The moment the slot
+holds two values, every value in it contradicts the other and the refusal feeds itself — and the
+party who suffers is the one still telling the truth.
+**How to apply:** for any predicate of the form "differs from what we hold", find the uniqueness
+that makes "what we hold" one value and check the schema enforces it (here there is no unique index
+on `(asset, key_type, port) WHERE valid_to IS NULL`, only on key VALUE). If it is not enforced,
+either enforce it, or exclude the rows whose value the asset itself holds. And check the write
+path: `domain.rotationFailures` already refuses to CLASSIFY two keys on one port, while the record
+loop happily RECORDS them — a guard on the decision is not a guard on the write.
+
+**80. An operator-facing note that states the opposite of what the code does, inside the change
+that measured why.** ADR-096 and `internal/correlate/CLAUDE.md` say expired evidence STAYS OUT of
+the sweep (releasing it re-parked itself with a fresh timestamp — one packet, a freeze renewed for
+ever), and `ListUnresolved` implements that. `CloseExpired`'s doc comment, the expiry block in
+`resolveHost`, and — worse — the `identity.contest_expired` audit event's `note` field all say the
+parked observations "re-enter the sweep". Measured: they never do. The operator reading the event
+while asking "where did seven days of this host's inventory go" is told the opposite of the truth,
+and the next maintainer who "fixes" `ListUnresolved` to match the comment reopens a hole the ADR
+says was measured.
+**Why:** a comment is a claim about behaviour; an audit-event note is a claim made to the person
+who has to act on it.
+**How to apply:** when a change turns on a distinction between two states (`rotated` releases,
+`expired` does not), grep every string that describes the outcome — comments, audit `note` fields,
+API docs — and check each against the state it actually describes.
+
+**81. A carve-out that suspends an ageing rule with no freshness bound of its own — the hold
+outlives the reason for it, and a THIRD party inherits it.** ADR-096 stops a contested address
+ageing out at two sites: `AssetAddresses.CloseStale` skips an interval while a pending item names
+its holder, and `domain.Resolve` treats `c.PendingContested` as extending the hold
+(`holdsAddressInWindow(...) || c.PendingContested`). Neither is bounded by the freshness the
+DECISION uses (`domain.ContestFresh`), so a park that has gone stale still freezes the interval for
+ever. Measured 2026-09-12 on the dev DB, two consequences from one root cause: (a) a genuine
+different host on a reused DHCP lease — ADR-094's own headline shape — parks on every scan for
+ever (pending 1→2→3, one `identity.contested` per scan, the address still LIVE at 21 days, the
+newcomer never becomes an asset, reason "not a rotation: services not continuous", which can never
+pass again once the gone occupant's products age out of the 7-day window), where before this change
+`CloseStale` closed the interval at 7 days and the newcomer became a new asset; and (b) a THIRD
+host that contradicts nothing (TLS-only) attaches to the dead occupant's asset on the address
+alone 21 days later, writes its 443 service row onto it, expires the park, and `Open`/`TouchLive`
+RESETS the interval to now — so the wrong asset is "here now" again and keeps accreting the third
+host's inventory. That is ADR-007's wrong merge, reached through an ageing rule that was suspended
+and never resumed.
+**Why:** "do not age this out while X is pending" is only safe while X is still true of something.
+A pending row is a fact about the past; the decision reading it had a freshness test and the
+housekeeping that protects it did not.
+**How to apply:** whenever a change adds "skip the sweeper for rows in state X", ask what ends X,
+and check that the ONLY thing that ends it is not the return of the party the park is protecting
+(see 82). Measure the third-party case explicitly: park an address, age everything a few windows,
+then present evidence that neither agrees nor contradicts and see whose asset it lands on. A
+`ContestFresh`-bounded carve-out (and an inventory-only provenance for the newcomer, which this
+same diff already invented for rotations) gets the safety without the freeze.
+
+**82. A close-out that only the party the refusal protects can trigger.** `CloseExpired` runs from
+`resolveHost` only on an ATTACH to the contested asset — i.e. only when the address holder comes
+back and its own evidence agrees. The classification route out (`CloseRotated`) needs
+`servicesContinuous`, which needs the holder's service rows inside the window. So every escape from
+the park is keyed on the occupant returning; a decommissioned host whose IP is reused, or a host an
+attacker has replaced, never returns, and the park is permanent with no operator verb (B39).
+**Why:** an expiry is only an expiry if time alone can fire it. "Expires on the next agreeing
+sighting" is a conditional release, and the condition is exactly what the failure mode removes.
+**How to apply:** for every park/lock/quarantine, list the transitions out and strike the ones that
+need the victim to act. If nothing time-based remains, it has no expiry however the ADR words it.
+
+**83. A backstop uniqueness index keyed on data the submitter spells.**
+`asset_identity_keys_one_live_per_port_uidx` is `UNIQUE (tenant_id, asset_id, key_type,
+(merge_evidence_payload -> 'port')) WHERE valid_to IS NULL AND merge_evidence_payload ? 'port'`,
+and the payload is the scan point's raw observation JSON, copied verbatim. Measured 2026-09-12:
+a payload spelling `"Port": 22` is decoded by Go case-insensitively (so `keysFrom` still derives
+`Source "22/tcp"` and the sighting still lands at port 22, making the key credentialed trust
+material) while jsonb `? 'port'` is FALSE — the row is outside the index, invisible to `Retire`,
+`LastSeenAt` and `ContradictionLastSeen`, and `ForAsset` derives `Source ""` so `compare` can never
+call anything a contradiction of it. One such observation gives an asset two live SSH keys on one
+port, both trust material at the dialled port. The same divergence with `"protocol": ""` (held
+Source `"22/"`, observed `"22/tcp"`) makes the resolver decide ATTACH for a key the index then
+REFUSES: measured `store: conflict: asset_identity_keys_one_live_per_port_uidx`, which aborts the
+host's whole `db.Write` — the address `Open` in the same transaction was lost — leaving the host
+uncorrelated for ever with only an ERROR log. Related: the index key is NARROWER than the
+comparison it backs (port, not port+protocol), so a cert on `443/udp` beside one on `443/tcp` is
+"no contradiction" to `domain.Resolve` and a unique violation to the database (measured; today
+unreachable only because every engine hardcodes `"tcp"` and the field is `omitempty`).
+**Why:** a constraint is a backstop only if its key is derived by code you control. Here it is
+derived from attacker-or-sensor-supplied JSON, and Go's case-insensitive field matching means the
+application and the database disagree about what the row says.
+**How to apply:** when a migration adds a constraint over a jsonb expression, ask who wrote that
+jsonb and whether any other reader of the same fact uses a different extraction. Prefer a real
+column written from the function's own normalised argument (`Record` already takes `port int`).
+
+**84. A queue row that names nobody, in a queue whose every close-out is keyed to a named party.**
+ADR-096 drops `asset_resolution_queue_candidates_non_empty` so two hosts answering one port at an
+address nothing holds can be parked as "unplaceable" with `candidate_asset_ids = '{}'`. Every
+close-out — `CloseExpired`, `CloseRotated` — and every freshness read requires
+`$asset = ANY(candidate_asset_ids)`, so nothing can ever close such a row, and there is no operator
+verb. Measured 2026-09-12: 2 unplaceable items still pending after 60 days; an asset that later
+claimed the same address was correctly NOT frozen by them (good) and its interval aged out normally
+(good) — but `contested_addresses` reports that address for ever, `resolution_queue_pending` never
+returns to 0, the Health chip is permanently amber with nothing an operator can do, the two
+observations are permanently uncorrelated, and each further scan of the address adds two more items
+plus an audit event, unbounded.
+**Why:** dropping a NOT-EMPTY check on a column that every state transition joins against creates
+rows outside the state machine. They are not wrong, they are unreachable.
+**How to apply:** when a CHECK is dropped to admit a new shape, enumerate the writes that read the
+column it guarded and give the new shape its own transition (here: an absolute expiry — an item
+naming nobody loses nothing by expiring, since nobody was going to be chosen).
+
+**85. Two branches for one shape, and the cheaper branch grants more trust.** ADR-096 gives a
+same-service SSH key contradiction at a held address two possible outcomes: a ROTATION attach
+(provenance `rotation`, excluded from `SSHHostKeyFingerprintsAt` for ever) and a LAPSE
+(`DecisionNewAsset`, provenance `new_asset`, credentialed trust material after two sightings).
+The lapse is tested FIRST, so whenever it qualifies it preempts the branch that withholds trust.
+Measured 2026-09-12 in `domain.Resolve`, one input differing: held key last sighted 2 days ago →
+`attach` + `Rotated` (trust never); 7 days + 1 h ago → `new_asset` + `Lapsed` (trust at the next
+scan). End to end: occupant attaching at the address every scan, its key's sighting 9 days old,
+attacker answering only tcp/22 → new asset on the attacker's 2nd scan, address transferred,
+`SSHHostKeyFingerprintsAt` returns the ATTACKER's fingerprint on the 3rd.
+**Why:** the lapse's staleness test reads the key's last sighting, not the relation the verdict
+claims has lapsed (the address hold). `holdsAddressInWindow` was never consulted, so "the occupant
+has lapsed" was asserted about a host that had attached a minute earlier. A key sighting goes stale
+on its own (an SSH fingerprint comes from an occasional intrusive pass, not every scan), so the
+precondition is the normal state of a live host.
+**How to apply:** when a decision names a party as gone, check that the freshness it reads is the
+freshness of the RELATION it is about, and that the branch order cannot let a trust-granting
+outcome preempt a trust-withholding one for the same evidence. The fix measured green here:
+`len(agreeing)==0 && !holdsAddressInWindow(c, now, window) && occupantLapsed(...)` — both shipped
+integration tests still pass; only the domain test's own fixture (address attached one minute ago)
+had to be aged, which is how you know the test was asserting the defect.
+
+**86. An early `return` inside the candidate loop, before the verdict switch orders the answers.**
+`domain.Resolve` scores every candidate and then lets a `switch` apply ADR-007's precedence
+(contested > qualified > attachable). The lapse branch returns from inside the loop. Measured
+2026-09-12: observed = the mover's ssh key on 22 + its cert on 443 + the address; asset A holds
+BOTH observed keys (two independent moderate keys = a merge under ADR-007); asset B holds the
+address with a stale key sighting. Verdict: `new_asset`, `Lapsed = B` — A's merge-grade match
+discarded, in either candidate order. A DHCP host that moved therefore evicts the occupant and
+creates a keyless duplicate: `Record` is `ON CONFLICT ... DO NOTHING` for a value live on A, so the
+new asset holds the address and no keys, and every later scan attaches to the duplicate. The same
+branch also ignores `KeyContinuity.NewKeyHeldElsewhere`, which the sibling rotation branch refuses
+on for exactly this reason ("would retire the held key and record nothing").
+**Why:** a branch that returns skips both the precedence rule and the sibling branch's guards.
+ADR-096's own bound — "asked only when the first verdict named exactly one candidate" — does not
+hold, because a contested verdict's `Candidates` lists only the contested candidates and the
+qualified ones are invisible to the caller.
+**How to apply:** in a resolver with an ordered verdict switch, a new outcome belongs in the
+scored set, not in a `return`. Probe it with TWO candidates, one of each shape, in both orders.
+
+**87. A canonicalisation guard whose claim is wider than its parser.** `groupByAddress` now does
+`netip.ParseAddr` and the comment says "strict (no leading zeros, no mask, no zone)". Measured
+2026-09-12: `netip.ParseAddr("fe80::1%eth0")` SUCCEEDS and `String()` keeps the zone, while
+`host('fe80::1%eth0'::inet)` is a Postgres syntax error — so every by-address read and write in the
+host's transaction fails, the group is never resolved, and the ERROR repeats once per sweep for the
+90 days the observation stays inside `observedWindow`. `ListUnresolved` is `ORDER BY observed_at
+LIMIT correlate.Batch (500)`, so ~500 such observations (a scan point's payload field, unvalidated
+at ingest) pin the head of the batch and stop correlation for the whole tenant.
+**Why:** the guard was written to close a spelling attack and its comment states a property the
+parser does not have. The residual class is not benign: it is a permanent per-tenant detection
+denial with no queue item and no Health signal, only a log line.
+**How to apply:** for any "we normalise it here" guard, test the classes the NEXT layer rejects
+(`ip.Zone() != ""`, `Is4In6`, unspecified/multicast) and prefer refusing at ingest so the store and
+the resolver share one grammar. A host group that cannot be written is worse than one refused: the
+refusal is visible.
+
+**88. A refusal whose own park freezes the freshness that a later eviction reads — so the attacker
+manufactures the precondition, and the slower path grants MORE authority than the fast one.**
+ADR-096 parks every sighting at a contested address, the occupant's own included, and the park
+path returns before `Open`/`TouchLive`. So the occupant's address interval and its `services.last_seen`
+both freeze at the instant of the contest. One window later the lapse branch reads
+`!holdsAddressInWindow` — which by then means "the contest is a week old", not "the occupant is
+gone" — and `ProductsSince(now-7d)` is empty, so the rotation classification can no longer pass.
+Measured 2026-09-12 end to end: victim answering tcp/80 (nginx) and tcp/22 (OpenSSH, key
+established); attacker takes tcp/22 with a *different* banner so continuity fails; one window of
+parking; then `new_asset` for the attacker, the victim's interval closed under it, the victim's own
+nginx:80 row rewritten onto the attacker's asset, and the attacker's key recorded `new_asset`
+provenance — which `SSHHostKeyFingerprintsAt` does NOT exclude — so it is the credentialed trust
+root (and `dispatch.trustMaterial`'s only known_hosts line) on the next scan. Counterfactual
+measured the same day: with nothing contradicting, nine simulated days of the victim's keyless
+tcp/80 answers renew the hold indefinitely (each attach `TouchLive`s it), so ADR-094's "wait for the
+address to lapse" price is unpayable against a live host. The contradiction is what makes it payable.
+**Why:** two ways in. (a) The gate's freshness is measured on a relation the refusal itself stops
+updating — "outside the window" ends up meaning "the park is a week old". (b) The two outcomes for
+one shape are graded the wrong way round: passing the classification (2 scans, mimic the banner)
+gives inventory only, because a rotation-recorded key is excluded from trust; failing it (one
+window, no mimicry needed) gives inventory AND trust. The attacker picks, and the cheaper forgery
+buys more.
+**How to apply:** when a decision says a party has lapsed, ask what wrote the timestamp it reads and
+whether the adversary's own action stopped that write. And compare the authority of every outcome a
+single shape can reach: if the harder-to-forge path is the one that withholds trust, the rule is
+inverted. Measured fix, one line, both shipped lapse tests and the rotation test still green:
+record a lapse's keys with a provenance the trust root excludes —
+`if v.Lapsed != uuid.Nil { from = store.KeyFromRotation }` in the attach/new-asset recording block
+of `correlate.resolveHost`. Inventory still moves; trust stops. A "make the lapse smarter" fix
+(refuse it while any product the asset has ever answered with still answers at the address) also
+closes it but turns the shipped reused-lease test into a permanent park, because on banner data
+"the occupant is still there" is indistinguishable from "the newcomer reproduces its banners".
+
+**89. A trust exclusion added to ONE reader of a table and not to its sibling reader, which was
+written to enforce "the same bar".** ADR-096 gave `SSHHostKeyFingerprintsAt` its
+`AND k.provenance NOT IN ('rotation','lapsed')` predicate — a rotation/lapse moves inventory, never
+credentialed trust. `AssetIdentityKeys.EstablishedAt`, whose own doc comment says "the same bar the
+trust root sets" (same table, same `scans_seen >= 2`, same window), did NOT get it. Measured chain,
+four scans after a rotation attach: the attacker's key is recorded `rotation` and the trust root is
+correctly `[]`; one scan in which they simply DO NOT answer 443 bumps that key to two sightings
+(nothing contradicts, so the plain loop records and the sighting counts); the next scan's renewed
+certificate is then "corroborated by an established key", the victim's cert is retired and the
+attacker's is recorded with provenance `attach`; presenting both keys at an address the attacker
+owns merges their host onto the victim's asset (1 asset, both addresses live). ADR-096 names that
+exact outcome as what the establishment gate prevents ("two moderate keys on the asset ...
+mergeRule's bar at any address the attacker controls") — and the gate is satisfied by the very key
+it was protecting against. Credential exposure stays closed (the ssh key is still excluded), so the
+loss is asset identity: cross-host finding attribution, and an attacker-controlled moderate key of
+trusting provenance living on the victim's asset.
+**Why:** the exclusion was designed as a property of the TRUST ROOT QUERY rather than of the ROW,
+so every other reader of the row keeps the old semantics; and the two readers sit 200 lines apart
+with near-identical SQL, which reads as already consistent.
+**How to apply:** when a new provenance/label means "this row is not evidence", grep every reader
+of the table and make the exclusion a property of the row (a view, a generated column, or a
+`trusted` predicate used by all of them) — not a clause in the one query that prompted it.
+`AND k.provenance NOT IN ('rotation','lapsed')` in `EstablishedAt` was measured to break the chain
+at step one and to kill EXACTLY ONE shipped test — the one whose fixture asserts the certificate
+replacement — while `TestACorroboratedRenewalRetiresTheOldCertificate` and
+`TestAPlantedKeyCannotCorroborateItsPlantersCertificate` still pass. A one-test-killed-and-it-is-the
+defective-fixture result is the strongest line a review can produce; get it with `go test -overlay`.
+The deeper fix is that such a key must stay in `ForAsset` (so contradictions of it are still seen)
+while being excluded from the `agreeing` set `mergeRule` counts.
+
+**90. A uniqueness BACKSTOP whose unit is coarser than the decision layer's conflict unit, so the
+write the database refuses was never even a conflict upstream — and the group is retried for ever
+with no park, no asset and no signal.** Migration 0045's
+`asset_identity_keys_one_live_per_port_uidx` is `(tenant_id, asset_id, key_type,
+merge_evidence_payload -> 'port')` — one live key per (asset, type, PORT). `domain.Resolve`'s
+conflict unit is the key's `Source`, `fmt.Sprintf("%d/%s", port, orDefault(protocol,"tcp"))` — per
+(type, port, PROTOCOL) — and `twoValuesOnOneService` keys on `type|source` too. Measured: two
+service observations at one address, port 22, protocols "tcp" and "udp" (or "tcp" and "TCP") with
+different ssh fingerprints → `Resolve` returns `new_asset` with NO contest → the plain recording
+loop writes both → `store: conflict: asset_identity_keys_one_live_per_port_uidx` → the whole
+`resolveHost` transaction aborts → 0 assets, 0 queue items, both observations permanently
+`asset_id IS NULL` and STILL returned by `ListUnresolved` on every subsequent sweep. So one payload
+field buys a permanent silent detection gap for the host plus permanent occupancy of the head of
+`ORDER BY observed_at LIMIT 500` — exactly the hazard `groupByAddress`'s new netip refusal was added
+to prevent, reintroduced through the key path. `protocol` is unvalidated free text on the wire
+(`services.protocol` is `text NOT NULL`, no CHECK, no enum); today's engines hardcode "tcp", so the
+trigger is a compromised or modified scan point, which ADR-020 assumes.
+**Why:** the index was written from the ADR's sentence ("one live key per asset, type, port") and
+the domain from the evidence model ("a key from a second sshd on 2222 says nothing about 22"), and
+nobody diffed the two units. `Retire` and `LastSeenAt` key on port alone as well, so the store side
+is internally consistent — which is what makes it look right.
+**How to apply:** for every new unique index, write down the tuple and then write down the tuple the
+decision layer uses to detect the conflict that index backstops. If the index is coarser, the
+refused write is unreachable from the decision layer and arrives as an abort. Also: normalise the
+field at the parse boundary where its sibling is already normalised (lowercase + allowlist
+`tcp|udp|sctp`, refuse the group otherwise, beside `groupByAddress`'s netip refusal), and make a
+group whose write the store REFUSES park or count rather than retry silently for ever.
+
+**91. Two guards whose preconditions are each other's consequence, so the pair is unbounded while
+each looks bounded.** ADR-096 added a queue guard to `AssetAddresses.CloseStale` (do not age out an
+address while a pending item younger than the window names the holder) and `ExpireUnplaceable`
+(close a pending item once none of its candidates still HOLDS the address). Each is bounded on its
+own; together the item keeps the address held and the address being held keeps the item unclosable.
+Measured: `valid_from = now - 30 days`, one pending item enqueued 24 h ago naming the holder, four
+ageing passes with a fresh park every "six days" → live address intervals stays 1, pending grows
+1→5, `ExpireUnplaceable` closes nothing on any pass. Age every item past the window and `CloseStale`
+closes the interval on pass 1 and `ExpireUnplaceable` closes all five on pass 2. So the ADR's
+"bounded by freshness on both sites" is bounded by the ATTACKER STOPPING, not by a window — and for
+the `twoValuesOnOneService` shape there is no classification path at all (`Resolve` returns before
+continuity is measured), so the only exit is an operator verb (B39) that does not exist. Effects: a
+genuine newcomer at that address is never inventoried, a live occupant's inventory freezes, and
+`asset_resolution_queue` grows without bound (N items per contested host per scan, never closed) on
+a table `/v1/health` scans on every poll.
+**Why:** each guard was added to close a separately measured hole, in different functions, and each
+one's own freshness term reads as the bound. The mutual dependency is only visible if you write the
+two predicates side by side and ask who keeps each one's precondition true.
+**How to apply:** whenever an expiry is conditioned on a state change, ask what prevents that state
+change — and if the answer is the row being expired, the pair has no exit. A total cap
+(`valid_from >= now - k*window`) or an "re-raised for k windows with no classification" escape is
+the fix; the store-level probe is instant (seed the row ages by hand, call `ExpireUnplaceable` then
+`CloseStale` in one `db.Write`, print live-address and pending counts per pass) and needs no sweep.

@@ -241,3 +241,274 @@ The one-file harness that carried all of it (rebuild it rather than reinventing)
 (assets/pending queue/unresolved), `liveKeyValues` (value -> LIVE|retired, which is what a `Retire`
 finding turns on) and a `dump` printing addresses, keys with `provenance` + payload port, sightings
 with `scans_seen`, and every `services` row. Scenarios are then ~20 lines each.
+
+**B41 / resolution-queue harness (S42 step 1).** Four throwaway `internal/correlate/aareview_b41_*_test.go`
+files (`package correlate_test`) carried the whole pass. What made it fast: a `b41read` returning
+`(identity.contested events, pending items, PendingAddresses, items whose payload lacks 'address',
+unresolved observations, assets)` in ONE query, printed after every sweep — the defect is visible
+only as "unresolved fell but items did not". Keep a `keylessPort(addr, port)` builder beside the
+suite's `sshService`/`tlsService`: a contested group needs both a key-bearing and a keyless
+observation. The contest shape in three scans: keyless (asset takes the address) -> `sshService`
+key A on 22 (key recorded on attach) -> `sshService` key B on 22 (handover, queued); call
+`s.nextScan(t, db)` between them.
+`correlate.Batch` = 500 is a REVIEW TOOL, not just a constant: emit 521 observations at one
+address in one scan and sweep twice to split a host's own group with no filler at all.
+Bulk-loading the queue for a cost measurement works from a probe: one `INSERT ... SELECT
+jsonb_build_object(...) FROM generate_series(1,100000)` inside `db.Write` as the app role (RLS
+permits it), then `psql "$DATABASE_URL" -c "ANALYZE asset_resolution_queue"` before any EXPLAIN,
+and `DELETE FROM tenants WHERE name LIKE 'probe-b41-%'` + `VACUUM (ANALYZE)` afterwards.
+
+**ADR-096 rotation harness (S42, fourth pass).** One throwaway
+`internal/correlate/aareview_096_test.go` (`package correlate_test`, LOG ONLY — no `t.Fatal` on a
+measurement, because another agent may be running the suite) carried the whole pass in ~40 s per
+scenario. What it needed beyond the ADR-094 harness: a `snapshot()` that prints, per sweep, live
+keys as `value -> port:provenance` PLUS retired ones, `asset_identity_key_sightings.scans_seen` at
+the port, `services` per port, pending/rotated queue counts, `identity.contested`/`identity.rotated`
+event counts, unresolved observations, the newest `conflict_reason` (it names which of the four
+facts failed, which is the fastest way to see what the rule actually measured) and
+`SSHHostKeyFingerprintsAt` — the last is the only line that matters, because it is what
+`dispatch.trustMaterial` reads and `len(fps)==0` and `len(fps)>1` both refuse (credgrant.go:245-255).
+A `sweep(label, at, payloads...)` closure doing `nextScan` -> observe each -> `SweepOnce` ->
+snapshot makes a scenario four lines. Reuse `sshService`/`tlsService` and override `product` and
+`os.hint`; `tlsService` carries NO os hint, so whoever supplies the hint in a scenario is the only
+source of the OS-agreement fact — which is how you prove the attacker supplies it.
+Write the DOMAIN probe first (`package domain`, no DB, 5 ms): `Resolve(observed, []Candidate{{...,
+Continuity: &Continuity{...}}}, now, window)` and log `Decision`/`Rotated`/`Reason` answers "does
+this shape classify" before you spend 40 s proving it end to end.
+Migration round-trip with ROWS present (what `make migrate-verify` cannot do, it runs on an empty
+DB and needs docker): `CREATE DATABASE cvap_rev00NN` as the migration role, `for f in $(ls
+migrations/*.up.sql | sort); do psql -v ON_ERROR_STOP=1 -f $f; done` (all 45 applied in ~20 s, no
+golang-migrate needed), INSERT rows in the new states, run the `.down.sql`, then the `.up.sql`
+again, and check enum labels + indexes + constraints. `tenants` takes `(tenant_id, name, domain,
+deployment_mode)` — the column is `domain`, not `primary_domain`.
+To prove a partial EXPRESSION index is usable at dev-DB row counts, `SET enable_seqscan=off` and
+EXPLAIN the exact expression the Go constant composes; the plan prints the normalised index cond,
+which is also how you prove the Go string and the migration's expression match.
+
+**ADR-096 RE-REVIEW harness (S42, fifth pass) — what turned five verified fixes into four new
+findings.** Same `internal/correlate/aareview_*_test.go` (`package correlate_test`, LOG ONLY) plus
+one `internal/domain/aareview_*_test.go` (`package domain`, 5 ms). The three moves that paid:
+- A `revRead(label, addr, port)` printing, per sweep, live AND retired keys as
+  `value prov=<provenance> payloadport=<n> sightings=<addr:port=scans>`, pending/rotated queue
+  counts, `identity.contested`/`identity.rotated` counts, unresolved observations, every `services`
+  row WITH ITS ASSET ID (`product(assetid[:8])` — that column is how a silent asset split shows up),
+  the newest `conflict_reason`, and `SSHHostKeyFingerprintsAt`. `TRUST=[]` vs `TRUST=[key]` is the
+  only line that matters; everything else explains it.
+- A `revSweep(at, payloads...)` = `nextScan` -> observe each -> `SweepOnce`. One line per scan.
+- **Time travel is the probe.** `ageRev(d)` shifting `assets.first_seen`+`last_seen`,
+  `asset_addresses.valid_from`, `asset_identity_keys.valid_from`,
+  `asset_identity_key_sightings.last_seen_at` and `services.first_seen`+`last_seen` back by `d`,
+  then one sweep. Aging a PARKED host past `AddressWindow` is what exposed [[recurring-findings]]
+  #67; no other move found it.
+Two decisive reads that are easy to forget: dump the queue ITEMS (`state, key_type, left(key_value,12),
+payload->>'port'`) after a close-out verb — "pending=1" does not say which item survived, and the
+survivor is the finding; and read BOTH sources of a "was X here" fact side by side in one probe
+(`max(sightings.last_seen_at)` vs `ResolutionQueue.KeyScansPending`) — that is how you prove a fix is
+load-bearing rather than incidental (the sightings table said "not since", the queue said "since",
+and only the queue refused).
+The DOMAIN probe that replaces a day of end-to-end work: a table of one-field mutations of a
+PASSING `Candidate.Continuity`, each through `Resolve`, logging `Decision`/`len(Rotated)`/`Reason`.
+Ten rows proved every threshold load-bearing in 4 ms and told me which end-to-end scenarios were
+worth 40 s each.
+Migration probes: a scratch DB (`CREATE DATABASE cvap_rev00NN`, `for f in $(ls migrations/*.up.sql |
+sort); do psql -v ON_ERROR_STOP=1 -f $f; done`) is the only way to test a DOWN with rows present —
+and after the down+up, re-run the SECURITY query (here `SSHHostKeyFingerprintsAt`'s predicate), not
+just a schema diff. Also worth one line each: does the new CHECK reject the bad row, and does
+`DELETE FROM assets` still work (an `ON DELETE SET NULL` FK under a `NOT NULL`-ish CHECK makes the
+row undeletable; the tenant CASCADE is unaffected — measure both).
+Cost: A/B/C/D/E/F/H ≈ 20-60 s each; the whole pass was ~6 min of DB time. Probe tenants are the
+`seed` label (`DELETE FROM tenants WHERE name LIKE 'probe-096%'`), and `DROP DATABASE cvap_rev00NN`.
+
+**ADR-096 VERIFICATION pass (S42, sixth) — three harness facts that decided results.**
+- **The app role has no UPDATE on `observations`.** An `age()` helper that shifts every timestamp
+  back inside one `db.Write` aborts the WHOLE transaction on that one statement, so nothing ages —
+  and the scenario then reads exactly like the fix working ("the address is still LIVE after +8
+  days"). Age `assets` (both `first_seen` and `last_seen`), `asset_addresses.valid_from`/`valid_to`,
+  `asset_identity_keys.valid_from`, `asset_identity_key_sightings.last_seen_at`, `services`
+  first/last and `asset_resolution_queue.enqueued_at` — and NOT `observations`. Log the error from
+  `age()`; a silent abort cost a whole scenario.
+- **`go test -run '^TestFooBar$'` with a trailing `$` silently matches nothing** ("no tests to run",
+  exit 0). Drop the `$` when the probe name has a suffix.
+- **Write the DOMAIN probe for the branch question.** `Resolve` derives the observed address from an
+  `ip_window` key in `observed` — a probe that passes only the contradicting key gets `new_asset`
+  with reason "no candidate matched any observed key" and proves nothing. Include
+  `{Type: KeyIPWindow, Value: addr, Source: "net"}`. With that, a three-row table (held 1h ago /
+  held 8d ago / held 8d ago with no pending item) pinned the defect to one line in 4 ms.
+- **TLS possession is measurable in 5 ms** and is worth measuring before accepting any "the engine
+  verifies nothing" claim: a `package fingerprint` scratch test that serves the victim's DER with a
+  DIFFERENT private key and dials through `dialTLS` returns `tls: invalid signature by the server
+  certificate`. (Name helpers `v5*` — `selfSigned` already exists in `tls_test.go` and a collision
+  fails the whole package build.)
+- Migration round-trip recipe unchanged and still the only way to test a DOWN with rows present:
+  `CREATE DATABASE cvap_rev00NN`, `for f in $(ls migrations/*.up.sql | sort)`, seed, run the down,
+  then re-run the SECURITY query (here the `provenance <> 'rotation'` trust predicate) before and
+  after a fresh re-record — a schema diff would have missed that the re-recorded key starts at one
+  sighting.
+- Probe tenants were `probe-v5-%`; the dev DB also carries `probe-%`, `prov-%` and `disp-%` from
+  other agents. Delete only your own prefix.
+
+**Contest/expiry probes (ADR-096, S42 third pass).** Four throwaway
+`internal/correlate/aareview_*_test.go` files (`package correlate_test`) covered every shape; the
+reusable pieces were a `shiftBack(t, db, s, days)` that moves `asset_addresses.valid_from`,
+`asset_identity_key_sightings.last_seen_at`, `asset_resolution_queue.enqueued_at` and
+`services.last_seen` back (NOT `first_seen_at` — the sightings table has no such column, and
+`asset_identity_keys` has `valid_from`, not `first_seen`), a `dumpQ` printing every queue row as
+`state / key_type / key_value / coalesce(payload->>'address', key_value) / enqueued_at /
+resolved_at`, and a `contradictionLastSeen` that re-runs the store's freshness SQL from the probe.
+Without `dumpQ` an expiry and a re-park look identical (`pending` returns to the same number).
+Three traps that cost time here:
+- `correlateTenant` returns EARLY when `ListUnresolved` is empty, and `ListUnresolved` excludes
+  observations with a pending queue item — so a sweep of a fully parked tenant runs **no
+  `CloseStale` at all**. "Nothing aged out" after a shift may mean the ageing code never ran; drive
+  it with one new observation.
+- The shipped `rotatedHost` occupant holds TWO moderate keys (ssh + cert), which merge straight
+  through any park — to measure a freeze use an SSH-ONLY host, which is the common estate.
+- Probe cleanup is `DELETE FROM tenants WHERE name LIKE 'probe-%'`; the ADR-096 suite leaves
+  `rotation%` tenants behind, and some of those belong to other agents' runs — filter by
+  `created_at` before deleting those.
+Migration round trips are testable without a scratch database: strip `BEGIN;`/`COMMIT;` from the
+down and up files, concatenate them inside one `BEGIN; ... ROLLBACK;` with `SET lock_timeout`, and
+run as the migration role. `ALTER TYPE ... ADD VALUE` is usable in the same transaction when the
+type was created in it, which is exactly what a down-then-up round trip does.
+
+## Correlate probes against the shared dev DB (ADR-096 review, 2026-09-12)
+
+- A **host `cvap-core` is running against the same database** and sweeps every active tenant on a
+  30 s ticker, so an interleaved sweep can pick up a half-inserted scan. Write a whole scan's
+  observations in ONE `db.Write` (the shipped `seeded.observe` helper does one transaction per
+  observation); then an interleaved sweep runs the same code on the same group and the end state
+  is what you assert.
+- `SweepOnce` iterates EVERY active tenant. The dev DB has ~12 000 (load-test seeds), so one sweep
+  is 30–60 s and the shipped `internal/correlate` suite takes ~8½ minutes. Budget for it and run in
+  the background; a 21-round scenario is ~3 minutes.
+- To simulate weeks, shift rows back rather than wait: `asset_addresses.valid_from`,
+  `asset_identity_key_sightings.last_seen_at`, `asset_resolution_queue.enqueued_at`,
+  `services.last_seen`. Observations keep their real `observed_at` (the sweep needs them inside
+  `observedWindow`).
+- **Do not null `merge_evidence_payload` to simulate a legacy key**: `AssetIdentityKeys.ForAsset`
+  derives `IdentityKey.Source` from `merge_evidence_payload ->> 'port'`, so a null payload blanks
+  the source and `domain.compare` stops seeing same-service contradictions entirely — you change
+  the decision, not the read you meant to isolate. (95 % of the dev DB's key rows are in that shape;
+  they are load-test seeds, not app writes. Every `Record` call site passes a key carrying an
+  observation payload.)
+- Migration round trips: `docker run --rm --network host -v "$PWD/migrations:/migrations"
+  $MIGRATE_IMAGE -path=/migrations -database "$SCRATCH" up|down 1` against a throwaway
+  `CREATE DATABASE`. `tenants` takes `(tenant_id, name, domain, deployment_mode)` — no
+  `primary_domain`.
+- A row-by-row `DO $$ ... EXCEPTION $$` backfill costs ~2.8 s per 100 k rows and one SUBTRANSACTION
+  per row: past 64 the PGPROC subxid cache overflows and concurrent snapshots start consulting
+  `pg_subtrans` cluster-wide for the duration. Fine at 100 k inside an `ACCESS EXCLUSIVE` migration;
+  say so if the table could be much bigger.
+
+**ADR-096 re-measure harness (S42b).** Three things that cost time and one correction:
+
+- **The dev postgres container can be GONE mid-session.** `psql` started failing with "connection
+  refused" between two calls; `docker ps -a` showed no `cvap-postgres-1` at all (another agent ran
+  `make down`, which removes the container but keeps the `cvap_postgres-data` volume).
+  `make up` restored it with every row intact. Check for the container before concluding the DB
+  moved; `cvap-deploy-postgres-1` is a DIFFERENT cluster with no host port.
+- **Migration up/down/up with real rows needs a scratch database, and `migrate-verify` will not do
+  it** (it runs against an empty throwaway). Recipe that worked: `psql "$DATABASE_URL" -c "CREATE
+  DATABASE cvap_probe_0045"`, swap the db name in the URL with
+  `sed -E 's,(://[^/]*)/[^?]*,\1/cvap_probe_0045,'`, then
+  `docker run --rm --network host -v "$PWD/migrations:/migrations" migrate/migrate@sha256:f21c436…
+  -path=/migrations -database "$URL" goto 44`, seed the pre-migration shapes by hand, `up`, seed the
+  post-migration shapes (the new enum values only exist now), `down 1`, `up`. Column gotchas when
+  hand-seeding: `tenants` is `(tenant_id, name, domain, deployment_mode)` — `domain`, not
+  `primary_domain` — and `deployment_mode` is `onprem`.
+- **Mutating production source to prove a test is not vacuous WORKED here**, contradicting the
+  earlier note in this file: a python heredoc that replaced the `return k.Source` inside
+  `twoValuesOnOneService` with `_ = v` was allowed (the refused case before was an `if false &&`
+  style edit). Keep a `cp` backup in the scratchpad and `diff` it back afterwards — the restore is
+  worth verifying, not assuming.
+- Probe cost on this dev DB: `SweepOnce` is ~7 s because it iterates every tenant (230+ with data),
+  so a four-scan scenario is ~30 s. Ageing a whole tenant backwards needs FIVE updates in one
+  `db.Write` (`asset_resolution_queue.enqueued_at`, `assets.first_seen`+`last_seen` together,
+  `asset_addresses.valid_from`, `services.first_seen`+`last_seen`, `asset_identity_key_sightings
+  .last_seen_at`) or the scenario quietly measures something else — ageing only the queue is the
+  right move when you want the SIGHTINGS to stay inside the window (the trust root decays at
+  `SightingWindow`, so a 21-day jump empties it for the wrong reason).
+
+## `go test -overlay` is how to A/B a production condition without editing the tree (2026-09-12)
+
+The "editing production source is BLOCKED" note above has a clean answer, and it is the repo's own
+tool: `.claude/hooks/mutate.py` mutates Go by writing a modified COPY and passing
+`go test -overlay=<json>`, where the json is `{"Replace": {"<abs path in repo>": "<abs path to
+copy>"}}`. Doing that by hand from the scratchpad is not a working-tree edit and was not refused.
+It answers three questions per pass, each in one run:
+- does the shipped test actually die on a sensible mutation (the parent usually asks this),
+- does my PROPOSED FIX keep the shipped tests green (the single most persuasive line in a report),
+- which shipped test's FIXTURE encodes the defect — a fix that breaks exactly one test whose
+  fixture is the defective input is a fix, not a regression.
+Measured matrix for ADR-096 (each correlate test ≈ 70 s): baseline PASS/PASS; mutant "atHeldAddress
+loses `|| ContestFresh`" killed `TestALapsedOccupantYieldsTheAddressToTheNewcomer` but NOT
+`TestAStaleContestAgesOutAndAFreshOneHolds` (that one asserts the `CloseStale` row-survival site
+only, not the decision that reads it); mutant "occupantLapsed always false" killed it too;
+candidate fix PASS/PASS. Write the mutant copies once, keep one overlay json per mutation.
+
+Costs on this dev DB, for planning: `SweepOnce` ≈ 17-20 s (13 000 tenants), so a 3-scan scenario is
+~60 s and a 21-round day-by-day simulation ~10 min — run those in the background. A `seed`-made
+probe tenant with 50 000 assets/addresses/queue rows takes **~10 minutes to DELETE** (FK cascade);
+seed 50k only if the cost question needs it, and start the delete early. `EXPLAIN (ANALYZE)` as the
+app role needs `psql -c "SET app.tenant_id='<uuid>'" -c "EXPLAIN ..."` in one invocation.
+Ageing a whole tenant one "day" at a time (`assets` first+last_seen, `asset_addresses`
+valid_from/valid_to, `asset_identity_keys.valid_from`, `asset_identity_key_sightings.last_seen_at`,
+`services` first+last_seen, `asset_resolution_queue.enqueued_at` — never `observations`) inside one
+`db.Write` is what turns "21 days of scans" into 21 sweeps.
+
+**ADR-096 contest/lapse probes (S42).** `correlate.New(...).AgeEvery(0)` is mandatory whenever a probe
+shifts timestamps in the database: the ageing pass (CloseStale + ExpireUnplaceable) otherwise runs at
+most once an hour per tenant per Correlator instance and the next sweep silently skips it. A sustained
+contest is simulated by shifting `asset_addresses.valid_from`, `asset_identity_key_sightings.last_seen_at`
+and `services.last_seen` back N days and NOT the queue (an attacker who keeps contradicting keeps
+enqueuing fresh items) — that combination is exactly what a park produces, because the queue branch
+returns before `Open`/`TouchLive`/`deriveServices`, so those three columns freeze while the queue moves.
+Replaying a compressed multi-day history by dating the observations instead does NOT work: the ageing
+pass uses wall-clock `now` and closes the interval the previous sweep just wrote. The keyless-service
+payload that makes a host "alive but invisible to the domain" is a plain `service` observation with a
+product and no `ssh`/`tls` block. Assert on `SSHHostKeyFingerprintsAt(ctx, c, addr, 22,
+store.SightingWindow)` (the trust root `dispatch.trustMaterial` reads) AND on
+`asset_identity_keys.provenance` — the outcome that matters is which provenance the key was recorded
+with, and two verdicts for one shape can differ only in that. `seed(t, db, label)` reuses the label as
+the tenant NAME, so repeated runs of one test leave several tenants with the same name: aggregate queue
+counts per `tenant_id`, never per name, or an older run's leftovers read as a re-parking bug.
+
+## ADR-096 VERIFICATION pass (S42, seventh) — the four moves that produced the findings
+
+- **The store-level probe beats the sweep for anything about ageing or a unique index.** Two
+  throwaway `internal/store/aareview_*_test.go` files (`package store_test`, reusing `testDB`,
+  `newTenant` from `pool_integration_test.go` and `newAsset` from `identity_integration_test.go`)
+  answered in 0.04 s what a correlate scenario takes 60 s to say: (a) call `Record` twice with the
+  same port and different protocol spellings and read the error text — that is how the
+  one-live-key-per-port index vs per-port/protocol conflict unit was found; (b) seed
+  `asset_addresses.valid_from = now-30d` plus a hand-inserted pending queue row, then call
+  `ExpireUnplaceable` and `CloseStale` in ONE `db.Write` per "pass" and print live-address/pending
+  counts — that is how the mutual-dependency unbounded hold was found. No `SweepOnce`, no ageing
+  interval, no time travel through six tables.
+- **`Services.Upsert` content-guard probes need four writes, not two**: newer, older replay,
+  SAME-timestamp (the guard is `>=`, so it must still apply), and strictly-newer-with-nil-evidence
+  (coalesce must keep the old tls). Reading `last_seen` after each is what proves `greatest()`.
+- **`go test -overlay` for the FIX, then for the shipped suite.** The candidate one-line predicate
+  in `EstablishedAt` was applied by copying `internal/store/identity.go` to the scratchpad, patching
+  the copy with a python heredoc, and running `go test -overlay=<json>` — not a working-tree edit,
+  not refused. Then run the 2-3 shipped tests that exercise the SAME gate: "the fix kills exactly
+  one test and it is the one whose fixture asserts the defective outcome, while the two sibling
+  establishment-gate tests still pass" is the single most persuasive line in the report.
+- **`twoValuesOnOneService` is a review tool.** Two ssh keys on one port at an address makes
+  `Resolve` return before any continuity is measured, which is how you reach the never-classifiable
+  park in one scan; and the SAME shape with two different PROTOCOL strings slips past it entirely,
+  which is how you reach the store abort. Write the domain probe first (`package domain`, 3 ms,
+  `Candidate` has no `LastSeen` field — only `AddressLastSeen`): it tells you in milliseconds
+  whether the end-to-end run is worth 60 s.
+- Costs this pass (13 456 active tenants): `SweepOnce` ~17-20 s, `rotatedHost` ~40 s, a 5-scan
+  scenario ~165 s, the shipped rotation suite ~65 s per test. Probe tenants were `probe-v6%` /
+  `probe-v6b%`; the overlay run of the shipped tests also created fresh `rotation`/`renewal`/
+  `planted` tenants — delete those by `created_at >` your run start only, never by name (26
+  `rotation` tenants were already there from other runs).
+- Migration round trip with rows, again the only way to test a DOWN: `CREATE DATABASE
+  cvap_rev0045`, `for f in $(ls migrations/*.up.sql | sort); do psql -v ON_ERROR_STOP=1 -f $f;
+  done` (~20 s for 45 files), hand-seed the NEW enum values (they only exist after the up), run the
+  down, re-read the SECURITY predicate, then re-run the up. The decisive read here was
+  `valid_to IS NULL` on the relabelled keys, not the enum labels: 0045's down RETIRES a
+  rotation/lapsed key before relabelling it `attach`/`new_asset`, so a re-up cannot turn it into
+  trust material — a schema diff would have missed that entirely.

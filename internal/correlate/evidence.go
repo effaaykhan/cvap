@@ -3,6 +3,8 @@ package correlate
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/effaaykhan/cvap/internal/domain"
@@ -135,6 +137,21 @@ func groupByAddress(obs []store.Observation) []host {
 			// observation Core cannot place is not one it should guess about.
 			continue
 		}
+		// ONE spelling per address, before anything is compared or stored.
+		// The review measured a non-canonical spelling ("10.77.6.010", an
+		// unabbreviated IPv6, a "/24" suffix) grouping apart from the
+		// canonical one, ageing the occupant out of its address and handing
+		// it — and the credentialed trust root — to the newcomer. netip is
+		// strict (no leading zeros, no mask, no zone) and renders one form; a
+		// payload address it refuses is left unresolved like a missing one.
+		ip, err := netip.ParseAddr(a.Address)
+		if err != nil || ip.Zone() != "" {
+			// netip accepts a zone ("fe80::1%eth0"); inet does not, and a
+			// group the store cannot write pins the head of the batch for
+			// the whole tenant (measured). Refused here, with the rest.
+			continue
+		}
+		a.Address = ip.Unmap().String()
 		h, ok := byAddr[a.Address]
 		if !ok {
 			h = &host{address: a.Address}
@@ -163,6 +180,21 @@ func groupByAddress(obs []store.Observation) []host {
 	return out
 }
 
+// normProtocol is the one grammar for a service protocol on the identity path:
+// absent means tcp, otherwise lowercase tcp/udp/sctp; anything else lifts no
+// key. Every engine writes "tcp" today.
+func normProtocol(p string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "", "tcp":
+		return "tcp", true
+	case "udp":
+		return "udp", true
+	case "sctp":
+		return "sctp", true
+	}
+	return "", false
+}
+
 // keysFrom lifts ADR-007 identity keys out of one observation.
 //
 // Only the two a network scan can actually produce. The rest of ADR-007's table
@@ -177,12 +209,32 @@ func keysFrom(o store.Observation, address string) []domain.IdentityKey {
 	if err := json.Unmarshal(o.Payload, &p); err != nil {
 		return nil
 	}
+	// The copied evidence is what the STORE reads the port back from
+	// (Retire, LastSeenAt, the one-live-key-per-port index) with an exact
+	// jsonb key, while Go decodes names case-insensitively: a payload spelling
+	// it "Port" would yield a source here and no port there — a key nothing
+	// could ever retire or contradict (measured). No exact "port": no key.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(o.Payload, &raw); err != nil {
+		return nil
+	}
+	if _, ok := raw["port"]; !ok || p.Port == 0 {
+		return nil
+	}
+	// The protocol is free text on the wire and part of the key's Source,
+	// which the one-live-key-per-service index mirrors: an unknown or
+	// differently-cased spelling would be a distinct service to the domain
+	// and a refused write to the store, retried every sweep. One grammar.
+	proto, ok := normProtocol(p.Protocol)
+	if !ok {
+		return nil
+	}
 
 	// The SOURCE is the service that produced the key, and it is what makes two
 	// moderate keys independent (ADR-049 §5). Two certificates from two ports of
 	// one host are one fact observed twice; naming the port is what stops them
 	// corroborating each other.
-	source := fmt.Sprintf("%d/%s", p.Port, orDefault(p.Protocol, "tcp"))
+	source := fmt.Sprintf("%d/%s", p.Port, proto)
 
 	var out []domain.IdentityKey
 

@@ -373,6 +373,21 @@ func (Assets) ReleaseOf(ctx context.Context, c *Conn, id uuid.UUID) (release str
 	return *rel, *conf, true, nil
 }
 
+// FamilyOf reads the asset's attributed distro family ("" when unattributed):
+// ADR-096's OS-agreement fact compares it against what a contested sighting's
+// banners attribute.
+func (Assets) FamilyOf(ctx context.Context, c *Conn, id uuid.UUID) (string, error) {
+	var fam *string
+	if err := c.QueryRow(ctx, `SELECT distro_family FROM assets WHERE tenant_id = $1 AND asset_id = $2`,
+		c.Tenant().UUID(), id).Scan(&fam); err != nil {
+		return "", mapError(err)
+	}
+	if fam == nil {
+		return "", nil
+	}
+	return *fam, nil
+}
+
 // SetRelease records the release resolution on the asset (P3.3, ADR-064):
 // distro_release (nil when UNRESOLVED — family-only stays the state, ADR-061),
 // its confidence, and its provenance chain. Separate from SetAttribution because

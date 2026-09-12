@@ -598,11 +598,24 @@ func TestAnExistingAssetGainsTheKeysItIsLaterSeenWith(t *testing.T) {
 		t.Fatalf("handover: %d queue items, %d unresolved observations; want an item per observation and both parked", queued, unresolved)
 	}
 	// The queued observation WAITS for its adjudication: another sweep raises
-	// no second item, and the occupant's next sighting at the address is not
-	// contested by the parked newcomer — the address is not frozen.
+	// no second item and no second announcement.
 	if err := c.SweepOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
+	var eventsBefore int64
+	if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
+		return c.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE tenant_id = $1 AND action = 'identity.contested'`,
+			c.Tenant().UUID()).Scan(&eventsBefore)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if eventsBefore != 1 {
+		t.Fatalf("identity.contested events after a re-sweep = %d; want 1 — a re-sweep of a parked group announces nothing", eventsBefore)
+	}
+	// The occupant's own next sighting at the address WAITS as well (ADR-096):
+	// the address is contested for everyone until adjudicated, because an
+	// agreeing fingerprint is a public value the probe never verified. Its
+	// park is announced — one event per scan that parks something new.
 	s.observe(t, db, handover.Add(5*time.Minute), sshService("10.10.0.20", 22, hostKey))
 	if err := c.SweepOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -618,9 +631,26 @@ func TestAnExistingAssetGainsTheKeysItIsLaterSeenWith(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if queuedAgain != queued || unresolvedAgain != 2 {
-		t.Fatalf("after two more sweeps: %d queue items (was %d), %d unresolved (want 2): a parked handover must not "+
-			"re-queue every sweep nor contest the occupant's later sightings", queuedAgain, queued, unresolvedAgain)
+	if queuedAgain <= queued || unresolvedAgain != 3 {
+		t.Fatalf("after the occupant's sighting at its contested address: %d queue items (was %d), %d unresolved (want 3): "+
+			"a contested address parks every sighting short of a merge until adjudicated", queuedAgain, queued, unresolvedAgain)
+	}
+	// Announced per scan that parked something new — two scans, two events —
+	// and Health counts ONE contested host however many items it parked.
+	var events, hosts int64
+	if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
+		if err := c.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE tenant_id = $1 AND action = 'identity.contested'`,
+			c.Tenant().UUID()).Scan(&events); err != nil {
+			return err
+		}
+		var err error
+		hosts, err = (store.ResolutionQueue{}).PendingAddresses(ctx, c)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if events != 2 || hosts != 1 {
+		t.Fatalf("identity.contested events = %d (want 2: once per scan that parked something, not per sweep), contested addresses = %d (want 1)", events, hosts)
 	}
 	var backdoor int
 	if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {

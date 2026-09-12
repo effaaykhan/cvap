@@ -39,6 +39,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -77,6 +78,11 @@ type Correlator struct {
 	db  *store.DB
 	log *slog.Logger
 	now func() time.Time
+
+	// agedAt is when each tenant's ageing pass last ran (AgeingInterval).
+	mu       sync.Mutex
+	agedAt   map[store.TenantID]time.Time
+	ageEvery *time.Duration
 
 	// rules is the loaded, validated rule set, refreshed once per sweep. The
 	// finding pipeline runs them over each asset as it is resolved.
@@ -226,6 +232,75 @@ func (c *Correlator) loadRules(ctx context.Context, anyTenant store.TenantID) er
 	return nil
 }
 
+// AgeingInterval bounds how often one tenant's addresses are aged and its
+// stale queue items expired (ADR-096): once an hour is plenty for a seven-day
+// window, and the alternative was measured at ten seconds per sweep.
+const AgeingInterval = time.Hour
+
+// AgeEvery overrides AgeingInterval — zero ages on every sweep. For tests
+// that shift the clock in the database and need the next sweep to notice.
+func (c *Correlator) AgeEvery(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ageEvery = &d
+}
+
+func (c *Correlator) shouldAge(tenant store.TenantID, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.agedAt == nil {
+		c.agedAt = map[store.TenantID]time.Time{}
+	}
+	every := AgeingInterval
+	if c.ageEvery != nil {
+		every = *c.ageEvery
+	}
+	if last, ok := c.agedAt[tenant]; ok && now.Sub(last) < every {
+		return false
+	}
+	c.agedAt[tenant] = now
+	return true
+}
+
+// ageTenant is the ageing pass: stale queue items expire, stale address
+// intervals close.
+func (c *Correlator) ageTenant(ctx context.Context, tenant store.TenantID, now time.Time) error {
+	return c.db.Write(ctx, tenant, func(ctx context.Context, conn *store.Conn) error {
+		expired, err := (store.ResolutionQueue{}).ExpireUnplaceable(ctx, conn, now.Add(-AddressWindow), now)
+		if err != nil {
+			return err
+		}
+		if len(expired) > 0 {
+			// A close-out nothing announces is a refusal that vanished: an
+			// operator watching the Health chip fall to zero finds the reason
+			// here (ADR-096). The list is capped; the count is not.
+			const maxListed = 50
+			listed := expired
+			if len(listed) > maxListed {
+				listed = listed[:maxListed]
+			}
+			if err := (store.AuditEvents{}).Record(ctx, conn, store.AuditEvent{
+				ActorType:    store.ActorSystem,
+				Action:       "identity.items_expired",
+				ResourceType: "resolution_queue",
+				Detail: map[string]any{
+					"addresses":     listed,
+					"address_count": len(expired),
+					"note":          "pending items older than the window that no transition could reach — they named no candidate, or none of their candidates still held the address — were closed as expired (ADR-096)",
+				},
+			}); err != nil {
+				return err
+			}
+		}
+		n, err := (store.AssetAddresses{}).CloseStale(ctx, conn, now.Add(-AddressWindow), now)
+		if err == nil && n > 0 {
+			c.log.InfoContext(ctx, "closed stale address intervals",
+				slog.String("tenant_id", tenant.String()), slog.Int64("closed", n))
+		}
+		return err
+	})
+}
+
 func (c *Correlator) correlateTenant(ctx context.Context, tenant store.TenantID) error {
 	now := c.now()
 
@@ -239,23 +314,25 @@ func (c *Correlator) correlateTenant(ctx context.Context, tenant store.TenantID)
 	if err != nil {
 		return err
 	}
-	if len(pending) == 0 {
-		return nil
-	}
 
 	// Age out addresses that have stopped being observed, so `valid_to IS NULL`
 	// keeps meaning "is here now" rather than "was here once". Same window that
 	// gives `ip_window` its meaning: outside it the address is evidence of
-	// nothing, and the resolver already refuses to attach on it.
-	if err := c.db.Write(ctx, tenant, func(ctx context.Context, conn *store.Conn) error {
-		n, err := (store.AssetAddresses{}).CloseStale(ctx, conn, now.Add(-AddressWindow), now)
-		if err == nil && n > 0 {
-			c.log.InfoContext(ctx, "closed stale address intervals",
-				slog.String("tenant_id", tenant.String()), slog.Int64("closed", n))
+	// nothing, and the resolver already refuses to attach on it. BEFORE the
+	// nothing-to-do return: ageing is about silence, and a tenant whose every
+	// observation is parked has nothing unresolved and everything to age (the
+	// review measured a frozen host never ageing because nothing was pending).
+	// At most once per AgeingInterval per tenant: a seven-day window does not
+	// need thirty-second ageing, and the write measured 0.7 ms per tenant per
+	// sweep — ten seconds of a thirty-second sweep at the dev database's
+	// tenant count.
+	if c.shouldAge(tenant, now) {
+		if err := c.ageTenant(ctx, tenant, now); err != nil {
+			return err
 		}
-		return err
-	}); err != nil {
-		return err
+	}
+	if len(pending) == 0 {
+		return nil
 	}
 
 	// Zone types for this tenant, for the exposure rules. Loaded once per sweep
@@ -295,6 +372,24 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		}
 
 		v := domain.Resolve(h.keys, candidates, now, AddressWindow)
+		// A handover verdict names the contradicting keys; measure the four
+		// continuity facts for the address holder and ask once more
+		// (ADR-096). Only a contested host pays for the reads. The decision
+		// stays in domain: this gathers facts and hands them over.
+		if v.Decision == domain.DecisionQueue && len(v.Handover) > 0 && len(v.Candidates) == 1 {
+			for i := range candidates {
+				if candidates[i].AssetID != v.Candidates[0] || candidates[i].HeldAddress != h.address {
+					continue
+				}
+				f, err := c.continuityFor(ctx, conn, candidates[i], h, v.Handover, now)
+				if err != nil {
+					return err
+				}
+				candidates[i].Continuity = &f
+				v = domain.Resolve(h.keys, candidates, now, AddressWindow)
+				break
+			}
+		}
 
 		assetID := v.AssetID
 		switch v.Decision {
@@ -312,30 +407,81 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 			// door. Every observation gets an item naming it, so ListUnresolved
 			// parks all of them until the adjudication.
 			carried := map[uuid.UUID]bool{}
+			newItems := 0
 			for _, k := range h.keys {
 				if k.Type.Strength() == 0 || k.ObservationID == uuid.Nil {
 					continue
 				}
 				carried[k.ObservationID] = true
-				if err := (store.ResolutionQueue{}).Enqueue(ctx, conn, v, k, now); err != nil {
+				inserted, err := (store.ResolutionQueue{}).Enqueue(ctx, conn, v, k, h.address, now)
+				if err != nil {
 					return err
+				}
+				if inserted {
+					newItems++
 				}
 			}
 			for _, o := range h.obs {
 				if carried[o.ID] {
 					continue
 				}
-				if err := (store.ResolutionQueue{}).Enqueue(ctx, conn, v, domain.IdentityKey{
+				inserted, err := (store.ResolutionQueue{}).Enqueue(ctx, conn, v, domain.IdentityKey{
 					Type: domain.KeyIPWindow, Value: h.address, Source: "net",
 					ObservationID: o.ID, Payload: o.Payload,
-				}, now); err != nil {
+				}, h.address, now)
+				if err != nil {
 					return err
+				}
+				if inserted {
+					newItems++
 				}
 			}
 			c.log.WarnContext(ctx, "asset resolution needs an operator",
 				slog.String("tenant_id", tenant.String()),
 				slog.String("address", h.address),
 				slog.String("reason", v.Reason))
+			// A park that nothing announces is a disappearance (B41, ADR-096):
+			// the observations wait for an adjudication, the host's inventory
+			// stops moving, and until now the only trace was the WARN above.
+			// One audit event per sweep that parks something NEW — a
+			// re-sweep of an already-parked group is a no-op and raises
+			// nothing; a later scan of the contested host parks new items
+			// and raises again, bounded by the scan cadence (measured: one
+			// per contested address per scan). It carries the address, the
+			// reason, the candidates and how many observations this sweep
+			// parked. Health counts the pending items and addresses.
+			if newItems > 0 {
+				cands := make([]string, 0, len(v.Candidates))
+				for _, id := range v.Candidates {
+					cands = append(cands, id.String())
+				}
+				// On the contested asset's own timeline: that is where
+				// someone asking "why did this host stop updating" looks. An
+				// item with no candidate (two hosts on one port at an
+				// address nothing holds) is keyed to the address instead.
+				resourceType, resourceID := "address", (*uuid.UUID)(nil)
+				if len(v.Candidates) > 0 {
+					first := v.Candidates[0]
+					resourceType, resourceID = "asset", &first
+				}
+				if err := (store.AuditEvents{}).Record(ctx, conn, store.AuditEvent{
+					ActorType:    store.ActorSystem,
+					Action:       "identity.contested",
+					ResourceType: resourceType,
+					ResourceID:   resourceID,
+					Detail: map[string]any{
+						"address":       h.address,
+						"reason":        v.Reason,
+						"candidates":    cands,
+						"observations":  len(h.obs),
+						"parked_items":  newItems,
+						"note":          "queued for an operator; the host's observations are parked until adjudicated (B39) or a later scan classifies a rotation (ADR-096)",
+						"observed_last": h.seenAt.UTC().Format(time.RFC3339),
+					},
+				}); err != nil {
+					return err
+				}
+			}
 			// The observations stay UNRESOLVED. An item nobody has adjudicated
 			// must not look correlated, and `asset_id IS NULL` is what the
 			// finding pipeline reads as "not yet".
@@ -347,6 +493,29 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 				return err
 			}
 			assetID = a.ID
+			// The address holder lapsed (ADR-096): its contest at this
+			// address closes with it. Open below takes the address off it.
+			if v.Lapsed != uuid.Nil {
+				expired, err := (store.ResolutionQueue{}).CloseExpired(ctx, conn, h.address, v.Lapsed, h.seenAt)
+				if err != nil {
+					return err
+				}
+				lapsed := v.Lapsed
+				if err := (store.AuditEvents{}).Record(ctx, conn, store.AuditEvent{
+					ActorType:    store.ActorSystem,
+					Action:       "identity.contest_expired",
+					ResourceType: "asset",
+					ResourceID:   &lapsed,
+					Detail: map[string]any{
+						"address":       h.address,
+						"items_expired": expired,
+						"new_asset":     assetID.String(),
+						"note":          "the held key has not answered at the address for a full window while a contradicting key answered on two scans; the occupant lapsed and the newcomer is a new asset, trusted on ADR-094's terms (ADR-096)",
+					},
+				}); err != nil {
+					return err
+				}
+			}
 		}
 
 		// Attach, Merge and NewAsset all reach here, and the difference is what
@@ -389,12 +558,79 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		// after the held one is retired, so the two never sit side by side as
 		// merge evidence — and never by the plain loop.
 		contradicted := func(k domain.IdentityKey) bool {
-			for _, x := range v.Contradicted {
+			for _, x := range append(append([]domain.IdentityKey{}, v.Contradicted...), v.Rotated...) {
 				if x.Type == k.Type && x.Value == k.Value && x.Source == k.Source {
 					return true
 				}
 			}
 			return false
+		}
+		// A key rotation (ADR-096): the held SSH key on that port is retired
+		// and the observed one recorded with its own provenance — which the
+		// trust root EXCLUDES: a takeover of the SSH port alone is
+		// indistinguishable from a rotation on banner data, so the inventory
+		// moves and the credentialed trust does not, until an operator pins
+		// or confirms. A renewed certificate beside it is v.Contradicted and
+		// takes the establishment gate below like any renewal — corroborated
+		// only once the rotated key itself is established here. The items parked at this address for
+		// this asset close as `rotated`, which releases the parked
+		// observations back into the sweep; they attach next pass, because
+		// the key they carry is now the one the asset holds. Nothing parked
+		// is lost. Announced on the asset's timeline like the park was.
+		if len(v.Rotated) > 0 {
+			var retired, recorded []string
+			for _, k := range v.Rotated {
+				// Each step is checked, and a step that did nothing is a
+				// FAULT that rolls the whole attach back (the host stays
+				// parked, the sweep retries): the review measured a key the
+				// retire predicate did not match, and a key already live on
+				// another asset whose Record was a silent no-op — the asset
+				// left keyless while the event said "recorded".
+				n, err := (store.AssetIdentityKeys{}).Retire(ctx, conn, assetID, k.Type, portOf(k.Source), h.seenAt)
+				if err != nil {
+					return err
+				}
+				if n == 0 {
+					return fmt.Errorf("rotation at %s: no live %s from %s on asset %s to retire", h.address, k.Type, k.Source, assetID)
+				}
+				scanID, err := scanFor(k)
+				if err != nil {
+					return err
+				}
+				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, h.seenAt, store.KeyFromRotation, scanID, h.address, portOf(k.Source)); err != nil {
+					return err
+				}
+				holder, err := (store.AssetIdentityKeys{}).LiveByValue(ctx, conn, k.Type, k.Value)
+				if err != nil {
+					return err
+				}
+				if holder != assetID {
+					return fmt.Errorf("rotation at %s: %s from %s is live on asset %s, not recorded on %s", h.address, k.Type, k.Source, holder, assetID)
+				}
+				retired = append(retired, string(k.Type)+"@"+k.Source)
+				recorded = append(recorded, string(k.Type)+"@"+k.Source+" "+k.Value)
+			}
+			examined := append(append([]domain.IdentityKey{}, v.Rotated...), v.Contradicted...)
+			closed, err := (store.ResolutionQueue{}).CloseRotated(ctx, conn, h.address, assetID, examined, h.seenAt)
+			if err != nil {
+				return err
+			}
+			if err := (store.AuditEvents{}).Record(ctx, conn, store.AuditEvent{
+				ActorType:    store.ActorSystem,
+				Action:       "identity.rotated",
+				ResourceType: "asset",
+				ResourceID:   &assetID,
+				Detail: map[string]any{
+					"address":      h.address,
+					"reason":       v.Reason,
+					"retired":      retired,
+					"recorded":     recorded,
+					"items_closed": closed,
+					"note":         "continuity narrows the window and verifies nothing (ADR-096); the recorded key is NOT credentialed trust material until an operator pins or confirms it",
+				},
+			}); err != nil {
+				return err
+			}
 		}
 		if v.Decision == domain.DecisionMerge || v.Decision == domain.DecisionNewAsset {
 			from := store.KeyFromMerge
@@ -477,6 +713,14 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 			if v.Decision == domain.DecisionAttach {
 				from = store.KeyFromAttach
 			}
+			// A lapse is the same contest one window later: its keys are
+			// inventory, never the credentialed trust root (ADR-096). The
+			// review measured 'new_asset' here buying the root with one
+			// window of holding tcp/22 against a live host — cheaper than
+			// the rotation it preempted, and the forgery that bought MORE.
+			if v.Lapsed != uuid.Nil {
+				from = store.KeyFromLapsed
+			}
 			for _, k := range h.keys {
 				if k.Type.Strength() < 2 {
 					continue // weak keys are the address, held below
@@ -489,6 +733,39 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 					return err
 				}
 				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, h.seenAt, from, scanID, h.address, portOf(k.Source)); err != nil {
+					return err
+				}
+			}
+		}
+
+		// A stale contest — items pending at this address for this asset,
+		// no contradiction seen for a full window — expires on the attach
+		// the domain just allowed (ADR-096): the items close and the address
+		// is nobody's prison. The parked observations stay out of the sweep
+		// (released, the contradiction re-parked itself and renewed the
+		// freeze — measured); what the host still answers is re-derived by
+		// this sighting. A fresh contest never reaches here.
+		for _, cand := range candidates {
+			if cand.AssetID != assetID || cand.HeldAddress != h.address || !cand.PendingContested ||
+				domain.ContestFresh(cand, now, AddressWindow) {
+				continue
+			}
+			expired, err := (store.ResolutionQueue{}).CloseExpired(ctx, conn, h.address, assetID, h.seenAt)
+			if err != nil {
+				return err
+			}
+			if expired > 0 {
+				if err := (store.AuditEvents{}).Record(ctx, conn, store.AuditEvent{
+					ActorType:    store.ActorSystem,
+					Action:       "identity.contest_expired",
+					ResourceType: "asset",
+					ResourceID:   &assetID,
+					Detail: map[string]any{
+						"address":       h.address,
+						"items_expired": expired,
+						"note":          "no contradicting key seen at the address for a full window while the held host answered; the contest is closed and the host's inventory resumes from this sighting — what was parked during the freeze is not re-derived (ADR-096)",
+					},
+				}); err != nil {
 					return err
 				}
 			}
@@ -671,6 +948,21 @@ func (c *Correlator) candidatesFor(ctx context.Context, conn *store.Conn, h host
 			// trusting the timestamp to refer to the right one.
 			byID[id].HeldAddress = h.address
 			byID[id].AddressLastSeen = lastSeen
+			// Is a contradiction already parked here? A weak-only sighting
+			// then waits with it (ADR-096) rather than walking in on the
+			// address alone — the batch-overflow door the review measured.
+			pending, err := (store.ResolutionQueue{}).PendingAtAddress(ctx, conn, h.address, id)
+			if err != nil {
+				return nil, err
+			}
+			byID[id].PendingContested = pending
+			if pending {
+				last, _, err := (store.ResolutionQueue{}).ContradictionLastSeen(ctx, conn, h.address, id)
+				if err != nil {
+					return nil, err
+				}
+				byID[id].ContradictionLastSeen = last
+			}
 		}
 	}
 
@@ -678,6 +970,9 @@ func (c *Correlator) candidatesFor(ctx context.Context, conn *store.Conn, h host
 	for _, c := range byID {
 		out = append(out, *c)
 	}
+	// Deterministic: the first candidate names the audit event's resource
+	// and the reason's asset; map order made both vary per sweep.
+	sort.Slice(out, func(i, j int) bool { return out[i].AssetID.String() < out[j].AssetID.String() })
 	return out, nil
 }
 
@@ -735,6 +1030,24 @@ func orDefault(v, d string) string {
 // resolveHost itself. A family-only result (release nil) is written and is
 // distinct from no attribution, which leaves the columns null.
 func (c *Correlator) deriveAttribution(ctx context.Context, conn *store.Conn, assetID uuid.UUID, h host) (string, error) {
+	a := domain.AttributeOS(osEvidence(h))
+	if a.DistroFamily == "" {
+		return "", nil // no attribution: leave the asset's OS columns null
+	}
+	prov, err := json.Marshal(a.Provenance)
+	if err != nil {
+		return "", err
+	}
+	// Inferred: fills an absence, never overwrites an exact read (ADR-095).
+	if err := (store.Assets{}).SetAttribution(ctx, conn, assetID, a.DistroFamily, a.DistroRelease, a.Confidence, prov, false); err != nil {
+		return "", err
+	}
+	return a.DistroFamily, nil
+}
+
+// osEvidence lifts the per-service OS hints out of a host group, for
+// attribution and for ADR-096's OS-agreement fact alike.
+func osEvidence(h host) []domain.OSEvidence {
 	var ev []domain.OSEvidence
 	for _, o := range h.obs {
 		if o.Type != "service" {
@@ -758,19 +1071,104 @@ func (c *Correlator) deriveAttribution(ctx context.Context, conn *store.Conn, as
 			Confidence: conf,
 		})
 	}
-	a := domain.AttributeOS(ev)
-	if a.DistroFamily == "" {
-		return "", nil // no attribution: leave the asset's OS columns null
+	return ev
+}
+
+// continuityFor gathers ADR-096's continuity DATA about a contested address
+// for the asset holding it. Data only — every rule is domain.rotationFailures.
+// Every input is public banner data; the ADR says what that buys and does not.
+func (c *Correlator) continuityFor(ctx context.Context, conn *store.Conn, cand domain.Candidate, h host, handover []domain.IdentityKey, now time.Time) (domain.Continuity, error) {
+	f := domain.Continuity{Keys: map[string]domain.KeyContinuity{}}
+	since := now.Add(-store.SightingWindow)
+	assetID := cand.AssetID
+
+	for _, k := range handover {
+		var kc domain.KeyContinuity
+		// The newcomer's scans: the parked ones plus this one.
+		scans, first, _, err := (store.ResolutionQueue{}).KeyScansPending(ctx, conn, k.Type, k.Value, h.address, since)
+		if err != nil {
+			return f, err
+		}
+		seen := map[uuid.UUID]bool{}
+		for _, id := range scans {
+			seen[id] = true
+		}
+		for _, o := range h.obs {
+			if o.ID == k.ObservationID {
+				id, err := (store.Jobs{}).ScanIDForTask(ctx, conn, o.TaskID)
+				if err != nil {
+					return f, err
+				}
+				if id != uuid.Nil {
+					seen[id] = true
+				}
+				break
+			}
+		}
+		kc.NewKeyScans = len(seen)
+		if first.IsZero() {
+			first = h.seenAt
+		}
+		kc.NewKeyFirstSeen = first
+
+		// The held key of the same service: its sighting recorded on an
+		// attach, and its sightings parked with a contested group — the
+		// latest of either.
+		port := portOf(k.Source)
+		if last, found, err := (store.AssetIdentityKeys{}).LastSeenAt(ctx, conn, assetID, k.Type, port, h.address); err != nil {
+			return f, err
+		} else if found {
+			kc.HeldKeySighted, kc.HeldKeyLastSeen = true, last
+		}
+		for _, held := range cand.Keys {
+			if held.Type != k.Type || held.Source != k.Source {
+				continue
+			}
+			if _, _, last, err := (store.ResolutionQueue{}).KeyScansPending(ctx, conn, held.Type, held.Value, h.address, since); err != nil {
+				return f, err
+			} else if !last.IsZero() {
+				kc.HeldKeySighted = true
+				if last.After(kc.HeldKeyLastSeen) {
+					kc.HeldKeyLastSeen = last
+				}
+			}
+		}
+
+		// Live on another asset already?
+		holder, err := (store.AssetIdentityKeys{}).LiveByValue(ctx, conn, k.Type, k.Value)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return f, err
+		}
+		kc.NewKeyHeldElsewhere = err == nil && holder != assetID
+		f.Keys[k.Source] = kc
 	}
-	prov, err := json.Marshal(a.Provenance)
+
+	held, err := (store.Services{}).ProductsSince(ctx, conn, assetID, since)
 	if err != nil {
-		return "", err
+		return f, err
 	}
-	// Inferred: fills an absence, never overwrites an exact read (ADR-095).
-	if err := (store.Assets{}).SetAttribution(ctx, conn, assetID, a.DistroFamily, a.DistroRelease, a.Confidence, prov, false); err != nil {
-		return "", err
+	for _, s := range held {
+		f.HeldServices = append(f.HeldServices, domain.ServiceSeen{Port: s.Port, Protocol: s.Protocol, Product: s.Product})
 	}
-	return a.DistroFamily, nil
+	for _, o := range h.obs {
+		if o.Type != "service" {
+			continue
+		}
+		var p servicePayload
+		if err := json.Unmarshal(o.Payload, &p); err != nil || p.Port == 0 {
+			continue
+		}
+		proto, ok := normProtocol(p.Protocol)
+		if !ok {
+			continue
+		}
+		f.ObservedServices = append(f.ObservedServices, domain.ServiceSeen{Port: int(p.Port), Protocol: proto, Product: p.Product})
+	}
+	if f.HeldFamily, err = (store.Assets{}).FamilyOf(ctx, conn, assetID); err != nil {
+		return f, err
+	}
+	f.ObservedFamily = domain.AttributeOS(osEvidence(h)).DistroFamily
+	return f, nil
 }
 
 // deriveRelease resolves the distro RELEASE from the observed service versions

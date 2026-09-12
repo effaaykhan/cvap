@@ -1047,6 +1047,33 @@ nothing]] shape 3, the fixture the assertion needs is unreachable.)
 
 ---
 
+### 5.15 A guard scoped to the unit of work, not the unit of meaning — the batch-bounded park
+
+**What happened (S42).** ADR-094 parks "the whole host group" when an address handover is contested, and
+the comment beside it said so: the newcomer's keyless ports must wait with the contested key, or they
+re-group alone next sweep, carry only the address, and attach to the occupant through the back door. The
+group, though, was the sweep's BATCH slice of the address (`correlate.Batch`, 500 rows), and the queue's
+anti-join excluded only observations that had an item. A contested host answering on more ports than one
+batch holds — or a straggler chunk of the same scan landing a sweep later — had its overflow attach to the
+occupant, services and all. The security review measured it three ways (521 ports: 21 rows written onto
+the occupant on sweep two; an estate-sized batch: 16; one straggler: 1) while the audit event I had just
+added reported `parked_items=5` for a scan that had merged sixteen. Every test passed, because every test
+fitted in one batch.
+
+**Why it is its own pattern.** The property ("an observation at a contested address waits") was stated over
+the address, implemented over the batch, and the two coincide in every fixture small enough to write by
+hand. Same family as §5.12 (a correct rule in a place its data cannot reach) but the failure is the
+opposite direction: the rule reaches the data, and stops one batch boundary short. The tell: a guard that
+holds "for the group" where the group is whatever the loop happened to be iterating.
+
+**How to apply.** When a property is stated over an entity (address, host, scan), enforce it by READING the
+entity's state (`PendingAtAddress`), not by the shape of the batch that raised it; and let the domain
+decide it (`Candidate.PendingContested`) so the next caller cannot forget. Test with the unit split across
+two batches or two sweeps — a group larger than `Batch` costs nothing to seed and finds this for free.
+(ADR-096 step 1 §2; [[measure-dont-read]].)
+
+---
+
 ## 6. Standing requirement (from S23 onward)
 
 Every session that lands a feature reports whether it needs a dashboard surface,

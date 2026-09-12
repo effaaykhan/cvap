@@ -510,7 +510,7 @@ store-test: ## Run the database-backed suites against the dev database as the ap
 	@test -n "$(APP_DATABASE_URL)" || { echo "APP_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
 	CVAP_TEST_DATABASE_URL="$(APP_DATABASE_URL)" \
 	KNOWLEDGE_IMPORT_DATABASE_URL="$(KNOWLEDGE_IMPORT_DATABASE_URL)" \
-	go test $(DB_TEST_PKGS) -count=1 $(GOTEST_FLAGS)
+	go test $(DB_TEST_PKGS) -count=1 -timeout 40m $(GOTEST_FLAGS)
 
 loadtest: ## 10k-asset load test against the §5 SLOs. Coarse ceiling always; precise SLO only with CVAP_RUN_LOADTEST=1
 	@test -n "$(APP_DATABASE_URL)" || { echo "APP_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }

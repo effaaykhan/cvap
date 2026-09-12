@@ -21,7 +21,7 @@ import (
 // Mutations, declared beside the tests that must kill them.
 //
 // mutate:subject internal/domain/identity.go
-// mutate:test    ./internal/domain/ -run TestOneStrongKey|TestTwoModerate|TestAModerateAnd|TestWeakEvidence|TestADisagreement|TestTwoQualifying|TestAnUnknownKeyType|TestTheDHCPCase|TestAnAddressHandover
+// mutate:test    ./internal/domain/ -run TestOneStrongKey|TestTwoModerate|TestAModerateAnd|TestWeakEvidence|TestADisagreement|TestTwoQualifying|TestAnUnknownKeyType|TestTheDHCPCase|TestAnAddressHandover|TestARotation|TestAWeakOnlySighting|TestTheHeldKeyAnsweringOnThisScan|TestAPendingItemExtends|TestTwoKeysContradicting|TestALapsedOccupant
 //
 // mutate:case    independence is counted by key TYPE rather than by service
 // mutate:old     moderate[k.Source] = true
@@ -40,6 +40,50 @@ import (
 // mutate:case    a renewed certificate at the held address stays a contradiction (ADR-094)
 // mutate:old     			if len(certs) > 0 {
 // mutate:new     			if false {
+//
+// mutate:case    a rotation classifies with the new key seen on ONE scan (ADR-096)
+// mutate:old     		if kc.NewKeyScans < RotationScans {
+// mutate:new     		if kc.NewKeyScans < 1 {
+//
+// mutate:case    a contradiction of any key type is forgiven by continuity (ADR-096)
+// mutate:old     		if k.Type != KeySSHHostKey {
+// mutate:new     		if k.Type == "" {
+//
+// mutate:case    the held key answering on this scan is a rotation (ADR-096)
+// mutate:old     			if a.Type == k.Type && a.Source == k.Source {
+// mutate:new     			if a.Type == "" {
+//
+// mutate:case    a held key with no sighting on record passes the comparison (ADR-096)
+// mutate:old     		if !kc.HeldKeySighted {
+// mutate:new     		if false {
+//
+// mutate:case    an asset with no product on record is continuous (ADR-096)
+// mutate:old     	if len(held) == 0 {
+// mutate:new     	if len(held) < 0 {
+//
+// mutate:case    a sighting at a freshly contested address attaches (ADR-096)
+// mutate:old     			if ContestFresh(c, now, window) {
+// mutate:new     			if false {
+//
+// mutate:case    a fresh contest does not extend the hold on an aged address (ADR-096)
+// mutate:old     			(holdsAddressInWindow(c, now, window) || ContestFresh(c, now, window))
+// mutate:new     			holdsAddressInWindow(c, now, window)
+//
+// mutate:case    an occupant attached inside the window can lapse (ADR-096)
+// mutate:old     			if len(s.agreeing) == 0 && !holdsAddressInWindow(c, now, window) &&
+// mutate:new     			if len(s.agreeing) == 0 &&
+//
+// mutate:case    an occupant silent for a full window has not lapsed (ADR-096)
+// mutate:old     		if !ok || !kc.HeldKeySighted || !kc.HeldKeyLastSeen.Before(cutoff) || kc.NewKeyScans < RotationScans ||
+// mutate:new     		if !ok || !kc.HeldKeySighted || kc.HeldKeyLastSeen.Before(cutoff) || kc.NewKeyScans < RotationScans ||
+//
+// mutate:case    two values of one key type from one service resolve as one host (ADR-096)
+// mutate:old     		if v, ok := seen[id]; ok && v != k.Value {
+// mutate:new     		if v, ok := seen[id]; ok && v == k.Value {
+//
+// mutate:case    a stale contest still parks (ADR-096)
+// mutate:old     	return c.PendingContested && !c.ContradictionLastSeen.IsZero() &&
+// mutate:new     	return c.PendingContested && !c.ContradictionLastSeen.IsZero() || false &&
 //
 // mutate:case    a disagreement at equal strength is outvoted by agreement
 // mutate:old     if len(s.agreeing) > 0 && maxStrength(s.conflicts) >= maxStrength(s.agreeing) {
