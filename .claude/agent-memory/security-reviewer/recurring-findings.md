@@ -1752,3 +1752,44 @@ change — and if the answer is the row being expired, the pair has no exit. A t
 (`valid_from >= now - k*window`) or an "re-raised for k windows with no classification" escape is
 the fix; the store-level probe is instant (seed the row ages by hand, call `ExpireUnplaceable` then
 `CloseStale` in one `db.Write`, print live-address and pending counts per pass) and needs no sweep.
+
+**90 (update, S42 commit 30bd17d).** The ABORT half is fixed: `keysFrom` now normalises through
+`normProtocol` (absent/tcp any case → tcp; udp; sctp; else no key) and demands an exact `port` key,
+so the group no longer wedges the batch. The UNIT MISMATCH is not: the sighting row is
+`(tenant, identity_key_id, address, port)` with **no protocol column**, and
+`SSHHostKeyFingerprintsAt` (the ADR-091 credentialed trust root, dispatch/credgrant.go:241) matches
+`s.port = $3` only. So a service observation claiming `"protocol":"udp"` on port 22 lifts a key
+whose Source ("22/udp") contradicts nothing the asset holds on 22/tcp — no conflict, no park, no
+contest — and after two scans its sighting at (address, 22) is indistinguishable from a tcp one.
+Measured on the dev DB: established ssh-only host, attacker adds a udp claim → 2 fingerprints
+qualify at 22 → `trustMaterial` refuses every credentialed job there for ever (no operator verb,
+B39); host with no established tcp ssh key (TLS-only, or its key is `rotation`/`lapsed` and
+excluded) → the udp-claimed fingerprint is the SOLE trust root and is written into `known_hosts`
+for the tcp/22 dial. `Retire(type, port)` is port-only too (measured: closed both the tcp and the
+udp key in one call), which both hides the second key from the rotation audit event and creates a
+laundering step — a retired `rotation`/`lapsed` key re-observed at a now-empty Source is re-recorded
+with `attach` provenance, which nothing excludes.
+**How to apply:** when a key's identity is a tuple, check that EVERY read that spends its trust
+uses the same tuple. Here: add `protocol` to `asset_identity_key_sightings` and to the trust-root
+and `Retire` predicates, or refuse a non-tcp protocol on the identity path outright until a udp
+probe exists.
+
+**92. A no-op write on a uniqueness conflict, with the readback guard in one branch and not its
+sibling — a silent, permanently keyless asset.** `AssetIdentityKeys.Record`
+(internal/store/identity.go:365) is `ON CONFLICT (tenant_id, key_type, key_value) WHERE valid_to IS
+NULL DO NOTHING`, so recording a key another asset holds live writes nothing and no sighting. The
+rotation branch (correlate.go:596-610) checks for exactly this — `LiveByValue` readback, `holder !=
+assetID` is a fault that rolls the attach back — and the new-asset/attach recording loop
+(correlate.go:712-737) does not. Measured: an ssh-only occupant whose address was given away by an
+ADR-096 lapse returns after the contest goes stale → `Resolve` says `new_asset` (one moderate key
+never merges) → `Record` no-ops → a THIRD asset with zero identity keys now holds the address, the
+original asset keeps the key and no address, and every later scan attaches to the keyless asset by
+address. No audit event anywhere (`Assets.Create` writes none), the two can never re-merge (a
+keyless candidate has nothing to agree with), and the trust root at the address is empty for ever,
+so credentialed jobs there refuse permanently. The same shape is the *designed* degradation for a
+single-moderate-key host changing address (ADR-007), which is why it reads as normal.
+**Why:** the ADR says "accumulates a new asset", not "accumulates an asset that can never hold its
+own key", and the branch that did think about the no-op was the new one.
+**How to apply:** every `DO NOTHING` is a refusal — ask who reads the fact that nothing was written.
+If a caller treats "Record returned nil" as "the key is on this asset", it needs the same readback
+the rotation branch has, or the verdict needs a third outcome (queue it) rather than a silent split.

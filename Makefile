@@ -527,7 +527,9 @@ migrate-new: ## Scaffold a migration pair: make migrate-new NAME=snake_case
 	@echo "$(NAME)" | grep -Eq '^[a-z][a-z0-9_]*$$' || { echo "NAME must be snake_case: $(NAME)"; exit 1; }
 	@mkdir -p $(MIGRATIONS_DIR)
 	@n=$$(ls $(MIGRATIONS_DIR) 2>/dev/null | grep -oE '^[0-9]{4}' | sort -n | tail -1); \
-	next=$$(printf '%04d' $$(( 10#$${n:-0} + 1 ))); \
+	n=$$(echo "$${n:-0}" | sed 's/^0*//'); \
+	next=$$(printf '%04d' $$(( $${n:-0} + 1 ))); \
+	test -n "$$next" && test "$$next" != "0000" || { echo "could not compute the next migration number"; exit 1; }; \
 	up="$(MIGRATIONS_DIR)/$${next}_$(NAME).up.sql"; \
 	down="$(MIGRATIONS_DIR)/$${next}_$(NAME).down.sql"; \
 	test ! -e "$$up" || { echo "$$up already exists"; exit 1; }; \

@@ -199,7 +199,7 @@ func TestOneLiveKeyValuePerTenantAndType(t *testing.T) {
 	}
 	ctx := context.Background()
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		return (store.AssetIdentityKeys{}).Record(ctx, c, a, k, now, store.KeyFromNewAsset, uuid.Nil, "", 0)
+		return recordKey(ctx, c, a, k, now, store.KeyFromNewAsset, uuid.Nil, "", 0)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestOneLiveKeyValuePerTenantAndType(t *testing.T) {
 	// the second write is a no-op rather than an error — and the assertion is
 	// that B did NOT acquire the key.
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		return (store.AssetIdentityKeys{}).Record(ctx, c, b, k, now, store.KeyFromNewAsset, uuid.Nil, "", 0)
+		return recordKey(ctx, c, b, k, now, store.KeyFromNewAsset, uuid.Nil, "", 0)
 	}); err != nil {
 		t.Fatalf("the second Record errored rather than doing nothing: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestMergeEvidenceIsCopiedNotJustReferenced(t *testing.T) {
 	}
 	ctx := context.Background()
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-		return (store.AssetIdentityKeys{}).Record(ctx, c, a, k, now, store.KeyFromNewAsset, uuid.Nil, "", 0)
+		return recordKey(ctx, c, a, k, now, store.KeyFromNewAsset, uuid.Nil, "", 0)
 	}); err != nil {
 		t.Fatal(err)
 	}

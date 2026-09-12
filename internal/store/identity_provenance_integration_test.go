@@ -54,7 +54,7 @@ func TestAnObservedKeyIsTrustMaterialOnlyAfterTwoScansAtTheAddress(t *testing.T)
 	record := func(k domain.IdentityKey, at time.Time, from store.KeyProvenance, scan uuid.UUID, where string, port int) {
 		t.Helper()
 		if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
-			return (store.AssetIdentityKeys{}).Record(ctx, c, a, k, at, from, scan, where, port)
+			return recordKey(ctx, c, a, k, at, from, scan, where, port)
 		}); err != nil {
 			t.Fatal(err)
 		}

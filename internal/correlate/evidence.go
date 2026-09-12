@@ -181,16 +181,18 @@ func groupByAddress(obs []store.Observation) []host {
 }
 
 // normProtocol is the one grammar for a service protocol on the identity path:
-// absent means tcp, otherwise lowercase tcp/udp/sctp; anything else lifts no
-// key. Every engine writes "tcp" today.
+// absent or tcp (any case) is tcp; anything else lifts NO key. tcp only, on
+// purpose: the sighting rows that spend a key's trust (`SSHHostKeyFingerprintsAt`,
+// `EstablishedAt`, `Retire`) are keyed on (address, port) with no protocol, so a
+// key claimed on "22/udp" would contradict nothing on 22/tcp — no park, no
+// contest — and then land in the same sighting row the tcp key earns its trust
+// from (measured: the udp claim became the trust root for the tcp dial). A
+// UDP probe must add the protocol to the sightings' key before this widens
+// (B45). Every engine writes "tcp" today.
 func normProtocol(p string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(p)) {
 	case "", "tcp":
 		return "tcp", true
-	case "udp":
-		return "udp", true
-	case "sctp":
-		return "sctp", true
 	}
 	return "", false
 }

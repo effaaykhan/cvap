@@ -262,6 +262,12 @@ func (c *Correlator) shouldAge(tenant store.TenantID, now time.Time) bool {
 	return true
 }
 
+func (c *Correlator) unstampAge(tenant store.TenantID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.agedAt, tenant)
+}
+
 // ageTenant is the ageing pass: stale queue items expire, stale address
 // intervals close.
 func (c *Correlator) ageTenant(ctx context.Context, tenant store.TenantID, now time.Time) error {
@@ -328,6 +334,7 @@ func (c *Correlator) correlateTenant(ctx context.Context, tenant store.TenantID)
 	// tenant count.
 	if c.shouldAge(tenant, now) {
 		if err := c.ageTenant(ctx, tenant, now); err != nil {
+			c.unstampAge(tenant) // a transient fault must not skip the tenant for an hour
 			return err
 		}
 	}
@@ -597,7 +604,7 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 				if err != nil {
 					return err
 				}
-				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, h.seenAt, store.KeyFromRotation, scanID, h.address, portOf(k.Source)); err != nil {
+				if _, err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, h.seenAt, store.KeyFromRotation, scanID, h.address, portOf(k.Source)); err != nil {
 					return err
 				}
 				holder, err := (store.AssetIdentityKeys{}).LiveByValue(ctx, conn, k.Type, k.Value)
@@ -642,7 +649,7 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 				if err != nil {
 					return err
 				}
-				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, h.seenAt, from, scanID, h.address, portOf(k.Source)); err != nil {
+				if _, err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, h.seenAt, from, scanID, h.address, portOf(k.Source)); err != nil {
 					return err
 				}
 			}
@@ -703,7 +710,7 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 				if err != nil {
 					return err
 				}
-				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, h.seenAt, from, scanID, h.address, portOf(k.Source)); err != nil {
+				if _, err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, h.seenAt, from, scanID, h.address, portOf(k.Source)); err != nil {
 					return err
 				}
 			}
@@ -732,8 +739,40 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 				if err != nil {
 					return err
 				}
-				if err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, h.seenAt, from, scanID, h.address, portOf(k.Source)); err != nil {
+				inserted, err := (store.AssetIdentityKeys{}).Record(ctx, conn, assetID, k, h.seenAt, from, scanID, h.address, portOf(k.Source))
+				if err != nil {
 					return err
+				}
+				if !inserted {
+					// The value is live already. On this asset that is a
+					// re-sighting; on ANOTHER asset it is the key of a host
+					// this group did not merge with — one moderate key alone
+					// never merges (ADR-007) — and the asset here is left
+					// without it. Announced on this asset's timeline rather
+					// than silent (measured: a returning host became a third,
+					// keyless asset that could never re-merge); the merge
+					// question is B40's.
+					holder, err := (store.AssetIdentityKeys{}).LiveByValue(ctx, conn, k.Type, k.Value)
+					if err != nil && !errors.Is(err, store.ErrNotFound) {
+						return err
+					}
+					if err == nil && holder != assetID {
+						if err := (store.AuditEvents{}).Record(ctx, conn, store.AuditEvent{
+							ActorType:    store.ActorSystem,
+							Action:       "identity.key_held_elsewhere",
+							ResourceType: "asset",
+							ResourceID:   &assetID,
+							Detail: map[string]any{
+								"address":  h.address,
+								"key_type": string(k.Type),
+								"source":   k.Source,
+								"held_by":  holder.String(),
+								"note":     "this asset was seen with a key another asset holds live; one moderate key alone never merges (ADR-007), so the key stays where it is and this asset holds no key of that type from that service — an operator can merge the two (B39), and grading merge evidence is B40",
+							},
+						}); err != nil {
+							return err
+						}
+					}
 				}
 			}
 		}
@@ -991,7 +1030,7 @@ func (c *Correlator) deriveServices(ctx context.Context, conn *store.Conn, asset
 		}
 
 		s := store.Service{
-			AssetID: assetID, Port: int(p.Port), Protocol: orDefault(p.Protocol, "tcp"),
+			AssetID: assetID, Port: int(p.Port), Protocol: orDefault(strings.ToLower(strings.TrimSpace(p.Protocol)), "tcp"),
 			Name: p.Service, Product: p.Product, Version: p.Version,
 			IdentificationMethod: p.Method, Softmatch: p.Softmatch,
 			Solicited: p.Solicited, SafetyMode: p.SafetyMode,

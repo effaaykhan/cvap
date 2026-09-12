@@ -333,6 +333,25 @@ func TestOneModerateKeyAloneDoesNotMergeAcrossAnAddressChange(t *testing.T) {
 			"it alone is the merge ADR-007 forbids — if this now returns 1, the "+
 			"corroboration rule has been loosened and that is a decision needing an ADR.", got)
 	}
+	// The second asset cannot hold the key (a value is live on one asset at a
+	// time), so it is keyless — and that is ANNOUNCED on its timeline rather
+	// than silent (ADR-096; the review measured a returning host becoming a
+	// third, keyless asset nobody was told about). B39 merges, B40 grades.
+	var announced int64
+	var keylessHolds bool
+	if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
+		tid := c.Tenant().UUID()
+		if err := c.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE tenant_id = $1 AND action = 'identity.key_held_elsewhere'`, tid).Scan(&announced); err != nil {
+			return err
+		}
+		return c.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM asset_addresses a WHERE a.tenant_id = $1 AND a.ip_address = '10.10.0.22'::inet AND a.valid_to IS NULL
+		    AND NOT EXISTS (SELECT 1 FROM asset_identity_keys k WHERE k.tenant_id = a.tenant_id AND k.asset_id = a.asset_id AND k.valid_to IS NULL))`, tid).Scan(&keylessHolds)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if announced != 1 || !keylessHolds {
+		t.Fatalf("keyless second asset: announced=%d holds the new address keyless=%t; want one identity.key_held_elsewhere event and the keyless asset at the address", announced, keylessHolds)
+	}
 }
 
 // TestWithoutAModerateKeyTheAddressChangeMakesANewAsset.

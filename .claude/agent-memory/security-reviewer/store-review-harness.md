@@ -512,3 +512,12 @@ counts per `tenant_id`, never per name, or an older run's leftovers read as a re
   `valid_to IS NULL` on the relabelled keys, not the enum labels: 0045's down RETIRES a
   rotation/lapsed key before relabelling it `attach`/`new_asset`, so a re-up cannot turn it into
   trust material — a schema diff would have missed that entirely.
+
+**`SweepOnce` never returns a per-tenant failure.** `Correlator.sweep` logs
+`"correlation failed for tenant"` and carries on (correlate.go:163-169), so a probe that asserts
+on `err == nil` proves nothing: a rolled-back `resolveHost` (a store constraint refusing the write,
+the rotation branch's `holder != assetID` fault) looks exactly like a clean sweep. Assert on the
+database — `assets`, `asset_identity_keys.provenance`, `asset_resolution_queue.state`,
+`observations.asset_id IS NULL` — and pass `quietLogger()` only when you do not need the WARN.
+`Correlator.AgeEvery(0)` (ADR-096) forces the hourly ageing pass to run on every sweep, which is
+what a probe that shifts the clock in the database needs.

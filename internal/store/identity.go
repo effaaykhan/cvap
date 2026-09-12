@@ -236,7 +236,7 @@ func (AssetIdentityKeys) SSHHostKeyFingerprintsAt(ctx context.Context, c *Conn, 
 		 WHERE a.tenant_id = $1 AND a.ip_address = host($2::inet)::inet AND a.valid_to IS NULL
 		   AND k.key_type = 'ssh_hostkey'::identity_key_type AND k.valid_to IS NULL
 		   AND k.provenance NOT IN ('rotation', 'lapsed')
-		   AND s.address = $2::inet AND s.port = $3 AND s.scans_seen >= 2
+		   AND s.address = host($2::inet)::inet AND s.port = $3 AND s.scans_seen >= 2
 		   AND s.last_seen_at >= $4`
 
 	rows, err := c.Query(ctx, q, c.Tenant().UUID(), ip, port, time.Now().Add(-within))
@@ -356,7 +356,14 @@ const (
 //
 // port is the service the key was seen on (from the key's source); a sighting
 // is per (key, address, port), so a key seen only on 2222 is never trust for 22.
-func (AssetIdentityKeys) Record(ctx context.Context, c *Conn, assetID uuid.UUID, k domain.IdentityKey, at time.Time, provenance KeyProvenance, scanID uuid.UUID, address string, port int) error {
+//
+// Returns whether the KEY ROW was written: false when the value is already
+// live — on this asset (a re-sighting, the usual case) or on ANOTHER asset,
+// which the caller must tell apart with LiveByValue, because a silent no-op
+// there leaves an asset keyless (measured: a returning host became a third,
+// keyless asset that could never re-merge). The sighting is counted either way
+// for this asset's own live row.
+func (AssetIdentityKeys) Record(ctx context.Context, c *Conn, assetID uuid.UUID, k domain.IdentityKey, at time.Time, provenance KeyProvenance, scanID uuid.UUID, address string, port int) (bool, error) {
 	const insert = `
 		INSERT INTO asset_identity_keys
 		    (tenant_id, asset_id, key_type, key_value, strength,
@@ -375,12 +382,14 @@ func (AssetIdentityKeys) Record(ctx context.Context, c *Conn, assetID uuid.UUID,
 		// none, because it looks complete.
 		payload = nil
 	}
-	if _, err := c.Exec(ctx, insert, c.Tenant().UUID(), assetID, string(k.Type), k.Value,
-		k.Type.Strength(), obsID, payload, at, string(provenance)); err != nil {
-		return mapError(err)
+	tag, err := c.Exec(ctx, insert, c.Tenant().UUID(), assetID, string(k.Type), k.Value,
+		k.Type.Strength(), obsID, payload, at, string(provenance))
+	if err != nil {
+		return false, mapError(err)
 	}
+	inserted := tag.RowsAffected() > 0
 	if scanID == uuid.Nil || address == "" || port <= 0 || port > 65535 {
-		return nil // no occasion to count
+		return inserted, nil // no occasion to count
 	}
 
 	// The sighting, only for the live row THIS asset holds.
@@ -406,9 +415,11 @@ func (AssetIdentityKeys) Record(ctx context.Context, c *Conn, assetID uuid.UUID,
 	// return — the review measured "at least two ever, and one recently" being
 	// satisfied by exactly that. Anything scanned more often than its address
 	// window never crosses the reset.
-	_, err := c.Exec(ctx, sight, c.Tenant().UUID(), assetID, scanID, at, address, string(k.Type), k.Value, port,
-		SightingWindow.String())
-	return mapError(err)
+	if _, err := c.Exec(ctx, sight, c.Tenant().UUID(), assetID, scanID, at, address, string(k.Type), k.Value, port,
+		SightingWindow.String()); err != nil {
+		return false, mapError(err)
+	}
+	return inserted, nil
 }
 
 // EstablishedAt reports whether the asset holds this key live and it has been
