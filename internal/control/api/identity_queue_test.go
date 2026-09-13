@@ -19,7 +19,12 @@ import (
 )
 
 // mutate:subject internal/store/identity_queue.go
-// mutate:test    ./internal/control/api/ -run TestConfirmReStamps|TestAnAmbiguousGroup|TestTheQueueLists|TestAChoiceBinds|TestDifferentHostRefuses
+// mutate:test    ./internal/control/api/ -run TestConfirmReStamps|TestAnAmbiguousGroup|TestAChoiceBinds|TestDifferentHostRefuses
+//
+// The selector leaves out the sweep-driven cases on purpose: the gate runs each
+// suite under a fixed two-minute timeout, and one sweep against a populated dev
+// database was measured at 82 s — the gate then reported BASELINE RED against
+// a green subject. Every mutation below is killed by a case that seeds directly.
 //
 // mutate:case    confirm blesses a key the operator did not name (ADR-097)
 // mutate:old     		if !have[n] {
@@ -145,6 +150,55 @@ func parkedHandover(t *testing.T) (*queueFixture, uuid.UUID) {
 	}
 	q.scanAgain = scan
 	q.observeAgain = observe
+	return q, asset
+}
+
+// seededContest is parkedHandover's end state written directly: one asset
+// holding qAddr with qOld live on 22/tcp, and qNew parked there against it.
+//
+// It exists for the mutation gate. `parkedHandover` drives two
+// `correlate.SweepOnce` calls, and a sweep iterates every active tenant: 82 s
+// against a dev database with fourteen thousand of them, growing with every
+// suite run that leaves a tenant behind. The gate runs each suite under a
+// fixed two-minute timeout and reads the overrun as BASELINE RED — the code
+// blamed for the fixture's cost, on developer machines only, since CI's
+// database is empty. A case in `mutate:test` must therefore seed what it
+// needs. Cases that assert what the SWEEP does (release, attach, re-park)
+// still use parkedHandover and stay out of the selector.
+func seededContest(t *testing.T) (*queueFixture, uuid.UUID) {
+	t.Helper()
+	f := newFixture(t, `{"asset.read": true, "identity.resolve": true, "scan.read": true}`)
+	q := &queueFixture{fixture: f, c: correlate.New(f.db, slog.New(slog.NewTextHandler(io.Discard, nil)))}
+	q.cookies, q.csrf = f.login(t)
+	var asset uuid.UUID
+	if err := f.db.Write(context.Background(), f.tenant, func(ctx context.Context, c *store.Conn) error {
+		tid := c.Tenant().UUID()
+		a, err := (store.Assets{}).Create(ctx, c, store.Asset{})
+		if err != nil {
+			return err
+		}
+		asset = a.ID
+		if _, err := c.Exec(ctx, `INSERT INTO asset_identity_keys
+		    (tenant_id, asset_id, key_type, key_value, strength, valid_from, provenance,
+		     merge_evidence_observation, merge_evidence_payload)
+		    VALUES ($1, $2, 'ssh_hostkey', $3, 2, now(), 'attach', gen_random_uuid(),
+		            jsonb_build_object('port', 22, 'protocol', 'tcp', 'address', $4::text))`,
+			tid, asset, qOld, qAddr); err != nil {
+			return err
+		}
+		if err := (store.AssetAddresses{}).Open(ctx, c, asset, qAddr, time.Now().UTC()); err != nil {
+			return err
+		}
+		payload, _ := json.Marshal(map[string]any{"address": qAddr, "port": 22, "protocol": "tcp", "service": "ssh",
+			"product": "OpenSSH", "version": "9.6", "ssh": map[string]any{"fingerprint": qNew}})
+		_, err = c.Exec(ctx, `INSERT INTO asset_resolution_queue
+		    (tenant_id, observation_id, observed_payload, key_type, key_value, candidate_asset_ids, conflict_reason, address, source)
+		    VALUES ($1, gen_random_uuid(), $2, 'ssh_hostkey', $3, ARRAY[$4::uuid], 'a different key from the same service', $5::inet, '22/tcp')`,
+			tid, payload, qNew, asset, qAddr)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
 	return q, asset
 }
 
@@ -879,7 +933,10 @@ func TestTooManyKeysIsRefusedAndDiscardIsTheExit(t *testing.T) {
 // group, would otherwise create a keyless asset that takes the address, can
 // never merge, and leaves the occupant without trust (measured).
 func TestDifferentHostRefusesToCreateAKeylessAsset(t *testing.T) {
-	q, asset := parkedHandover(t)
+	// Seeded, not swept: this case is in the mutation gate's selector, and a
+	// sweep-driven fixture puts the gate's cost at the mercy of how many
+	// tenants the database happens to hold (see seededContest).
+	q, asset := seededContest(t)
 	ctx := context.Background()
 	// Replace the parked group with an echo of the occupant's own key on 2222.
 	if err := q.db.Write(ctx, q.tenant, func(ctx context.Context, c *store.Conn) error {
@@ -915,5 +972,104 @@ func TestDifferentHostRefusesToCreateAKeylessAsset(t *testing.T) {
 	}
 	if assets != 1 || holder != asset {
 		t.Fatalf("after the refusal: assets=%d holder=%s; want the occupant untouched", assets, holder)
+	}
+}
+
+// A key another asset holds live is discarded for EVERY item that carries it,
+// not for the representative only: the siblings were measured closing as
+// merged, which released their observations into the sweep to be parked again.
+func TestAHeldElsewhereKeyIsDiscardedForEveryItemCarryingIt(t *testing.T) {
+	q, holder := parkedHandover(t)
+	ctx := context.Background()
+	var other uuid.UUID
+	if err := q.db.Write(ctx, q.tenant, func(ctx context.Context, c *store.Conn) error {
+		tid := c.Tenant().UUID()
+		if _, err := c.Exec(ctx, `UPDATE asset_resolution_queue SET state = 'discarded', resolved_at = now() WHERE tenant_id = $1 AND state = 'pending'`, tid); err != nil {
+			return err
+		}
+		a, err := (store.Assets{}).Create(ctx, c, store.Asset{})
+		if err != nil {
+			return err
+		}
+		other = a.ID
+		payload, _ := json.Marshal(map[string]any{"address": qAddr, "port": 22, "protocol": "tcp", "service": "ssh",
+			"ssh": map[string]any{"fingerprint": qOld}})
+		for i := 0; i < 3; i++ {
+			if _, err := c.Exec(ctx, `INSERT INTO asset_resolution_queue (tenant_id, observed_payload, key_type, key_value, candidate_asset_ids, conflict_reason, address, source)
+			    VALUES ($1, $2, 'ssh_hostkey', $3, ARRAY[$4::uuid], 'echo', $5::inet, '22/tcp')`, tid, payload, qOld, other, qAddr); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w := q.do(t, http.MethodPost, "/v1/identity/queue/resolve", api.ResolveIdentityRequest{
+		Address: qAddr, Decision: "same_host", AssetID: other.String(), Reason: "it is the other box", SeenThrough: q.seenThrough(t),
+	}, q.cookies, q.csrf)
+	if w.Code != http.StatusOK {
+		t.Fatalf("same_host: %d %s", w.Code, w.Body.String())
+	}
+	var res api.ResolveIdentityResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.KeysHeldElsewhere) != 1 || len(res.KeysRecorded) != 0 {
+		t.Fatalf("held elsewhere %v recorded %v; want one held-elsewhere key, nothing recorded", res.KeysHeldElsewhere, res.KeysRecorded)
+	}
+	var merged, discarded int
+	if err := q.db.Read(ctx, q.tenant, func(ctx context.Context, c *store.Conn) error {
+		return c.QueryRow(ctx, `SELECT count(*) FILTER (WHERE state = 'merged'), count(*) FILTER (WHERE state = 'discarded' AND resolved_by IS NOT NULL)
+		    FROM asset_resolution_queue WHERE tenant_id = $1 AND key_value = $2 AND address = $3::inet`,
+			c.Tenant().UUID(), qOld, qAddr).Scan(&merged, &discarded)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if merged != 0 || discarded != 3 {
+		t.Fatalf("items carrying the held-elsewhere key: merged=%d discarded=%d; want 0 and 3 (holder %s)", merged, discarded, holder)
+	}
+}
+
+// A retire is keyed on (port, protocol), the identity of one live key: keyed
+// on the port alone it closed, at the same instant, the row the previous
+// iteration had just recorded on the other protocol — the interval CHECK
+// refused and "same host" was impossible at that address for good.
+func TestSameHostRetiresByPortAndProtocolNotPortAlone(t *testing.T) {
+	q, asset := parkedHandover(t)
+	ctx := context.Background()
+	const udpKey = "SHA256:udpudpudpudpudpudpudpudpudpudpudpudpudpudpu"
+	if err := q.db.Write(ctx, q.tenant, func(ctx context.Context, c *store.Conn) error {
+		tid := c.Tenant().UUID()
+		// A pre-B45 park: the same port spelled on a second protocol.
+		payload, _ := json.Marshal(map[string]any{"address": qAddr, "port": 22, "protocol": "udp", "service": "ssh",
+			"ssh": map[string]any{"fingerprint": udpKey}})
+		_, err := c.Exec(ctx, `INSERT INTO asset_resolution_queue (tenant_id, observed_payload, key_type, key_value, candidate_asset_ids, conflict_reason, address, source)
+		    VALUES ($1, $2, 'ssh_hostkey', $3, ARRAY[$4::uuid], 'handover', $5::inet, '22/udp')`, tid, payload, udpKey, asset, qAddr)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w := q.do(t, http.MethodPost, "/v1/identity/queue/resolve", api.ResolveIdentityRequest{
+		Address: qAddr, Decision: "same_host", AssetID: asset.String(), Reason: "reimaged", SeenThrough: q.seenThrough(t),
+	}, q.cookies, q.csrf)
+	if w.Code != http.StatusOK {
+		t.Fatalf("same_host with one port on two protocols: %d %s; want 200", w.Code, w.Body.String())
+	}
+	var res api.ResolveIdentityResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.KeysRecorded) != 2 {
+		t.Fatalf("recorded %v; want the tcp and the udp key both", res.KeysRecorded)
+	}
+	var live int
+	if err := q.db.Read(ctx, q.tenant, func(ctx context.Context, c *store.Conn) error {
+		return c.QueryRow(ctx, `SELECT count(*) FROM asset_identity_keys WHERE tenant_id = $1 AND asset_id = $2 AND valid_to IS NULL AND provenance = 'confirmed'`,
+			c.Tenant().UUID(), asset).Scan(&live)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if live != 2 {
+		t.Fatalf("live confirmed keys after the merge: %d; want 2", live)
 	}
 }

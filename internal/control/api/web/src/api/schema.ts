@@ -877,8 +877,10 @@ export interface components {
             asset_id: string;
             /** @description type and fingerprint of each key re-stamped confirmed. */
             keys_confirmed: string[];
-            /** @description Rotated or lapsed keys still on the asset after this decision — not named, so not confirmed. At most 200. */
+            /** @description Rotated or lapsed keys still on the asset after this decision — not named, so not confirmed. At most 200; keys_remaining_total is how many there are. */
             keys_remaining: string[];
+            /** @description How many rotated or lapsed keys are still on the asset, listed above or not. */
+            keys_remaining_total: number;
         };
         CreateScanRequest: {
             /** @description The policy this scan runs under. Its ceilings bound everything the scan may do. */

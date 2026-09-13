@@ -2211,3 +2211,31 @@ here". Same root as #106/#110: the bound and the count are computed over differe
 **How to apply:** whenever a response carries `items` + `items_total`, state the unit of each and
 check the console's truncation test is `len(items) == cap`, not `total > len(items)`. A cap on a
 JOIN needs a total over the JOIN.
+
+
+**115. A per-key refusal applied to the first item carrying the key, while its siblings ride out on
+the decision.** `ResolveSameHost`/`ResolveNewAsset` deduplicate to one item per distinct key
+(`firstOfEachKey`) before the record loop, so when the loop finds a key live on ANOTHER asset it
+appends only THAT item to `discarded`; the other items carrying the same key are already in
+`closing` and close as `merged`/`new_asset`. Measured: three items of one held-elsewhere key →
+`discarded:1, merged:2`, and the two merged rows release their observations back into the sweep —
+the exact thing the discard exists to prevent ("the observation stays out of the sweep rather than
+re-parking"). No trust moves; the queue just refills.
+**How to apply:** when a loop runs over a DEDUPLICATED set but its refusal closes rows, the refusal
+must name the whole equivalence class, not the representative. Check every `firstOf*`/`distinct`
+helper feeding a branch that writes row state.
+
+**116. A gate whose COST depends on database state runs differently where it runs — and blames
+the code.** `.claude/hooks/mutate.py` runs every suite with a fixed `-timeout 120s` and reads a
+non-zero exit as "BASELINE RED — the suite fails against its own subject". ADR-097's selector named
+a test that drives two `correlate.SweepOnce` calls, and a sweep iterates every ACTIVE TENANT:
+82.6 s against a dev database holding 14 374 of them (a number that only grows — every suite run
+leaves its fixture tenant behind), versus milliseconds on CI's empty one. Green in CI, red on every
+developer machine, with the message pointing at the subject. Fixed by seeding the fixture instead
+of sweeping it: the same four cases now run in **1.9 s** (was 57.4 s even after the worst test was
+dropped) and all four mutations are still killed. A survey of all 30 declared selectors found no
+other suite above 26 s, so this was the only one exposed — measure that on a POPULATED database,
+never the empty one the gate uses in CI.
+
+**How to apply:** a `mutate:test` selector must exclude anything that sweeps, and the cost has to be
+measured on a POPULATED database, not the empty one CI uses.

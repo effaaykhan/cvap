@@ -651,3 +651,19 @@ a `newAssetP` that calls `Assets.Create` and raw `INSERT ... SELECT generate_ser
   `audit_events.detail->>'reason'`), then loop. `VACUUM (ANALYZE) asset_resolution_queue` can fail
   with "could not resize shared memory segment ... No space left on device" — retry with
   `-c "SET max_parallel_maintenance_workers = 0"` in the same invocation.
+
+
+## The mutation gate is measurable, and the measurement is the finding (S42, ADR-097)
+
+`.claude/hooks/mutate.py` is importable: `spec_from_file_location` it, call `parse_go_suite(path)`
+for a suite's `(test_args, cases)` and `run_go_suite(args, overlay)` for `(passed, tests_that_ran)`.
+That is how to answer three questions without running `make mutate` (30 suites, many minutes):
+- does each declared anchor still match EXACTLY ONCE (`original.count(old) != 1` is ANCHOR LOST),
+- is each mutation killed, and by WHICH tests (run the same cases with a narrower `-run`),
+- **what does each suite's baseline COST** — the harness's `-timeout 120s` is fixed, and a baseline
+  that overruns is reported as "BASELINE RED, the suite fails against its own subject".
+A 30-suite baseline survey takes ~2 minutes total: all but three are under 6 s; the outliers were
+`identity_queue_test.go` (57 s), `test/e2e/fault_completion_e2e_test.go` (26 s) and
+`dispatch_test.go` (8.6 s). Anything driving `correlate.SweepOnce` is the thing to look for — a
+sweep iterates every active tenant, so its cost is a property of the DEV DATABASE (14 374 tenants
+here), not of the code, and CI's empty database hides it completely.

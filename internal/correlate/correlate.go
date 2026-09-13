@@ -600,7 +600,8 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 				// retire predicate did not match, and a key already live on
 				// another asset whose Record was a silent no-op — the asset
 				// left keyless while the event said "recorded".
-				n, err := (store.AssetIdentityKeys{}).Retire(ctx, conn, assetID, k.Type, portOf(k.Source), h.seenAt)
+				port, proto := store.SourcePortProto(k.Source)
+				n, err := (store.AssetIdentityKeys{}).Retire(ctx, conn, assetID, k.Type, port, proto, h.seenAt)
 				if err != nil {
 					return err
 				}
@@ -710,7 +711,8 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 				from = store.KeyFromMerge
 			}
 			for _, k := range v.Contradicted {
-				if _, err := (store.AssetIdentityKeys{}).Retire(ctx, conn, assetID, k.Type, portOf(k.Source), h.seenAt); err != nil {
+				port, proto := store.SourcePortProto(k.Source)
+				if _, err := (store.AssetIdentityKeys{}).Retire(ctx, conn, assetID, k.Type, port, proto, h.seenAt); err != nil {
 					return err
 				}
 				scanID, err := scanFor(k)

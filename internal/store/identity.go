@@ -496,14 +496,21 @@ func (AssetIdentityKeys) LastSeenAt(ctx context.Context, c *Conn, assetID uuid.U
 // (ADR-094). Closing is an UPDATE of valid_to, never a DELETE: the history is
 // what makes the old value's findings and merges reviewable. Returns how many
 // rows closed — zero when the asset held nothing of that type from that port.
-func (AssetIdentityKeys) Retire(ctx context.Context, c *Conn, assetID uuid.UUID, t domain.IdentityKeyType, port int, at time.Time) (int64, error) {
+//
+// The service is (port, protocol), the same identity the one-live-key index
+// carries: a retire keyed on the port alone was measured closing, at the same
+// instant, the row the previous iteration had just recorded on the other
+// protocol of that port — the interval CHECK then refused, and "same host"
+// was impossible at that address for good.
+func (AssetIdentityKeys) Retire(ctx context.Context, c *Conn, assetID uuid.UUID, t domain.IdentityKeyType, port int, proto string, at time.Time) (int64, error) {
 	const q = `
 		UPDATE asset_identity_keys
-		   SET valid_to = $5
+		   SET valid_to = $6
 		 WHERE tenant_id = $1 AND asset_id = $2 AND key_type = $3::identity_key_type
 		   AND valid_to IS NULL
-		   AND merge_evidence_payload -> 'port' = to_jsonb($4::int)`
-	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), assetID, string(t), port, at)
+		   AND merge_evidence_payload -> 'port' = to_jsonb($4::int)
+		   AND lower(btrim(coalesce(nullif(merge_evidence_payload ->> 'protocol', ''), 'tcp'))) = $5`
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), assetID, string(t), port, proto, at)
 	if err != nil {
 		return 0, mapError(err)
 	}

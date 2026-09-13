@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -449,6 +450,22 @@ var ErrAmbiguousGroup = fmt.Errorf("store: the parked group carries two keys fro
 // parked at the address.
 var ErrKeyNotParked = fmt.Errorf("store: that key is not parked at the address")
 
+// AmbiguousServiceError names the services a decision could not settle: each
+// carries two parked values of one key type and no choice named one of them.
+// `errors.Is(err, ErrAmbiguousGroup)` still holds, so a caller that only needs
+// the class is unaffected; a caller answering a human needs the names, because
+// the alternative is telling an API caller "some service, somewhere" and
+// leaving the listing as the only way to find out which.
+type AmbiguousServiceError struct {
+	Services []string // "ssh_hostkey on 22/tcp", sorted
+}
+
+func (e *AmbiguousServiceError) Error() string {
+	return ErrAmbiguousGroup.Error() + ": " + strings.Join(e.Services, ", ")
+}
+
+func (e *AmbiguousServiceError) Is(target error) bool { return target == ErrAmbiguousGroup }
+
 // chooseKeys applies an operator's choices to a group, one per ambiguous
 // (type, service): items of the chosen service carrying a different value
 // are returned as `drop`; the rest as `keep`. A group still ambiguous after
@@ -484,26 +501,37 @@ func chooseKeys(items []QueueItem, chosen []KeyChoice) (keep []QueueItem, drop [
 		}
 		keep = next
 	}
-	if twoValuesOnOneService(keep) {
-		return nil, nil, ErrAmbiguousGroup
+	if unsettled := ambiguousServices(keep); len(unsettled) > 0 {
+		return nil, nil, &AmbiguousServiceError{Services: unsettled}
 	}
 	return keep, drop, nil
 }
 
-// twoValuesOnOneService mirrors domain.twoValuesOnOneService over queue items.
-func twoValuesOnOneService(items []QueueItem) bool {
+// ambiguousServices names every (type, service) among items carrying two
+// different values — domain.twoValuesOnOneService over queue items, except
+// that it says WHICH, because a refusal an API caller cannot act on sends
+// them back to the listing to work out what the store already knew. Sorted,
+// so one shape refuses the same way twice.
+func ambiguousServices(items []QueueItem) []string {
 	seen := map[string]string{}
+	amb := map[string]bool{}
 	for _, it := range items {
 		if it.KeyType == domain.KeyIPWindow || it.KeyType.Strength() < 2 {
 			continue
 		}
-		id := string(it.KeyType) + "|" + it.Source
+		id := string(it.KeyType) + " on " + it.Source
 		if v, ok := seen[id]; ok && v != it.KeyValue {
-			return true
+			amb[id] = true
+			continue
 		}
 		seen[id] = it.KeyValue
 	}
-	return false
+	out := make([]string, 0, len(amb))
+	for s := range amb {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ResolveSameHost is the operator's "same host" (ADR-097): every key parked at
@@ -583,6 +611,7 @@ func (ResolutionQueue) ResolveSameHost(ctx context.Context, c *Conn, address str
 	}
 	// One record per distinct key, not per item: the work is bounded by the
 	// keys the operator saw, and the items close in one statement.
+	keyed := items
 	items = firstOfEachKey(items)
 	for _, it := range items {
 		if it.KeyType == domain.KeyIPWindow || it.KeyType.Strength() < 2 {
@@ -596,12 +625,12 @@ func (ResolutionQueue) ResolveSameHost(ctx context.Context, c *Conn, address str
 			continue // already the asset's: a re-sighting parked with the group
 		}
 		if err == nil && holder != assetID {
-			discarded = append(discarded, it.ResolutionID)
+			discarded = append(discarded, discardAll(keyed, it)...)
 			res.KeysHeldElsewhere = append(res.KeysHeldElsewhere, string(it.KeyType)+"@"+it.Source+" "+it.KeyValue)
 			continue
 		}
-		port := portOfSource(it.Source)
-		retired, err := (AssetIdentityKeys{}).Retire(ctx, c, assetID, it.KeyType, port, at)
+		port, proto := SourcePortProto(it.Source)
+		retired, err := (AssetIdentityKeys{}).Retire(ctx, c, assetID, it.KeyType, port, proto, at)
 		if err != nil {
 			return res, err
 		}
@@ -681,6 +710,7 @@ func (ResolutionQueue) ResolveNewAsset(ctx context.Context, c *Conn, address str
 	for _, it := range items {
 		closing = append(closing, it.ResolutionID)
 	}
+	keyed := items
 	items = firstOfEachKey(items)
 	a, err := (Assets{}).Create(ctx, c, Asset{})
 	if err != nil {
@@ -696,14 +726,14 @@ func (ResolutionQueue) ResolveNewAsset(ctx context.Context, c *Conn, address str
 			return res, err
 		}
 		if err == nil && holder != a.ID {
-			discarded = append(discarded, it.ResolutionID)
+			discarded = append(discarded, discardAll(keyed, it)...)
 			res.KeysHeldElsewhere = append(res.KeysHeldElsewhere, string(it.KeyType)+"@"+it.Source+" "+it.KeyValue)
 			continue
 		}
 		if err == nil {
 			continue // recorded by an earlier item of this same group
 		}
-		port := portOfSource(it.Source)
+		port, _ := SourcePortProto(it.Source)
 		payload, err := payloadOf(ctx, c, it.ResolutionID)
 		if err != nil {
 			return res, err
@@ -835,13 +865,30 @@ func firstOfEachKey(items []QueueItem) []QueueItem {
 	return out
 }
 
-func portOfSource(source string) int {
+// SourcePortProto splits a service ("22/tcp") into the (port, protocol) that
+// names one live key; anything else — "unknown", "" — is (0, ""), which no
+// key row carries.
+func SourcePortProto(source string) (int, string) {
 	var port int
 	var proto string
-	if _, err := fmt.Sscanf(source, "%d/%s", &port, &proto); err != nil {
-		return 0
+	if _, err := fmt.Sscanf(source, "%d/%s", &port, &proto); err != nil || port <= 0 || port > 65535 {
+		return 0, ""
 	}
-	return port
+	return port, strings.ToLower(strings.TrimSpace(proto))
+}
+
+// discardAll returns the ids of every item carrying the key: a held-elsewhere
+// key was measured discarded for its representative item and MERGED for its
+// siblings, which put the siblings' observations back into the sweep to be
+// parked again — the queue never drained.
+func discardAll(all []QueueItem, k QueueItem) []uuid.UUID {
+	var ids []uuid.UUID
+	for _, it := range all {
+		if it.KeyType == k.KeyType && it.Source == k.Source && it.KeyValue == k.KeyValue {
+			ids = append(ids, it.ResolutionID)
+		}
+	}
+	return ids
 }
 
 // ErrKeysChanged is returned when a key the operator named is not a live
@@ -881,9 +928,24 @@ func (ResolutionQueue) Discard(ctx context.Context, c *Conn, address string, see
 // rotation on 22 blessing a planted key on 2222 and a lapsed certificate on
 // 443; the second required the whole live set, which left the operator no way
 // to refuse a member. A key that appears between the render and the click is
-// simply not named, and stays where it was. Returns the keys confirmed and
-// the rotated or lapsed keys still on the asset afterwards.
-func (AssetIdentityKeys) Confirm(ctx context.Context, c *Conn, assetID uuid.UUID, named []string) (confirmed, remaining []string, err error) {
+// simply not named, and stays where it was.
+//
+// What a confirmation hands back is exactly what ADR-096 took away: `rotation`
+// and `lapsed` are excluded from the credentialed trust root AND from the
+// establishment gate, after the review measured such a key reaching two
+// sightings, corroborating its own certificate against the victim's, and
+// merging at any address the attacker controlled. Confirming restores both —
+// the dial and the power to corroborate. Naming the keys narrows WHO gets that
+// back to the one key an operator pointed at; it does not change WHAT it is.
+// (ADR-097 is accepted and frozen, so this is recorded here and in the ADR
+// index rather than in its text.)
+//
+// Returns the keys confirmed, the
+// rotated or lapsed keys still on the asset afterwards (the first
+// MaxKeysPerGroup, sorted) and how many of those there are in all: a list cut
+// without its total beside it is the shape that told an earlier console
+// "confirmed 1 of 201" with four hundred still waiting.
+func (AssetIdentityKeys) Confirm(ctx context.Context, c *Conn, assetID uuid.UUID, named []string) (confirmed, remaining []string, remainingTotal int, err error) {
 	const live = `
 		SELECT key_type::text || ' ' || key_value FROM asset_identity_keys
 		 WHERE tenant_id = $1 AND asset_id = $2 AND valid_to IS NULL
@@ -891,28 +953,28 @@ func (AssetIdentityKeys) Confirm(ctx context.Context, c *Conn, assetID uuid.UUID
 		 ORDER BY 1`
 	rows, err := c.Query(ctx, live, c.Tenant().UUID(), assetID)
 	if err != nil {
-		return nil, nil, mapError(err)
+		return nil, nil, 0, mapError(err)
 	}
 	have := map[string]bool{}
 	for rows.Next() {
 		var s string
 		if err := rows.Scan(&s); err != nil {
 			rows.Close()
-			return nil, nil, mapError(err)
+			return nil, nil, 0, mapError(err)
 		}
 		have[s] = true
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, nil, mapError(err)
+		return nil, nil, 0, mapError(err)
 	}
 	if len(have) == 0 {
-		return nil, nil, nil
+		return nil, nil, 0, nil
 	}
 	seen := map[string]bool{}
 	for _, n := range named {
 		if !have[n] {
-			return nil, nil, ErrKeysChanged
+			return nil, nil, 0, ErrKeysChanged
 		}
 		if !seen[n] {
 			seen[n] = true
@@ -920,9 +982,14 @@ func (AssetIdentityKeys) Confirm(ctx context.Context, c *Conn, assetID uuid.UUID
 		}
 	}
 	for h := range have {
-		if !seen[h] && len(remaining) < MaxKeysPerGroup {
+		if !seen[h] {
 			remaining = append(remaining, h)
 		}
+	}
+	sort.Strings(remaining) // a map's order is not an answer
+	remainingTotal = len(remaining)
+	if len(remaining) > MaxKeysPerGroup {
+		remaining = remaining[:MaxKeysPerGroup]
 	}
 	const q = `
 		UPDATE asset_identity_keys
@@ -931,9 +998,9 @@ func (AssetIdentityKeys) Confirm(ctx context.Context, c *Conn, assetID uuid.UUID
 		   AND provenance IN ('rotation', 'lapsed')
 		   AND key_type::text || ' ' || key_value = ANY ($3::text[])`
 	if _, err := c.Exec(ctx, q, c.Tenant().UUID(), assetID, confirmed); err != nil {
-		return nil, nil, mapError(err)
+		return nil, nil, 0, mapError(err)
 	}
-	return confirmed, remaining, nil
+	return confirmed, remaining, remainingTotal, nil
 }
 
 // KeySighting is one live identity key on an asset with its sightings at an

@@ -11,9 +11,9 @@
 -- confirms it; confirmation re-stamps the provenance to 'confirmed', which is
 -- excluded from nothing and names who decided in the audit log. The queue's
 -- operator verbs ("same host", "different host") record the keys they accept
--- with the same provenance. No new table, no new column: ADD VALUE only,
--- transactional on PostgreSQL 16 as long as the label is not used in the
--- same transaction, and nothing here uses it.
+-- with the same provenance. No new table; one new column, backfilled and
+-- CHECKed below. The ADD VALUE is transactional on PostgreSQL 16 as long as
+-- the label is not used in the same transaction, and nothing here uses it.
 
 BEGIN;
 

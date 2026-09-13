@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -291,8 +293,18 @@ func (s *Server) resolveIdentity(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, s.log, http.StatusConflict, CodeConflict,
 				"Nothing is pending at that address for that asset; the queue moved.", err)
 		case errors.Is(err, store.ErrAmbiguousGroup):
-			writeError(w, r, s.log, http.StatusUnprocessableEntity, CodeUnprocessable,
-				"Two different keys from one service are parked at that address (two hosts answered on one port); name which one is the host for every such service with key_choices.", err)
+			msg := "Two different keys from one service are parked at that address (two hosts answered on one port); name which one is the host for every such service with key_choices."
+			// Which service, in the refusal itself. The listing carries
+			// `ambiguous` and the console reads it; an API caller sees only
+			// this, and "some service" sends them back to the listing to work
+			// out what the store already knew. Bounded: the names are the
+			// stored service column, and a pre-0046 row's protocol is text a
+			// scan point wrote.
+			var amb *store.AmbiguousServiceError
+			if errors.As(err, &amb) && len(amb.Services) > 0 {
+				msg += " Unsettled: " + nameList(amb.Services, 8) + "."
+			}
+			writeError(w, r, s.log, http.StatusUnprocessableEntity, CodeUnprocessable, msg, err)
 		case errors.Is(err, store.ErrKeyNotParked):
 			writeError(w, r, s.log, http.StatusUnprocessableEntity, CodeUnprocessable,
 				"A key_choices entry names a key that is not parked on that service at that address.", err)
@@ -326,9 +338,10 @@ type ConfirmIdentityRequest struct {
 
 // ConfirmIdentityResponse names the keys confirmed and the ones left waiting.
 type ConfirmIdentityResponse struct {
-	AssetID       string   `json:"asset_id"`
-	KeysConfirmed []string `json:"keys_confirmed" doc:"type and fingerprint of each key re-stamped confirmed."`
-	KeysRemaining []string `json:"keys_remaining" doc:"Rotated or lapsed keys still on the asset after this decision — not named, so not confirmed. At most 200."`
+	AssetID            string   `json:"asset_id"`
+	KeysConfirmed      []string `json:"keys_confirmed" doc:"type and fingerprint of each key re-stamped confirmed."`
+	KeysRemaining      []string `json:"keys_remaining" doc:"Rotated or lapsed keys still on the asset after this decision — not named, so not confirmed. At most 200; keys_remaining_total is how many there are."`
+	KeysRemainingTotal int      `json:"keys_remaining_total" doc:"How many rotated or lapsed keys are still on the asset, listed above or not."`
 }
 
 func (s *Server) confirmIdentity(w http.ResponseWriter, r *http.Request) {
@@ -354,12 +367,13 @@ func (s *Server) confirmIdentity(w http.ResponseWriter, r *http.Request) {
 	tenant, _ := tenantFrom(r.Context())
 	who := actor(r)
 	var keys, remaining []string
+	var remainingTotal int
 	err = s.db.Write(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		if _, err := (store.Assets{}).GetByID(ctx, c, id); err != nil {
 			return err
 		}
 		var err error
-		keys, remaining, err = (store.AssetIdentityKeys{}).Confirm(ctx, c, id, req.Keys)
+		keys, remaining, remainingTotal, err = (store.AssetIdentityKeys{}).Confirm(ctx, c, id, req.Keys)
 		if err != nil {
 			return err
 		}
@@ -370,7 +384,7 @@ func (s *Server) confirmIdentity(w http.ResponseWriter, r *http.Request) {
 			ActorID: who, ActorType: store.ActorUser,
 			Action: "identity.confirmed", ResourceType: "asset", ResourceID: &id,
 			Detail: map[string]any{
-				"reason": req.Reason, "keys": keys, "keys_remaining": orEmpty(remaining),
+				"reason": req.Reason, "keys": keys, "keys_remaining": orEmpty(remaining), "keys_remaining_total": remainingTotal,
 				"note": "the keys are credentialed trust material on ADR-094's terms from here; an operator's word, not a verification (B44)",
 			},
 		})
@@ -388,7 +402,25 @@ func (s *Server) confirmIdentity(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, r, s.log, http.StatusOK, ConfirmIdentityResponse{AssetID: id.String(), KeysConfirmed: keys, KeysRemaining: orEmpty(remaining)})
+	writeJSON(w, r, s.log, http.StatusOK, ConfirmIdentityResponse{AssetID: id.String(), KeysConfirmed: keys,
+		KeysRemaining: orEmpty(remaining), KeysRemainingTotal: remainingTotal})
+}
+
+// nameList joins at most n names for a refusal message, each bounded, with a
+// count of what it left out: an error body is not a listing.
+func nameList(names []string, n int) string {
+	out := make([]string, 0, n)
+	for _, s := range names[:min(n, len(names))] {
+		if len(s) > 48 {
+			s = s[:48] + "…"
+		}
+		out = append(out, s)
+	}
+	j := strings.Join(out, ", ")
+	if len(names) > n {
+		j += fmt.Sprintf(" and %d more", len(names)-n)
+	}
+	return j
 }
 
 func resourceOrNil(id uuid.UUID) *uuid.UUID {

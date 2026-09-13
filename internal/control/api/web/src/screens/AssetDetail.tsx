@@ -340,7 +340,7 @@ function IdentityKeys({ assetID, keys, total }: { assetID: string; keys: Identit
   const confirm = useMutation({
     mutationFn: () => api.confirmIdentity(assetID, chosen, reason),
     onSuccess: (res) => {
-      setOutcome(`Confirmed ${res.keys_confirmed.length} of ${res.keys_confirmed.length + res.keys_remaining.length}.`);
+      setOutcome(`Confirmed ${res.keys_confirmed.length} of ${res.keys_confirmed.length + res.keys_remaining_total}.`);
       setTicked({});
       void qc.invalidateQueries({ queryKey: ["asset", assetID] });
     },
