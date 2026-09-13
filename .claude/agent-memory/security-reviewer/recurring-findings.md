@@ -1,6 +1,6 @@
 ---
 name: recurring-findings
-description: Recurring security defect classes found in CVAP reviews (91 classes), and the repo-specific constraints that shape acceptable fixes
+description: Recurring security defect classes found in CVAP reviews (114 classes), and the repo-specific constraints that shape acceptable fixes
 metadata:
   type: project
 ---
@@ -1793,3 +1793,421 @@ own key", and the branch that did think about the no-op was the new one.
 **How to apply:** every `DO NOTHING` is a refusal — ask who reads the fact that nothing was written.
 If a caller treats "Record returned nil" as "the key is on this asset", it needs the same readback
 the rotation branch has, or the verdict needs a third outcome (queue it) rather than a silent split.
+
+**93. An operator "word" verb that names no object, so it blesses every eligible row — including
+ones written after the operator looked.** `POST /v1/assets/{id}/identity/confirm` (ADR-097) carries
+a `reason` and nothing else, and `AssetIdentityKeys.Confirm` (internal/store/identity_queue.go)
+re-stamps EVERY live key on the asset whose provenance is `rotation` or `lapsed`, of any type, from
+any service. Measured: one POST reading "I rotated the key on 22 on Tuesday" confirmed three keys —
+the ssh_hostkey on 22/tcp the operator meant, an ssh_hostkey on 2222/tcp, and a `service_cert_fp`
+on 443/tcp — all three `provenance='confirmed'`. ADR-096's own threat model hands an attacker who
+answers a port for two scans a `rotation` key on the victim's asset, so any legitimate confirm on
+that asset blesses it: two sightings later `SSHHostKeyFingerprintsAt` returns the attacker's key for
+the engine's dial. The cert case also restores corroboration via `EstablishedAt`, which excludes the
+same two provenances. And it is a TOCTOU even for a careful operator: a rotation recorded between
+the page render and the POST is confirmed unseen.
+**Why:** the verb was specified as "confirm the asset's rotated keys", and an asset is the resource
+the route is keyed on, so the object of the sentence never got written down.
+**How to apply:** for any verb whose whole content is a human's assertion, ask what the human SAW.
+The request must carry the identifiers the page rendered (fingerprints, resolution ids) and the
+store predicate must include them, refusing when the eligible set has grown since — otherwise the
+audit row names an operator who never saw half of what they authorised.
+
+**94. A guard that turns a crash into a clean refusal without adding the remedy — the dead end
+survives the fix.** The identity queue's two verbs used to abort on a group carrying two different
+values of one key type from one service (measured: `asset_identity_keys_interval_ordered` on
+same_host, because the loop retires the row the previous iteration inserted at the same instant;
+`asset_identity_keys_one_live_per_port_uidx` on different_host). The repair was a pre-flight
+`twoValuesOnOneService` check returning `ErrAmbiguousGroup` → 422 "not supported yet". Correct as a
+refusal — it writes nothing — but that shape is exactly the one an ATTACKER picks (answer tcp/22
+with a different host key on each scan), `ExpireUnplaceable` will not close it while a candidate
+still holds the address, and correlate's stale-contest close-out needs a full window with no
+contradiction, which the attacker denies. So the park is permanent and the operator verb that exists
+to drain it refuses by design.
+**Why:** the crash is the visible defect; the missing verb is invisible because the refusal looks
+like a decision.
+**How to apply:** after any "we refuse this input" fix, ask what the operator does NEXT. If the
+answer is nothing, the refusal moved the dead end rather than closing it — the data to decide was
+usually already in the response (here every item's `resolution_id` and `key_value`).
+
+**95. A list read whose cap is applied after the whole set is in memory.** `ResolutionQueue.
+ListPending(ctx, c, 200)` has no SQL LIMIT: it selects every pending row of the tenant WITH its
+copied `observed_payload`, groups in Go, then keeps 200 ADDRESSES with uncapped items each.
+Measured: 24,000 items over 300 addresses → a 5,013,705-byte response in 305 ms, on a queue whose
+growth is one item per parked key per scan and which drains only by human action.
+**How to apply:** a `limit` parameter that never reaches the query is decoration. Check that the
+bound is in the SQL and that the per-group fan-out is bounded too.
+
+**96. An "exactly what you looked at" check that removes the granularity it was added to
+protect.** The fix for #93 made `AssetIdentityKeys.Confirm` refuse unless the NAMED set equals the
+asset's live rotated/lapsed set exactly (`len(want) != len(have)` → `ErrKeysChanged`). Measured:
+three keys on one asset (a genuine rotation on 22, a planted rotation on 2222, a lapsed cert on
+443) — naming only the genuine one returns 409 with nothing re-stamped, and the console's one
+button (it sends exactly what it rendered) re-stamps ALL THREE `confirmed` in one call. So the
+operator's only two moves are "bless the attacker's key too" or "leave the host without
+credentialed coverage", which is the dead end the verb exists to close. Exact-set equality adds no
+safety over SUBSET semantics ("re-stamp only the named keys, refuse a name that is not live"):
+both refuse a key that appeared between the render and the click, only one lets the operator
+refuse a member. `go test -overlay` with the cardinality check disabled left the shipped suite
+GREEN (its fixture has one rotated key), so the behaviour is untested and the subset fix would not
+break it.
+**Why:** the review before had measured a confirm blessing keys the operator never saw, so the
+repair reached for "the set must match" — the strongest-sounding check — rather than "only what
+was named is written".
+**How to apply:** for any bulk operator verb, ask what the operator does when they believe ONE
+member of the set and not another. If the answer is "all or nothing", the attacker picks which
+members are in the set.
+
+**97. An escape hatch sized for one instance of the shape it escapes.** #94's remedy was a single
+`key_value`: the operator names which of two keys on one port is the host, the other closes
+`discarded`. `chooseKey` drops only items matching the chosen key's (type, source) and then
+re-checks `twoValuesOnOneService(keep)` — so a group with TWO ambiguous services (two host keys on
+22 AND two certs on 443, one LB address answering as two hosts) is refused by EVERY request shape.
+Measured at a held address: 10 requests (both decisions × no choice × each of the four keys) all
+422 with 4 items still pending; `ExpireUnplaceable` does not reach it (a candidate holds the
+address live) and `CloseExpired` needs a full window with no contradiction, which the attacker
+denies. Same permanent park as #94, one shape narrower, and the runbook tells the operator to use
+the radio button that cannot produce an accepted request.
+**How to apply:** when a scalar field is added to resolve an ambiguity, ask whether the ambiguity
+can occur twice in one decision unit. The fix is a LIST (one choice per ambiguous service),
+refusing only when an ambiguous unit is unnamed.
+
+**98. A choice grammar that names the VALUE and not the SERVICE the choice is about, resolved by
+first match — so the operator's correct answer is refused and the only accepted answer is the
+attacker's.** #97's fix made the choice a LIST (`key_values`, one per ambiguous service) and the
+listing computes `Ambiguous []AmbiguousService{KeyType, Source, Values}` over every parked item, so
+the console can always render a radio per contested service. But `chooseKeys` resolves a chosen
+value to an item by scanning the group in enqueued order and taking the FIRST item carrying that
+value, then drops the other values of THAT item's service. A host that answers the same key on two
+ports (one sshd on 22 and 2222 — or an attacker replaying the victim's public fingerprint on a
+second port, which costs nothing since a host key is public) binds the choice to the uncontested
+service, the contested one stays ambiguous, and the request 422s. Measured end to end: group =
+genuine key on 2222, genuine key on 22, attacker key on 22; the listing offers ONE choice
+(`ssh_hostkey 22/tcp [genuine, planted]`); ticking the genuine key → 422 with nothing written, no
+other request the console can compose succeeds; ticking the ATTACKER's key → 200, the attacker's
+fingerprint recorded `confirmed@22` on the asset that holds the address, the genuine item
+`discarded`; two sightings later `SSHHostKeyFingerprintsAt` (what `dispatch.trustMaterial` reads)
+returns the attacker's fingerprint at that address:22. The 422's own text ("name which one is the
+host for every such service") tells the operator to retry, and the only retry that clears the park
+is the wrong one. Same root cause one shape over: two ambiguous services whose value sets overlap
+(the console sends the same value twice) can never be resolved as "V on both".
+**The detail that makes it non-deterministic:** correlate enqueues every item of a group with ONE
+`now`, so `ORDER BY enqueued_at, resolution_id` tie-breaks on a random uuid. Measured 12 identical
+groups with one identical operator answer: 5 accepted, 7 refused.
+**Fix measured with `go test -overlay`:** bind a choice to a service that is still CONTESTED
+(prefer an item whose (type, source) carries another value) — 12/12 accepted, the shipped ADR-097
+suite still green. The durable fix is to carry the service with the choice
+(`{key_type, source, key_value}`), which the console already has in hand and discards when it
+composes `choices`.
+**How to apply:** when a decision is rendered per (service, value) and sent as a bare value, ask
+how the receiver re-attaches it to the service. First-match over an attacker-influenced list is an
+attacker-chosen binding. And check what the refusal message tells the operator to do next.
+
+**99. Two canonicalisations of one value, one in SQL and one in Go, added in the same change.**
+ADR-097's listing groups ambiguity in SQL by
+`(payload->>'port') || '/' || lower(coalesce(nullif(payload->>'protocol',''),'tcp'))`; the verb
+refuses on `sourceOf`'s Go form, `strings.ToLower(strings.TrimSpace(...))` over a decoded int port.
+`lower()` without `btrim()` splits `" tcp"` from `"tcp"`: measured, two ssh keys on 22 with those
+two spellings list as `ambiguous: []` (no radio rendered anywhere) while both verbs 422 demanding
+a choice — a park with no console exit. `keysFrom` normalises the protocol for the key's Source but
+stores the RAW payload, so the spelling survives into the queue; `correlate.normProtocol` accepts
+any whitespace/case variant of "tcp".
+**How to apply:** when one fact is computed twice (once in SQL for the whole set, once in Go for
+the decision), diff the two expressions character by character, including `trim`, `lower`, the
+default for an empty value, and the type cast.
+
+**99 (re-measured 2026-09-12, S42 B39 rerun).** The fix was `lower(btrim(...))` plus
+`jsonb_typeof(port)='number'`, which closes `" tcp"` (measured: listing now offers one
+`22/tcp` entry with both values and the choice resolves it) but NOT `"\ttcp"` or `"tcp\n"`:
+`btrim` strips ASCII space only, `strings.TrimSpace` strips all Unicode whitespace. Measured:
+two keys on 22 spelled `"\ttcp"` and `"tcp"` list as `ambiguous: []` while `same_host` with no
+choice 422s "name which one is the host" — a park with no console exit, permanent. Not reachable
+from a stock scan point (both engines hardcode `"tcp"`), reachable from an altered one, which
+ADR-095 put in the threat model. The durable fix is to canonicalise ONCE: store a normalised
+`source` column at `Enqueue` time and have both the listing and `chooseKeys` read it.
+
+**100. A guard evaluated AFTER a narrowing filter, when the question the operator was asked was
+computed BEFORE it.** ADR-097's listing computes `Ambiguous` over every pending item at an address;
+`ResolveSameHost` then calls `pendingAt(address, &assetID)`, which keeps only items naming that
+asset among `candidate_asset_ids`, and runs `chooseKeys`/`twoValuesOnOneService` over the SUBSET.
+Two items at one address on one port with different candidate sets — ordinary, because
+`CloseStale` releases the occupant's address hold once a park is older than the window, so later
+items name no candidate while earlier ones still name the occupant, and `ExpireUnplaceable` only
+clears them a window later — produce: the console shows `22/tcp` ambiguous with two values and
+offers the occupant as a candidate; choosing the GENUINE key → 422 `ErrKeyNotParked` (its item does
+not name the asset); choosing the ATTACKER's → 200; sending NO choice → 200 and the guard never
+fires at all. Measured end to end: held key retired, attacker's key recorded `confirmed`, and after
+two sightings `SSHHostKeyFingerprintsAt` at that address:22 returns the attacker's fingerprint.
+Same family as 98 (the only accepted answer is the attacker's) but the filter, not the grammar, is
+what splits the populations.
+**How to apply:** whenever a screen asks a question computed over set A and a verb enforces the
+answer over set B ⊂ A, the difference is an attacker's opportunity. Check that the guard's
+population is the same as the question's, and that narrowing happens only when deciding what to
+WRITE, never when deciding whether to REFUSE.
+
+**100 (re-measured 2026-09-12, S42 B39 rerun — CLOSED).** `ResolveSameHost` now reads
+`pendingAt(address, nil)` for `chooseKeys`/ambiguity and narrows only the write to items naming
+the asset. Measured on the exact P7 shape (genuine key naming the asset, attacker's key naming
+nobody, both on 22/tcp): no choice → 422 with `SELECT key_value FROM asset_identity_keys` empty;
+choosing the genuine key → 200, only it `confirmed`, the attacker's item `discarded` when it names
+the asset and left `pending` when it names nobody; choosing the attacker's key → 200 (the explicit
+word) with the choice in the audit detail. 99 is closed too: `"\ttcp"` and `"tcp"` on 22 now park
+with ONE stored `source = '22/tcp'` (migration 0046 writes it from `keysFrom`'s `normProtocol`),
+the listing offers one ambiguous entry with two values, and the choice from the listing resolves
+it. Operator-typed `22/TCP`, ` ssh_hostkey`, `SSH_HostKey ` and a padded fingerprint all normalise
+and are accepted; `22 / tcp` (spaces inside) is a 422 `ErrKeyNotParked`, which is fine because the
+console fills the source from the listing.
+
+**101. An address-scoped guard beside a page-scoped question: the verb blesses items the screen
+never rendered, and hides the candidate that offers the safe verb.** ADR-097's `ListPending` caps
+the rendering at `MaxItemsPerGroup = 50` items per address, ordered `enqueued_at DESC`, and
+computes `Ambiguous` in SQL over ALL pending items (right) — but builds `QueueGroup.Candidates`
+only from the rendered rows (wrong), while `ResolveSameHost`/`ResolveNewAsset` read
+`pendingAt(address, …)` with NO limit and record a `confirmed` key for every keyed item there.
+Measured: 61 items at one address, the attacker's key on 2222 parked first; the listing renders 50
+and says "11 older items not shown"; `same_host` returns `items_closed 61`, `keys_recorded 61`, and
+the unseen key is a live `confirmed` identity key of the victim's asset. Second measurement: when
+the only item naming the address's real holder is the oldest, `candidates: []` — the console offers
+no "Same host: merge into …" button at all, leaving only "Different host: new asset", which takes
+the address (`AssetAddresses.Open` closes the holder's interval). One scan in which the attacker
+answers SSH on sixty ports mints sixty items, all newer than the contest that started it. The ADR
+text asserts the opposite of the code: "the refusal is decided over the whole address — every
+pending item there is what the operator was shown".
+**How to apply:** when a screen paginates and a verb does not, every per-address fact the decision
+turns on must be a SQL aggregate over the whole address (as `Ambiguous` already is), or the verb
+must refuse when `items_total` exceeds what was rendered. Ask: what does this verb write that the
+operator could not have seen?
+
+**102. A guard that reads a column nothing guarantees is populated.** The ambiguity check exists in
+two places and both skip a NULL/empty service: the SQL listing filters `source IS NOT NULL` and Go's
+`twoValuesOnOneService` skips `it.Source == ""`. Nothing enforces that a moderate-strength queue item
+has a source: `Enqueue` writes NULL when `k.Source == ""` without complaint, migration 0046's
+backfill skips any row whose `observed_payload->'port'` is not a JSON number, and there is no
+NOT NULL or CHECK. The dev DB holds 13 `ssh_hostkey` rows with `source IS NULL` right now. Measured
+with a production-shaped item (observation id present, so `Record` copies the payload and
+`asset_identity_keys_one_live_per_port_uidx` applies): the listing shows `ambiguous: []`, no choice
+is offered or required, and `same_host` 409s "That resource already exists." for ever — the address
+becomes unresolvable by any verb, because the only choice grammar that could drop the NULL-source
+item needs a second item on the same (empty) service. With the two keys on DIFFERENT ports the
+same item is simply recorded unseen.
+**How to apply:** if a guard's correctness depends on a column being populated, the column needs a
+CHECK in the migration that adds it, and the writer needs to refuse rather than write NULL. A
+partial-index or `IS NOT NULL` filter in the guard is a silent opt-out an attacker only has to
+reach once.
+
+**103. One verb is taught to name what the operator saw; its sibling is not, and the gap is the
+render→click window.** ADR-097's `confirm` was redesigned around exactly this: the request carries
+`keys` and only those are re-stamped, "a key that appears between the render and the click is simply
+not named and stays where it was". `POST /v1/identity/queue/resolve` names only the ADDRESS, so both
+verbs record every keyed item pending at the moment of the click. The previous round's fix (aggregate
+`Keys`/`Candidates`/`Held` over every item rather than the rendered fifty) closed the pagination half
+and left the time half open — and the store comment "a decision closes exactly the items it READ" is
+about the verb's own transaction, not about what the screen showed. Measured: listing at an address
+with `keys: []` (three keyless items); one `ssh_hostkey` item on `22/tcp` inserted; `different_host`
+returns `keys_recorded: ["ssh_hostkey@22/tcp SHA256:plant10…"]`, the key is live with provenance
+`confirmed` (the provenance excluded from nothing), the new asset takes the address, and two
+sightings later `SSHHostKeyFingerprintsAt(addr, 22)` returns the attacker's fingerprint — the
+credentialed dial's trust root, from a screen that showed no keys at all. `same_host` does the same
+for a key parked on a SECOND service (a same-service late park is caught by the ambiguity guard).
+The response names what was recorded; the console (`Identity.tsx` `onSuccess`) shows only
+"New asset … · N items closed" and drops `keys_recorded`.
+**How to apply:** when two verbs implement the same decision, diff their REQUEST shapes, not their
+implementations — if one names its objects and the other names a container, the container one is
+unbounded in time. Fix by carrying what was rendered (`keys_seen`, or the group's `last_seen` as
+`seen_through`) and leaving anything newer pending so the address stays listed.
+
+**104. The cap lands on the rows the screen renders and not on the aggregate the decision turns
+on.** Fixing #101 moved `Keys`, `Held`, `Ambiguous` and `Candidates` into SQL aggregates over EVERY
+pending item at the listed addresses — correctly — but only `Items` kept a `LIMIT`
+(`MaxItemsPerGroup = 50`). The aggregates have none, and the ADR calls them "bounded by services
+rather than scans" — a bound the attacker chooses. Measured: 20 000 items at one address with a
+distinct (service, value) each → `keys` = 20 000, 3.2 MB for one group; all on one service instead →
+one `ambiguous` entry with 20 000 values (the console renders a radio button per value); 200
+addresses × 1 000 keys → **33 MB, 2.06 s, 238 MiB allocated for one GET**, versus 4.85 MB / 0.83 s at
+the documented worst case (200 × 50 items, 8 KiB banners). The screen an operator needs to clear a
+credentialed dead end is the screen the attacker's parks make unusable. Same shape on the asset page:
+`AssetIdentityKeys.SightingsFor` has no LIMIT. And `key_value` is unbounded `text` in migrations 0007
+and 0013, shipped untruncated in both `items` and `keys` (only the evidence line gets `left(…, 32)`),
+so the cap belongs at `Enqueue`, not in the listing — truncating there would break the `key_choices`
+round trip.
+**How to apply:** after any "compute it over the whole set instead of the page" fix, ask what bounds
+each newly-whole set, and whose input decides that bound. A per-group `LIMIT` plus a `*_total` count
+is the same pattern the items array already uses.
+
+**105. The decision's cap is a prefix of the set the guard claims to cover, and the attacker
+chooses the order.** ADR-097 fixed #103 with `seen_through` and #104 with `MaxKeysPerGroup = 200`,
+and added `MaxItemsPerDecision = 1000` so one click could not hold a 15 s write. `pendingAt` applies
+that cap as `ORDER BY enqueued_at, resolution_id LIMIT 1000` — the **oldest** thousand. But the
+ambiguity guard runs over that fetched slice (`chooseKeys(all, chosen)` where
+`all = pendingAt(address, nil, seenThrough)`) while the listing's `ambiguous` runs over EVERY pending
+item at the address in SQL. Above the cap the two disagree, in the attacker's favour, because the
+attacker parks first. Measured on the dev DB: attacker key on `22/tcp` parked oldest, 1 000 filler
+items on their own services, the host's own key on `22/tcp` parked newest → the screen shows
+`ambiguous: [{22/tcp, [attacker, victim]}]`; the operator naming the **host's** key gets
+`422 ErrKeyNotParked`; naming the **attacker's** key gets `200` and the key live with provenance
+`confirmed`; sending no choice at all also gets `200` and the same result. That is verbatim the
+failure ADR-097 §3 says it fixed ("a choice by value alone was measured … refusing the operator's
+correct answer and accepting only the attacker's key"), reintroduced by a cap added for latency.
+The same cap has a second head: `ResolveSameHost` reads **two** windows — `all` (whole address) and
+`mine` (items naming the chosen asset) — each capped at 1 000 independently, so above the cap an
+item can be in `mine` and not in `all`. The code reads "not in `keepAll`" as "rejected by the
+operator's choice" and closes it `discarded`. Measured: 1 100 items naming nobody parked first, three
+genuine items naming the asset parked later → `200`, `items_closed=3`, `keys_recorded=[]`,
+`keys_discarded=` all three, zero keys on the asset, and `discarded` is in `ListUnresolved`'s
+exclusion list so those observations never correlate again. The console's outcome line prints only
+`keys_recorded`/`keys_retired`, so it reads "Merged into abcd1234 · 3 items closed".
+**How to apply:** when a decision is capped, ask whether the cap is on the same UNIT the guard and
+the screen use. A guard over a fetched page is a guard over a page. Either compute the guard in SQL
+over the whole set (it is the aggregate the listing already computes), or make the decision's unit
+the rendered unit — act on the items of the keys the operator saw, and refuse when
+`keys_total > len(keys)` rather than silently acting on the tail. Two independently-capped reads of
+the same set are never comparable; derive one from the other.
+**Re-measured after the fix (same review, next round):** `MaxItemsPerDecision` was removed, both verbs
+now do ONE unbounded light read of every pending item at the address and refuse with 422 when the
+distinct parked keys exceed the 200 the listing renders. Measured on the dev DB: attacker key oldest
+on 22/tcp + 1 000 fillers + the host's key newest → both verbs 422 with `SELECT count(*) FROM
+asset_identity_keys WHERE valid_to IS NULL` = 0; the same shape with 52 distinct keys → the operator
+naming the HOST's key gets 200, the host key live with provenance `confirmed`, the attacker's item
+`discarded`, and every entry of `keys_recorded` is in the rendered `keys`. The 1 100-naming-nobody
+shape: above the cap 422; at 153 distinct keys `same_host` records the three genuine keys, discards
+nothing, and the 150 items naming nobody stay pending. The fix is the right shape — the guard, the
+write and the screen now use the same unit.
+
+**106. Each entry is capped and the number of entries is not.** Same review, same file:
+`MaxKeysPerGroup` bounds `ambiguous[].values` (`array_agg(...)[1:200]`) and the keys per address, but
+nothing bounds how many `ambiguous` ROWS an address has — the `GROUP BY address, key_type, source
+HAVING count(DISTINCT key_value) > 1` query has no LIMIT, and `source` is a port the attacker picks.
+Measured: 20 000 services × 2 values at one address → 20 000 ambiguous entries, 3.51 MiB for one
+group; 200 addresses × 2 000 each → **78.57 MiB in 7.70 s for one GET** (the 200-address page still
+has no paging — ADR-097 defers it to B39's second slice). And it is also an operator lockout: every
+ambiguous service needs a `key_choices` entry or the verb refuses 422, and a full answer to a
+20 000-entry group is 2 251 177 bytes against `MaxBodyBytes = 1 MiB` — 2.1×, so the group can never
+be resolved through the API at all, which is the permanent park ADR-097 says `key_choices` exists to
+prevent.
+**How to apply:** a cap inside a repeated element is not a cap on the response. Count the dimensions:
+rows per page, elements per row, bytes per element — and check the ANSWER a refusal demands fits the
+request cap that refusal's remedy has to travel in.
+**Re-measured after the fix:** the *lockout* half is closed and the *size* half is not, and the two
+needed different fixes. The new `discard` verb needs no `key_choices`, and since every ambiguous
+service contributes at least two distinct keys, any group needing more than ~100 choices is refused
+`ErrTooManyKeys` first — so the answer a refusal demands can no longer exceed the body cap. The
+listing is unchanged in kind: 20 000 ambiguous services at one address = 20 000 entries, 2.13 MiB,
+346 ms (down from 3.51 MiB only because `keys` is now capped); 200 addresses × 1 000 ambiguous
+services = **200 000 entries, 28.59 MiB and 228 MiB allocated for one GET in 2.8 s**, on a route any
+`asset.read` caller can hit. When a fix closes one dimension, re-measure the others rather than
+assuming the class is gone.
+
+**107. The defensive skip marks the work done before the refusal.** `correlate.resolveHost` sets
+`carried[k.ObservationID] = true` and THEN calls `Enqueue`; the new
+`if errors.Is(err, store.ErrKeyWithoutService) { WARN; continue }` therefore leaves the observation
+marked carried, so the `for _, o := range h.obs { if carried[o.ID] { continue } }` fallback — whose
+comment says every observation must get an item or it "re-groups alone next sweep, finds only the
+address, and attaches … through the back door" — skips it too. Measured with a `-overlay` blanking
+`keysFrom`'s `source` for port 2222: the sweep completes, the WARN fires, the rest of the group parks,
+and the skipped key's observation ends with **zero** queue rows and `asset_id IS NULL`, which
+`ListUnresolved` re-serves next sweep. Unreachable today (`keysFrom` refuses a payload with no exact
+`port`), so it is latent, not live.
+**How to apply:** when a new error branch is added inside a loop that also maintains bookkeeping,
+check what the bookkeeping already committed to before the branch. Set "handled" flags on the
+success path only.
+
+
+**108. The "no bound" sentinel is a value the request can legally carry.** ADR-097 made
+`seen_through` mandatory — "a key parked between the render and the click must not be confirmed
+unseen" — and the handler enforces both halves it thought it needed: `time.Parse` fails on an empty
+string (400) and a value later than `now+5s` is refused (400, measured: now+6s and now+1h both
+refused, now+4s accepted). What it does not check is the ZERO time. `store.pendingAt` and
+`Discard` both read `if !through.IsZero() { thr = through }`, so `"0001-01-01T00:00:00Z"` — which
+parses, is not in the future, and is exactly what `time.Time{}.Format(time.RFC3339Nano)` produces
+from an unset field — means *no bound at all*. Measured: a key parked at T-1h and a second key
+parked at T (after any render), `same_host` with `seen_through: "0001-01-01T00:00:00Z"` → 200,
+**both** keys recorded live with provenance `confirmed`, both items `merged`. The console never
+sends it; a CLI or an integration that forgets the field does, and gets the pre-ADR behaviour with
+no signal. Fix: reject the zero value in the handler beside the future check — the field is
+required, and "required" has to mean the value too, not just the key.
+**How to apply:** when a store helper uses a sentinel to mean "unbounded", check whether the sentinel
+is reachable from the wire. A guard that a caller disables by omission is a default, not a guard.
+
+**109. The only remedy is one unpaged page, ordered by a key the attacker refreshes, with no
+total.** `ListPending` takes the newest 200 ADDRESSES by `max(enqueued_at) DESC` and the response
+carries no address count. ADR-097 defers paging to B39's second slice and says so — but the queue is
+now the ONLY way to restore a host's credentialed coverage after a rotation or a contest, and the
+ordering key is one the attacker refreshes every scan. Measured: 200 flood addresses parked `now` +
+the victim's contest parked two hours earlier → `groups=200`, `PendingAddresses()=201`, the victim's
+address **absent from the listing**, and nothing in the response says a group is missing (the only
+hint is comparing Health's `contested_addresses` chip against the number of cards). A queue whose
+entries can be pushed out of sight by the party the queue exists to adjudicate is a remedy the
+attacker chooses. Minimum fix: an `addresses_total` beside the groups and an address filter, before
+paging.
+**How to apply:** for any screen that is the sole remedy for a security state, ask who decides which
+rows appear on it. A LIMIT with no total and no filter is a hiding place; ordering by recency hands
+the choice to whoever writes most recently.
+
+**110. Two caps nobody multiplied.** ADR-097 fixed #106 by capping the ambiguous-service ENTRIES
+per address at `MaxKeysPerGroup` (200) with `ambiguous_total` beside them — and left the VALUES per
+entry capped at the same 200. Nobody multiplied the three bounds. Measured on the dev DB: one
+address with 200 ambiguous services x 200 distinct values ships **40,000 values, 2.04 MiB** while
+the `keys` list for the same address — the same underlying parked keys — is capped at 200; 25 such
+addresses ship **50.14 MiB in 9.0 s**; the 200-address page is **~401 MiB, ~70 s**, for one GET that
+needs only `asset.read`. Worse than the 28 MiB the fix was written for. The tell: the `keys` block
+and the `ambiguous` block enumerate the SAME set under two different bounds (200 vs 200x200), and
+every such group has `keys_total > 200`, so the server refuses every verb but `discard` — the
+400 MiB of radio buttons is for a decision that cannot be taken.
+**How to apply:** when a fix adds a second cap, write the product out. Cap the block, not each axis:
+one budget per address for "values the operator could act on", and ship none of them for a group the
+server will refuse anyway.
+
+**111. A page-wide LIMIT shared across groups, spent in attacker-chosen order.** `ListPending`'s
+held-key query is `ORDER BY host(address), ... LIMIT MaxKeysPerGroup*len(addresses)+1` — one budget
+for the whole page, spent by address in TEXT order, with nothing checking the overflow the `+1`
+implies. Measured: a flood address `10.95.0.1` with 500 held rows consumed **401 of 401**, and the
+victim's real contest at `10.96.0.1` came back with `held: []` — the console's "Currently held on
+those services ... — what *same host* retires" line simply absent, so the destructive verb is offered
+with no statement of what it destroys. `?address=10.96.0.1` alone returns `held: 1`, proving the row
+exists and the page lost it. This is ADR-097's own already-fixed group-level defect ("a real holder
+with no same-host button") recurring at page level through a shared budget.
+**How to apply:** a per-group disclosure must have a per-group budget. If one LIMIT covers several
+groups, the group whose sort key an attacker chooses decides which other groups get disclosed.
+
+**112. The create-and-take verb that records nothing.** `ResolveNewAsset` creates the asset, records
+whatever it can, and opens the address on it — with no check that anything was recorded. Measured,
+two shapes, both returning **200**: (a) the attacker echoes the occupant's OWN public SSH fingerprint
+from a second port, so the only parked key is `keys_held_elsewhere` and nothing is recorded; (b) the
+group is `ip_window`-only (keyless), which the console offers the button for. In both the new asset
+ends `keys=0` holding the address live and the real occupant's interval is closed. Under this same
+slice's new conjuncts (`TrustMaterial` and `EstablishedAt` both require the asset to hold the address
+live) that instantly strips the occupant of credentialed trust, and the keyless newcomer can never
+merge (IP alone never merges). The console prints `New asset 2280e223 - 1 item closed`;
+`keys_recorded: []` is dropped because the formatter only renders non-empty parts.
+**How to apply:** a verb that displaces an existing holder must refuse when its own work came to
+nothing, and must refuse BEFORE the create and the address open. "Recorded zero" is not a success.
+
+**113. The pre-check that is a prediction, not an enforcement (check-then-act under READ
+COMMITTED).** #112's fix computes `recordable` — "at least one parked key of strength >= 2 has no
+live holder" — BEFORE `Assets.Create`, then the record loop re-reads `LiveByValue` for each key and
+may decline every one of them. `db.Write` is `pgx.TxOptions{}` = READ COMMITTED, so each statement
+takes a fresh snapshot: a key free when it was counted can belong to another asset when the loop
+reads it, and the loop has no post-check. Measured (overlay widening the window, then the identical
+probe with the candidate fix): the verb returns **200** with `keys_recorded: []`, a keyless asset
+takes the contested address, and the previous holder ends with zero live keys and no address —
+exactly the state the pre-check exists to prevent. The concurrent writer is ordinary: a correlate
+sweep recording the same fingerprint at another address. The fix is three lines, `if
+len(res.KeysRecorded) == 0 { return res, ErrNothingToRecord }` immediately before
+`AssetAddresses.Open`; rolling back the create is correct there because nothing but the create has
+happened (it is not the refusal-record shape).
+**How to apply:** a guard computed from a read and consumed by a later read of the same rows is a
+prediction. Re-decide on the OUTCOME, at the last moment before the irreversible step. Grep for the
+pattern "count N first, then loop and act" inside one `db.Write`; the two loops must share a
+snapshot or the second must re-assert the conclusion.
+
+**114. A cap and its "not everything is shown" total in different units.** `SightingsFor` is
+`LIMIT 200` over the join `asset_identity_keys x asset_identity_key_sightings` — one row per (key,
+sighting address) — while the `total` beside it counts live KEYS. The console guards its warning
+with `total > keys.length`. Measured: 120 live keys each sighted at 3 addresses returns **200 rows
+covering 67 distinct keys, `identity_keys_total: 120`, and the warning does not fire** — 53 keys,
+including any `rotation`/`lapsed` key awaiting confirmation, are silently absent from the only
+screen that can confirm them, under a paragraph that reads "A key past this page cannot be confirmed
+here". Same root as #106/#110: the bound and the count are computed over different sets.
+**How to apply:** whenever a response carries `items` + `items_total`, state the unit of each and
+check the console's truncation test is `len(items) == cap`, not `total > len(items)`. A cap on a
+JOIN needs a total over the JOIN.

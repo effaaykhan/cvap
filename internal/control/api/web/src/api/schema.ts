@@ -64,6 +64,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/assets/{asset_id}/identity/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm a rotated or lapsed key
+         * @description A key recorded by a rotation or a lapse (ADR-096) is excluded from the credentialed trust root until an operator confirms it. This is that confirmation: the key is re-stamped confirmed and is trust material on ADR-094's terms (two sightings at the address). Recorded with the operator; it verifies nothing (B44) — an operator who confirms a key an attacker rotated in has handed that attacker the credentialed dial.
+         */
+        post: operations["postV1AssetsByAsset_idIdentityConfirm"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/login": {
         parameters: {
             query?: never;
@@ -318,6 +338,46 @@ export interface paths {
         get: operations["getV1Health"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/identity/queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the identity resolution queue
+         * @description Everything correlation parked for an operator (ADR-007, ADR-094, ADR-096), grouped by address, newest contest first: the candidates the evidence was judged against, the verdict's reason (including which continuity fact failed), and the parked keys with their copied evidence.
+         */
+        get: operations["getV1IdentityQueue"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/identity/queue/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Adjudicate a contested address
+         * @description same_host: the parked keys are the named asset's — its held key of the same service is retired, the parked one recorded as confirmed, and the parked observations attach to it on the next sweep. different_host: the parked group is a host of its own — a new asset holding the parked keys takes the address. An operator's decision, recorded with the operator; it verifies nothing (B44). A key another asset holds live is never moved by either verb (that merge is B40).
+         */
+        post: operations["postV1IdentityQueueResolve"];
         delete?: never;
         options?: never;
         head?: never;
@@ -655,6 +715,13 @@ export interface components {
             unacknowledged: number;
             zone_id?: string | null;
         };
+        AmbiguousServiceResponse: {
+            key_type: string;
+            source: string;
+            /** @description The first 200; values_total beside them. */
+            values: string[];
+            values_total: number;
+        };
         AssetAddressResponse: {
             ip?: string;
             mac?: string;
@@ -691,6 +758,9 @@ export interface components {
             /** @description Primary hostname, or empty if the asset has only addresses. */
             hostname: string;
             id: string;
+            /** @description At most 200 rows, one per key per address it was seen at, keys awaiting confirmation first; identity_keys_total counts those rows, so a larger total means keys are missing from this page. */
+            identity_keys: components["schemas"]["IdentityKeyResponse"][];
+            identity_keys_total: number;
             /** @description Open findings whose CVE is in CISA KEV. */
             kev_findings: number;
             /** Format: date-time */
@@ -796,6 +866,19 @@ export interface components {
             kev: boolean;
             rule: string;
             severity: string;
+        };
+        ConfirmIdentityRequest: {
+            /** @description The keys the operator is confirming, as 'key_type fingerprint' — each a live rotated or lapsed key on the asset. Named keys only: the others stay excluded. A named key that is not rotated or lapsed (confirmed already, retired, never there) refuses the whole request (409). */
+            keys: string[];
+            /** @description Why the operator believes these keys are the host's own. Recorded beside who decided. At most 4 KiB. */
+            reason: string;
+        };
+        ConfirmIdentityResponse: {
+            asset_id: string;
+            /** @description type and fingerprint of each key re-stamped confirmed. */
+            keys_confirmed: string[];
+            /** @description Rotated or lapsed keys still on the asset after this decision — not named, so not confirmed. At most 200. */
+            keys_remaining: string[];
         };
         CreateScanRequest: {
             /** @description The policy this scan runs under. Its ceilings bound everything the scan may do. */
@@ -987,12 +1070,79 @@ export interface components {
             ingest_backlog: number;
             /** @description active when any kill is unresolved; inactive otherwise. The control is always armed; this is whether it is pressed. */
             kill_switch_state: string;
-            /** @description Items in the identity resolution queue awaiting an operator (ADR-007/094): one per (observation, key) parked because the evidence at an address contradicts what the asset holds — several per host per scan. No operator verb exists yet (B39); an item leaves only when a later scan classifies the contradiction as a key rotation (ADR-096). See contested_addresses for the host count. */
+            /** @description Items in the identity resolution queue awaiting an operator (ADR-007/094): one per (observation, key) parked because the evidence at an address contradicts what the asset holds — several per host per scan. An item leaves when an operator adjudicates the address on the Identity screen (ADR-097), when a later scan classifies the contradiction as a key rotation, or when the contest goes stale (ADR-096). See contested_addresses for the host count. */
             resolution_queue_pending: number;
             /** @description Always 2 (Core at planning, the scan point on the send path — ADR-024). A property of the design asserted by the safety gate, reported so the surface says what is measured and what is not. */
             scope_enforcement_sites: number;
             /** @description Accepted observations in the last 7 days that correlation has not attached to an asset yet. */
             unresolved_observations: number;
+        };
+        HeldKeyResponse: {
+            asset_id: string;
+            key_type: string;
+            key_value: string;
+            source: string;
+        };
+        IdentityKeyResponse: {
+            /** @description Where it was sighted; absent when never sighted at an address. */
+            address?: string;
+            /** @description Whether the asset holds the sighting's address live right now. A sighting at an address the asset lost is history, not trust. */
+            address_held: boolean;
+            fingerprint: string;
+            key_type: string;
+            last_seen_at?: string | null;
+            /** @description Why it is or is not trust material, in words: sightings still needed, or the operator confirmation that would unlock it. */
+            note: string;
+            /** @description The port it was sighted on; the credentialed engine dials 22. */
+            port?: number;
+            /** @description Which verdict recorded it (merge, new_asset, attach), or rotation / lapsed (excluded from trust until confirmed), confirmed (an operator's word), unknown (before ADR-094). */
+            provenance: string;
+            /** @description Distinct scans that saw it there inside the window (ADR-094). */
+            scans_seen: number;
+            /** @description The service the key came from, port/protocol. */
+            source?: string;
+            /** @description Whether the credentialed engine would trust this key for its dial (port 22) at this address right now — the trust root's own predicate (SSHHostKeyFingerprintsAt), so the page and the wire cannot disagree. */
+            trust_material: boolean;
+        };
+        IdentityQueueGroupResponse: {
+            address: string;
+            /** @description Services at the address where two or more different keys of one type were parked (two hosts answered on one port), computed over all items, not only the ones shown; the first 200, ambiguous_total beside them. Not computed (empty, total 0) when keys_total exceeds 200: such a group can only be discarded, so its choices would be unusable. Resolving needs one chosen value per entry (key_choices). */
+            ambiguous: components["schemas"]["AmbiguousServiceResponse"][];
+            ambiguous_total: number;
+            /** @description The assets the evidence was judged against. Usually the address holder; empty when nothing held the address (two hosts answered on one port there). */
+            candidates: string[];
+            first_seen: string;
+            /** @description What each candidate holds live on the contested services — what same_host retires. */
+            held: components["schemas"]["HeldKeyResponse"][];
+            /** @description The newest items, at most 50; items_total is the full count. */
+            items: components["schemas"]["IdentityQueueItemResponse"][];
+            items_total: number;
+            /** @description The distinct parked keys at the address, over all items — what a decision records; the first 200, keys_total beside them. */
+            keys: components["schemas"]["ParkedKeyResponse"][];
+            keys_total: number;
+            last_seen: string;
+            /** @description The latest verdict's reason, as domain.Resolve wrote it — including which continuity fact failed (ADR-096). */
+            reason: string;
+        };
+        IdentityQueueItemResponse: {
+            enqueued_at: string;
+            /** @description What the service said, from the copied evidence: service, product and version — the banner the decision turns on. */
+            evidence?: string;
+            /** @description ssh_hostkey | service_cert_fp | ip_window (the address alone: a keyless observation parked with the group). */
+            key_type: string;
+            /** @description The fingerprint, or the address for ip_window. */
+            key_value: string;
+            /** @description The observation that carried the key; absent once its partition has aged out (ADR-016). The evidence below is the copy. */
+            observation_id?: string | null;
+            resolution_id: string;
+            /** @description The service the key came from, port/protocol. */
+            source?: string;
+        };
+        IdentityQueueResponse: {
+            /** @description Every contested address, listed or not — an attacker's newer parks can push a real contest off the page; name it with ?address= to reach it. */
+            addresses_total: number;
+            /** @description The newest 200 contested addresses, or the one named by ?address=. */
+            groups: components["schemas"]["IdentityQueueGroupResponse"][];
         };
         IssueKillRequest: {
             /** @description Required. A fleet stop with no stated reason is unreviewable afterwards. */
@@ -1003,6 +1153,12 @@ export interface components {
             scope: string;
             /** @description Required when scope is zone. */
             zone_id?: string | null;
+        };
+        KeyChoiceRequest: {
+            key_type: string;
+            key_value: string;
+            /** @description port/protocol, as the listing's ambiguous entry gives it. */
+            source: string;
         };
         KillResponse: {
             id: string;
@@ -1053,6 +1209,14 @@ export interface components {
             id: string;
             prefix: string;
         };
+        ParkedKeyResponse: {
+            first_seen: string;
+            items: number;
+            key_type: string;
+            key_value: string;
+            last_seen: string;
+            source: string;
+        };
         PolicyListResponse: {
             policies: components["schemas"]["PolicyResponse"][];
         };
@@ -1087,6 +1251,31 @@ export interface components {
             newest_advisory_at?: string | null;
             release: string;
             state: string;
+        };
+        ResolveIdentityRequest: {
+            /** @description The contested address, as the queue lists it. */
+            address: string;
+            /** @description Required for same_host: one of the group's candidates. */
+            asset_id?: string;
+            /** @description same_host: the parked keys belong to asset_id — its held key of the same service is retired and the parked one recorded as confirmed; the parked observations attach to it. different_host: the parked group is a host of its own — a new asset is created holding the parked keys and the address. discard: the group is noise — every item closes as discarded, nothing is recorded, nothing is trusted; the exit for a group too large or too hostile to decide key by key. */
+            decision: string;
+            /** @description Which parked key is the host, one per ambiguous service (two different keys of one type parked from one service: two hosts answered on one port). Each names the service, because one fingerprint can be parked on two ports. The other keyed items of each named service close as discarded. Required for every ambiguous service in the group; ignored otherwise. */
+            key_choices?: components["schemas"]["KeyChoiceRequest"][];
+            /** @description Why. Recorded in the audit log beside who decided. At most 4 KiB. */
+            reason: string;
+            /** @description The listing's last_seen for this address, as rendered. The decision acts only on items parked by then; anything parked since stays pending and the address is listed again. Required: a key parked between the render and the click must not be confirmed unseen. */
+            seen_through: string;
+        };
+        ResolveIdentityResponse: {
+            /** @description The asset the parked observations now belong to; empty for discard. */
+            asset_id: string;
+            items_closed: number;
+            /** @description Parked keys the operator's choices rejected; their items closed as discarded. */
+            keys_discarded: string[];
+            /** @description Parked keys another asset holds live, left there: moving them is a merge of two assets (B40). Their items closed as discarded. */
+            keys_held_elsewhere: string[];
+            keys_recorded: string[];
+            keys_retired: string[];
         };
         SafetyModeRequest: {
             /** @description safe | intrusive. Must be at or beneath the policy's ceiling. */
@@ -1368,6 +1557,68 @@ export interface operations {
                 };
             };
             /** @description Refused because the session's role does not hold asset.read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    postV1AssetsByAsset_idIdentityConfirm: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmIdentityRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfirmIdentityResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold identity.resolve, or the X-CVAP-CSRF header is missing or does not match the session, or the request did not come from this site. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2050,6 +2301,122 @@ export interface operations {
                 };
             };
             /** @description Refused because the session's role does not hold scan.read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getV1IdentityQueue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityQueueResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold asset.read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    postV1IdentityQueueResolve: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveIdentityRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResolveIdentityResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold identity.resolve, or the X-CVAP-CSRF header is missing or does not match the session, or the request did not come from this site. */
             403: {
                 headers: {
                     [name: string]: unknown;

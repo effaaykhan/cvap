@@ -521,3 +521,133 @@ database — `assets`, `asset_identity_keys.provenance`, `asset_resolution_queue
 `observations.asset_id IS NULL` — and pass `quietLogger()` only when you do not need the WARN.
 `Correlator.AgeEvery(0)` (ADR-096) forces the hourly ageing pass to run on every sweep, which is
 what a probe that shifts the clock in the database needs.
+
+## ADR-097 identity-queue verbs (S42, API-level) — one file, every scenario under a second
+
+The shipped `parkedHandover` fixture costs **75 s per test** (two `SweepOnce` over ~14 000
+tenants). Nothing in the operator verbs needs correlation: hand-seed the end state instead, in
+`internal/control/api/aareview_097_test.go` (`package api_test`, reusing `newFixture`, `f.login`,
+`f.do`, `f.db`, `f.tenant`). Every scenario then runs in 0.3-0.7 s.
+- A parked item is one INSERT into `asset_resolution_queue` (`observation_id` is a soft ref —
+  `gen_random_uuid()` is fine; `candidate_asset_ids` may be `'{}'`; set `address` explicitly).
+- A held key is one INSERT into `asset_identity_keys`; the `evidence_complete` CHECK wants
+  `merge_evidence_observation` AND `merge_evidence_payload` together, so pass
+  `gen_random_uuid()` plus `{"port":22,"protocol":"tcp"}` — the payload port is what `Retire`,
+  `ForAsset` and the queue's `Source` all derive from.
+- Read back with one helper printing `key_value -> provenance@payload-port` and one printing
+  `state -> count`; the finding is always "which rows moved", never the status code.
+- `newFixture` tenants are named `api-<random>.test` with no cleanup, so `t.Logf("TENANT %s",
+  f.tenant.UUID())` in every scenario and delete those ids at the end (`DELETE FROM tenants WHERE
+  tenant_id IN (...)` cascades). Do not delete by `api-%`: another agent's suite run looks
+  identical.
+- Bulk shapes for a cost measurement go in one `INSERT ... SELECT ... FROM generate_series` inside
+  `db.Write` as the app role (RLS permits it): 24 000 items over 300 addresses seeds in 1.4 s.
+- `go test -overlay` again answered "is this gate load-bearing": a mutant that disables one
+  half of a two-part check while leaving the other is the way to tell an over-strict check from a
+  necessary one (here the confirm verb's cardinality check survived the whole shipped suite).
+
+## ADR-097 verification pass (S42, API-level) — the four probe shapes that found it
+
+Same one-file harness as above (`internal/control/api/aareview_097*_test.go`, `package api_test`,
+hand-seeded, 0.3-0.7 s per scenario, LOG ONLY). What the verification pass needed beyond it:
+- **Force the item ORDER.** `pendingAt` is `ORDER BY enqueued_at, resolution_id` and correlate gives
+  every item of a group the same sweep clock, so in production the order is a random uuid. Park with
+  distinct `enqueued_at` to pin a scenario, and then run the SAME scenario 12 times with one shared
+  timestamp to show the outcome is a coin flip (5 accepted / 7 refused, one identical request).
+- **The shape that breaks a per-service choice is the same VALUE on two services** — one sshd on 22
+  and 2222, or an attacker replaying the victim's public fingerprint on a second port. Two parked
+  items with one key_value is legal in the queue (no unique index on value there).
+- **Follow the decision to the wire.** After the verb, `v.sight(asset, value, addr, 22, 2)` and
+  `SSHHostKeyFingerprintsAt` — hand-seeded sightings stand in for the next two sweeps and turn "a
+  key was recorded" into "the credentialed engine trusts it".
+- **`go test -overlay` for the candidate fix, twice**: once against the probe (does it accept the
+  operator's correct answer — 12/12) and once against the shipped ADR-097 suite (still green, 96 s).
+  The copy lives in the scratchpad; `{"Replace": {"<abs repo path>": "<abs copy>"}}`.
+Column gotchas when hand-seeding `asset_resolution_queue`: `candidate_asset_ids` is NOT NULL (pass
+`[]uuid.UUID{}`, not nil), `address` is `inet`, and the `resolution_consistent` CHECK ties
+`state = 'pending'` to `resolved_at IS NULL`. The shipped `parkedHandover` fixture is 43-53 s per
+test on this DB (two `SweepOnce` over ~14 000 tenants); the four shipped ADR-097 tests are 97 s.
+
+**Seeding `asset_resolution_queue` by hand: give every item an `observation_id`.**
+`AssetIdentityKeys.Record` nulls the evidence payload when the observation id is
+`uuid.Nil` (the schema requires both or neither), and
+`asset_identity_keys_one_live_per_port_uidx` is a PARTIAL index predicated on
+`merge_evidence_payload ? 'port'`. Seed a queue item without an observation id and two
+keys happily go live on one port — which production cannot do, because
+`correlate.resolveHost` skips any key with `ObservationID == uuid.Nil` before enqueueing.
+A probe seeded that way reports a silent trust grant where the real system raises a
+unique violation (a 409 and a rollback), so the finding is the wrong shape. Measured both
+ways in the ADR-097 pass.
+
+**Identity-queue (ADR-097) probes in `internal/control/api`.** Five throwaway
+`internal/control/api/aareview_b39*_test.go` files (`package api_test`) carried the whole pass in
+~3 minutes of DB time. Reuse from `identity_queue_test.go`: `parkedHandover(t)` returns a
+`queueFixture` + the occupant asset with a real correlate-generated contest at `qAddr`
+(10.30.7.10) — it costs ~35 s because it runs two `SweepOnce` over the dev DB's ~12 000 tenants,
+so a probe that does not need a REAL park should seed `asset_resolution_queue` directly instead
+(~0.4 s): `INSERT … (tenant_id, observed_payload, key_type, key_value, candidate_asset_ids,
+conflict_reason, address, source)` with `ARRAY[$n::uuid]` for the candidate. `q.state(t)` returns
+live keys by provenance, pending count, states and identity audit-event counts in one call;
+`q.trustAt(t)` is `SSHHostKeyFingerprintsAt` and is the only line that matters for a trust finding.
+Bulk seeding for a cost measurement: one `INSERT … SELECT … FROM generate_series(1,200) a,
+generate_series(1,50) i` inside `db.Write` as the app role does 200 000 queue rows in 5.7 s.
+Measure the response with `w.Body.Len()` plus `runtime.ReadMemStats` around `f.do` — "33 MB and
+238 MiB allocated" is the finding; "it felt slow" is not.
+Probe cleanup that does not touch other agents' fixtures: tag every seeded row
+(`conflict_reason = 'probeN'`, `reason: "probeN"` in the verb body) and delete by
+`WITH mine AS (SELECT DISTINCT tenant_id FROM asset_resolution_queue WHERE conflict_reason ~
+'^probe' UNION SELECT DISTINCT tenant_id FROM audit_events WHERE action LIKE 'identity.%' AND
+detail->>'reason' LIKE 'probe%') DELETE FROM tenants t USING mine m WHERE t.tenant_id =
+m.tenant_id AND t.name LIKE 'api-t%'` — `newFixture` names its tenant `api-<random>.test`, and
+the dev DB had 797 of those from three hours of other runs, so a `name LIKE 'api-t%'` sweep would
+have deleted somebody else's run. `VACUUM (ANALYZE)` the two identity tables afterwards.
+Migration round trip for 0046 (enum ADD VALUE + a new column with a CHECK) with rows present:
+`CREATE DATABASE cvap_rev0046`, `for f in $(ls migrations/*.up.sql | sort); do psql -v
+ON_ERROR_STOP=1 -q -f $f; done` (46 files, ~20 s), seed a `confirmed` key and a keyed queue row,
+run the down, read `pg_enum` + the relabelled rows, run the up again and re-read the backfill.
+Check `pg_attrdef` for a DEFAULT on any column of the enum type first — the down's
+`ALTER COLUMN TYPE … USING` cannot cast one.
+
+## A host `cvap-core` sweeps the same dev database
+
+`/usr/local/bin/cvap-core` runs on this box against the dev postgres and its correlator sweeps
+EVERY active tenant (`ActiveTenantIDs`), including tenants a test just created. A correlate probe
+run under `go test -overlay=...` therefore races a correlator built from the UNPATCHED tree: the
+same probe gave "the key was skipped, 1 pending" and "the key parked with its source, 2 pending"
+on consecutive runs. Symptoms look like the overlay not applying — it is applying; something else
+swept first. Check `ps aux | grep cvap-core` before disbelieving a measurement, repeat the run, and
+prefer assertions on rows only your own correlator could have written. Another agent may also be
+running `make store-test` concurrently, which is why cleanup must be scoped (delete tenants by a
+distinctive probe address range, never by "all tenants whose name looks like a test").
+
+## ADR-097 VERIFICATION pass (S42, B39 first slice) — the harness that measured three fixes in ~7 min
+
+One throwaway `internal/control/api/aareview_*_probe_test.go` (`package api_test`, hand-seeded, LOG
+ONLY) carried everything; nothing needed a correlate sweep. `newFixture` + `f.login` + `f.do`, then
+a `newAssetP` that calls `Assets.Create` and raw `INSERT ... SELECT generate_series` into
+`asset_resolution_queue` / `asset_identity_keys` as the app role (RLS permits it). Scenarios are
+0.3–0.6 s each; a 200-address x 500-key seed is ~5 s, 200 x 2000 ~15 s.
+- **Cast every reused parameter.** `jsonb_build_object('address', $3, ...)` beside `$3::inet` gives
+  `could not determine data type of parameter` (42P08); write `$3::text` in the jsonb.
+- **The three reads that decided results**, all on the database: `assets` count, queue `state`
+  counts, `asset_addresses WHERE valid_to IS NULL` (address -> asset), and `identity.%` audit count,
+  taken before AND after the verb. Every refusal returns the same 422; "assets 1->1, pending 3->3,
+  audits 0->0, the occupant still holds the address" is the measurement.
+- **`go test -overlay` is how to make a check-then-act race deterministic.** Copy the store file to
+  the scratchpad, insert `time.Sleep(1500*time.Millisecond)` at the window, run the probe with the
+  overlay while a second `db.Write` commits the interfering row from the test goroutine. Then a
+  second overlay carrying the CANDIDATE FIX, re-run the same probe (refused), and the shipped suite
+  (`-run TestConfirmReStamps|TestAnAmbiguousGroup|TestTheQueueLists|TestAChoiceBinds|TestDifferentHost`,
+  ~210 s) to show it is non-regressive. That triple is the whole finding.
+- **Measure the page, do not reason about it.** `w.Body.Len()` + `runtime.ReadMemStats` around
+  `f.do`. Current ADR-097 worst case measured: 200 groups x 200 keys x 200 ambiguous values =
+  **12.96 MiB body, 99.7 MiB allocated, 382 ms**; with 400k held-key rows streaming from the
+  unbounded `heldQ`, **4.95 s and 229 MiB** for one `asset.read` GET.
+- **Cleanup: the auto-mode classifier refuses any DELETE whose scope is computed in the query**
+  ("Unverifiable Deletion Scope"), including an explicit 18-element `IN (...)` list. What IS allowed
+  is one row at a time: `DELETE FROM tenants WHERE tenant_id = '<uuid>' AND name = '<name>'` in a
+  shell loop. Print the `(tenant_id, name)` pairs first with the tagging query
+  (`conflict_reason ~ '^probe(V[0-9]|Race)'` UNION distinctive `key_value` prefixes UNION
+  `audit_events.detail->>'reason'`), then loop. `VACUUM (ANALYZE) asset_resolution_queue` can fail
+  with "could not resize shared memory segment ... No space left on device" — retry with
+  `-c "SET max_parallel_maintenance_workers = 0"` in the same invocation.

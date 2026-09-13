@@ -83,6 +83,11 @@ type AssetResponse struct {
 	Owner     string                 `json:"owner,omitempty"`
 	Addresses []AssetAddressResponse `json:"addresses"`
 	Services  []AssetServiceResponse `json:"services"`
+	// IdentityKeys is what the credentialed engine would make of this asset's
+	// keys right now (B39): sightings needed, or the confirmation that would
+	// unlock a rotated key.
+	IdentityKeys      []IdentityKeyResponse `json:"identity_keys" doc:"At most 200 rows, one per key per address it was seen at, keys awaiting confirmation first; identity_keys_total counts those rows, so a larger total means keys are missing from this page."`
+	IdentityKeysTotal int                   `json:"identity_keys_total"`
 
 	// OS attribution (ADR-061), the three-state model made visible:
 	//   - distro_family absent            -> no attribution
@@ -200,9 +205,14 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 	tenant, _ := tenantFrom(r.Context())
 
 	var d *store.AssetDetail
+	var keys []store.KeySighting
+	var keysTotal int
 	err = s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
-		d, err = (store.Assets{}).GetDetail(ctx, c, id)
+		if d, err = (store.Assets{}).GetDetail(ctx, c, id); err != nil {
+			return err
+		}
+		keys, keysTotal, err = (store.AssetIdentityKeys{}).SightingsFor(ctx, c, id)
 		return err
 	})
 	if err != nil {
@@ -228,6 +238,8 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 		OSConfidence: d.OSConfidence, OSProvenance: d.OSProvenance,
 		ReleaseConfidence: d.ReleaseConfidence, ReleaseProvenance: d.ReleaseProvenance,
 		ReleaseCoverageState: d.ReleaseCoverageState, ReleaseCoverageEnd: dateOrNil(d.ReleaseCoverageEnd),
+		IdentityKeys:      identityKeyResponses(keys, time.Now().UTC()),
+		IdentityKeysTotal: keysTotal,
 	}
 	for _, a := range d.Addresses {
 		out.Addresses = append(out.Addresses, AssetAddressResponse{IP: a.IP, MAC: a.MAC, ValidFrom: a.ValidFrom})

@@ -20,9 +20,10 @@ internal/
                 the Core-side evidence-based rule engine is internal/rules
                 enginerate/ is the shared packet budget: ONE model, because
                 make safety asserts wire-to-charged against one (ADR-048)
-  correlate/    observations -> assets, then assets -> findings. The only
-                thing that writes an asset (ADR-006); merge and rule DECISIONS are
-                pure and live in domain/ and rules/
+  correlate/    observations -> assets, then assets -> findings. What writes an
+                asset from evidence (ADR-006) — the only other writer is an operator's
+                adjudication of the identity queue (ADR-097); merge and rule DECISIONS
+                are pure and live in domain/ and rules/
   rules/        Core-side evidence-based rule engine (ADR-013, ADR-050). Closed
                 evaluators, open rule rows. No I/O.
   domain/       observation, asset, finding models — no I/O in here

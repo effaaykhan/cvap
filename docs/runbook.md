@@ -183,6 +183,52 @@ surface exists.
 
 ---
 
+## 5a. A host stopped updating, or its credentialed scans refuse: the identity queue (ADR-096, ADR-097)
+
+Correlation parks an address when the evidence there contradicts what the asset holds — a different
+SSH host key from the same service (a reimage, `ssh-keygen -A`, a reused DHCP lease, or someone
+answering the port) — or when two hosts answered on one port. While an address is contested every
+sighting there waits, so the host's inventory stops moving; Health's **Contested identities** chip
+counts them and links to the **Identity** screen.
+
+- **Read it** with `GET /v1/identity/queue` (`asset.read`) or the Identity screen: one card per
+  address, the candidate asset, the verdict's reason (which continuity fact failed), the parked keys
+  and what each service said.
+- **Decide it** with `POST /v1/identity/queue/resolve` (`identity.resolve`), `reason` required:
+  `same_host` with the candidate's `asset_id` when the parked key is the same machine (it retires the
+  held key of that service and records the parked one; the parked observations attach on the next
+  sweep); `different_host` when it is another machine (a new asset takes the address). It refuses
+  (422) when it would record no key — every parked key is an echo of what another asset already
+  holds, or the group is address-only — because a keyless asset holding the address can never
+  merge and leaves the real holder without trust; use `same_host` on the holder, or discard. When two
+  different keys answered on one port, name which one is the host for every such service
+  (`key_choices`, the radio buttons on the screen, one group per port); the others close as
+  discarded. `discard` closes the whole group as noise — nothing recorded, nothing trusted — and is
+  the only verb offered when an address carries more parked keys than the page can show. Discarding
+  a genuine host's contest loses its parked inventory for those scans and lifts the park at that
+  address until the next contradiction re-parks it, like an expiry. The decision carries the
+  listing's `last_seen` (`seen_through`): anything parked after you looked stays pending and the
+  address comes back — reload rather than assume. The page shows the two hundred newest contests
+  with the full count beside them; type an address to find one that newer parks have pushed off. Items parked
+  before migration 0046 whose evidence names no port list under the service `unknown` and are all
+  treated as one service: you can keep exactly one of them.
+- **A rotated host refuses credentialed scans until you confirm.** The key a rotation or a lapse
+  recorded is excluded from the credentialed trust root: on the asset page its chip reads *needs
+  confirmation*. `POST /v1/assets/{id}/identity/confirm` (`identity.resolve`; `keys` — the rotated
+  or lapsed keys you tick — and `reason` required) re-stamps those and only those; anything you do
+  not tick stays excluded, and the response lists it. Trusted after two sightings at the address,
+  like any key.
+- **What a decision means.** Nothing here verifies that the host holds the private key — the
+  fingerprint probe checks no possession (B44). A decision records that *you* said so, with your
+  user id and reason in `audit_events` (`identity.resolved`, `identity.confirmed`). Confirming a
+  key an attacker rotated in hands that attacker the credentialed dial; when in doubt, leave the
+  host parked. (Pinning the key on the credential profile — ADR-091 §4, an `operator` line wins
+  outright — is the stronger answer, but the profile has no pin writer in the API or CLI yet; B39's
+  second slice.) A contest that nobody re-presents for a window expires on its own; a persistent
+  one is visible until you act.
+
+---
+
 ## 6. Reading CI: the coarse-versus-precise gate split (ADR-058)
 
 Anyone reading a green CI run should know exactly what it promises about

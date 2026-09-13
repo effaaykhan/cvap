@@ -17,6 +17,11 @@ export type Asset = Schemas["AssetResponse"];
 export type AssetSummary = Schemas["AssetSummary"];
 export type ExposureByZone = Schemas["ExposureByZoneResponse"];
 export type KnowledgeFreshness = Schemas["KnowledgeFreshnessResponse"];
+export type IdentityQueue = Schemas["IdentityQueueResponse"];
+export type IdentityQueueGroup = Schemas["IdentityQueueGroupResponse"];
+export type IdentityKey = Schemas["IdentityKeyResponse"];
+export type ResolveIdentityResult = Schemas["ResolveIdentityResponse"];
+export type ConfirmIdentityResult = Schemas["ConfirmIdentityResponse"];
 export type KnowledgeFeed = Schemas["KnowledgeFeedResponse"];
 export type ReleaseCoverage = Schemas["ReleaseCoverageResponse"];
 export type Scan = Schemas["ScanResponse"];
@@ -100,6 +105,11 @@ export const api = {
   getFinding: (id: string) => request<Finding>("GET", `/v1/findings/${id}`),
   exposure: () => request<ExposureByZone>("GET", "/v1/exposure"),
   knowledgeFreshness: () => request<KnowledgeFreshness>("GET", "/v1/knowledge/freshness"),
+  identityQueue: (address = "") => request<IdentityQueue>("GET", `/v1/identity/queue${address ? `?address=${encodeURIComponent(address)}` : ""}`),
+  resolveIdentity: (body: Schemas["ResolveIdentityRequest"]) =>
+    request<ResolveIdentityResult>("POST", "/v1/identity/queue/resolve", body),
+  confirmIdentity: (assetID: string, keys: string[], reason: string) =>
+    request<ConfirmIdentityResult>("POST", `/v1/assets/${assetID}/identity/confirm`, { keys, reason }),
 
   listAssets: (q: string) => request<AssetList>("GET", `/v1/assets${q}`),
   getAsset: (id: string) => request<Asset>("GET", `/v1/assets/${id}`),

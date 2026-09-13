@@ -302,6 +302,45 @@ func (s *Server) routes() {
 		Handler:  s.listAssets,
 	})
 
+	// ------------------------------------------------------------ identity
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/identity/queue",
+		Summary: "List the identity resolution queue",
+		Description: "Everything correlation parked for an operator (ADR-007, ADR-094, ADR-096), grouped by " +
+			"address, newest contest first: the candidates the evidence was judged against, the verdict's " +
+			"reason (including which continuity fact failed), and the parked keys with their copied evidence.",
+		Access: AccessPermission, Permission: PermAssetRead,
+		Response: IdentityQueueResponse{},
+		Handler:  s.listIdentityQueue,
+	})
+
+	r.Register(Route{
+		Method: http.MethodPost, Path: "/v1/identity/queue/resolve",
+		Summary: "Adjudicate a contested address",
+		Description: "same_host: the parked keys are the named asset's — its held key of the same service is retired, " +
+			"the parked one recorded as confirmed, and the parked observations attach to it on the next sweep. " +
+			"different_host: the parked group is a host of its own — a new asset holding the parked keys takes the " +
+			"address. An operator's decision, recorded with the operator; it verifies nothing (B44). A key another " +
+			"asset holds live is never moved by either verb (that merge is B40).",
+		Access: AccessPermission, Permission: PermIdentityResolve,
+		Request: ResolveIdentityRequest{}, Response: ResolveIdentityResponse{},
+		Handler: s.resolveIdentity,
+	})
+
+	r.Register(Route{
+		Method: http.MethodPost, Path: "/v1/assets/{asset_id}/identity/confirm",
+		Summary: "Confirm a rotated or lapsed key",
+		Description: "A key recorded by a rotation or a lapse (ADR-096) is excluded from the credentialed trust " +
+			"root until an operator confirms it. This is that confirmation: the key is re-stamped confirmed and is " +
+			"trust material on ADR-094's terms (two sightings at the address). Recorded with the operator; it " +
+			"verifies nothing (B44) — an operator who confirms a key an attacker rotated in has handed that attacker " +
+			"the credentialed dial.",
+		Access: AccessPermission, Permission: PermIdentityResolve,
+		Request: ConfirmIdentityRequest{}, Response: ConfirmIdentityResponse{},
+		Handler: s.confirmIdentity,
+	})
+
 	r.Register(Route{
 		Method: http.MethodGet, Path: "/v1/assets/{asset_id}",
 		Summary: "Get an asset",

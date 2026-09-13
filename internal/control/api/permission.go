@@ -64,6 +64,13 @@ const (
 	PermKillIssue   Permission = "kill.issue"
 	PermKillResolve Permission = "kill.resolve"
 
+	// The identity resolution queue's verbs (ADR-097, B39): adjudicate a
+	// parked address, confirm a rotated or lapsed key. Held apart from
+	// asset.read because a decision here re-roots credentialed trust — the
+	// operator's word is the only verification an observed SSH key gets
+	// (B44), and the authority to give it is not the authority to look.
+	PermIdentityResolve Permission = "identity.resolve"
+
 	PermAuthConfigRead  Permission = "auth.read"
 	PermAuthConfigWrite Permission = "auth.write"
 )
@@ -79,6 +86,7 @@ var allPermissions = map[Permission]bool{
 	PermAuthConfigRead: true, PermAuthConfigWrite: true,
 	PermAssetRead: true, PermFindingRead: true,
 	PermFindingExportAll: true, PermAssetExportAll: true,
+	PermIdentityResolve: true,
 }
 
 // PermissionNames lists the closed set, sorted. For the OpenAPI document and

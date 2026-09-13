@@ -107,6 +107,9 @@ GO_SUITES = [
     "internal/rules/evaluators_test.go",
     "internal/control/api/api_read_test.go",
     "internal/control/api/handlers_scan_gate_test.go",
+    # ADR-097: the identity queue's operator verbs — a confirm that blesses an
+    # unnamed key, a choice that keeps the key it should discard.
+    "internal/control/api/identity_queue_test.go",
     # The distributed fault-injection matrix (§6.4). Each fault case declares the
     # sabotage its assertion must kill, so the matrix cannot pass vacuously. The
     # e2e entries run real processes, so their mutations are slower than the rest;

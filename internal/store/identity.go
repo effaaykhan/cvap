@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -318,6 +320,10 @@ const (
 	// whose key had been silent for a full window under a fresh contest
 	// (ADR-096). Excluded from the trust root like a rotation.
 	KeyFromLapsed KeyProvenance = "lapsed"
+	// KeyFromConfirmed: an operator's word (ADR-097, migration 0046) — a
+	// rotation or lapse confirmed, or a queue item adjudicated. Excluded from
+	// nothing; the audit log names who.
+	KeyFromConfirmed KeyProvenance = "confirmed"
 )
 
 // Record writes a key with its merge evidence.
@@ -436,7 +442,10 @@ func (AssetIdentityKeys) Record(ctx context.Context, c *Conn, assetID uuid.UUID,
 // corroborating its own certificate against the victim's, which handed the
 // attacker two moderate keys of trusting provenance on the victim's asset and
 // a merge at any address it controlled. Until an operator confirms, such a
-// key corroborates nothing.
+// key corroborates nothing. And the asset must HOLD the address live, as the
+// trust root requires: an operator's confirmation given on a page that says
+// "history, not trust" must not re-arm corroboration at an address the asset
+// lost (measured).
 func (AssetIdentityKeys) EstablishedAt(ctx context.Context, c *Conn, assetID uuid.UUID, k domain.IdentityKey, address string, port int, within time.Duration) (bool, error) {
 	const q = `
 		SELECT EXISTS (
@@ -447,7 +456,10 @@ func (AssetIdentityKeys) EstablishedAt(ctx context.Context, c *Conn, assetID uui
 		       AND k.key_value = $4 AND k.valid_to IS NULL
 		       AND k.provenance NOT IN ('rotation', 'lapsed')
 		       AND s.address = host($5::inet)::inet AND s.port = $6 AND s.scans_seen >= 2
-		       AND s.last_seen_at >= $7)`
+		       AND s.last_seen_at >= $7
+		       AND EXISTS (SELECT 1 FROM asset_addresses a
+		                    WHERE a.tenant_id = k.tenant_id AND a.asset_id = k.asset_id
+		                      AND a.ip_address = host($5::inet)::inet AND a.valid_to IS NULL))`
 	var ok bool
 	if err := c.QueryRow(ctx, q, c.Tenant().UUID(), assetID, string(k.Type), k.Value, address, port,
 		time.Now().Add(-within)).Scan(&ok); err != nil {
@@ -501,6 +513,12 @@ func (AssetIdentityKeys) Retire(ctx context.Context, c *Conn, assetID uuid.UUID,
 // ResolutionQueue is ADR-007's unresolved merge queue (migration 0013).
 type ResolutionQueue struct{}
 
+// ErrKeyWithoutService is Enqueue's refusal of a keyed item that names no
+// service: the ambiguity guard is keyed on it. The caller skips the item
+// rather than abort its sweep — one malformed key must not roll back every
+// other host in the tenant, every thirty seconds.
+var ErrKeyWithoutService = errors.New("store: a key parked without a service")
+
 // Enqueue records evidence a human has to adjudicate.
 //
 // Like the identity keys above, the observed payload is COPIED rather than
@@ -518,8 +536,8 @@ func (ResolutionQueue) Enqueue(ctx context.Context, c *Conn, v domain.Verdict, k
 	const q = `
 		INSERT INTO asset_resolution_queue
 		    (tenant_id, observation_id, observed_payload, key_type, key_value,
-		     candidate_asset_ids, conflict_reason, enqueued_at, address)
-		SELECT $1, $2, $3, $4::identity_key_type, $5, $6, $7, $8, host($9::inet)::inet
+		     candidate_asset_ids, conflict_reason, enqueued_at, address, source)
+		SELECT $1, $2, $3, $4::identity_key_type, $5, $6, $7, $8, host($9::inet)::inet, $10
 		 WHERE NOT EXISTS (
 		     SELECT 1 FROM asset_resolution_queue q
 		      WHERE q.tenant_id = $1 AND q.observation_id IS NOT DISTINCT FROM $2::uuid
@@ -544,8 +562,19 @@ func (ResolutionQueue) Enqueue(ctx context.Context, c *Conn, v domain.Verdict, k
 		cands = []uuid.UUID{}
 	}
 
+	// The service, canonical from the identity path (ADR-097, migration
+	// 0046); NULL for the address-only item. A keyed item without one is a
+	// caller's defect, refused here: the ambiguity guard is keyed on it, and
+	// a blind item was measured recorded unseen as confirmed.
+	var source any
+	if k.Type != domain.KeyIPWindow {
+		if k.Source == "" {
+			return false, fmt.Errorf("%w: %s", ErrKeyWithoutService, k.Type)
+		}
+		source = k.Source
+	}
 	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), obsID, payload,
-		string(k.Type), k.Value, cands, v.Reason, at, address)
+		string(k.Type), k.Value, cands, v.Reason, at, address, source)
 	if err != nil {
 		return false, mapError(err)
 	}

@@ -10,6 +10,7 @@ import { FindingDetail } from "./screens/FindingDetail";
 import { Assets } from "./screens/Assets";
 import { AssetDetail } from "./screens/AssetDetail";
 import { Health } from "./screens/Health";
+import { Identity } from "./screens/Identity";
 import { Scans } from "./screens/Scans";
 import { ScanDetail } from "./screens/ScanDetail";
 import { Exposure } from "./screens/Exposure";
@@ -55,6 +56,7 @@ export function App() {
     ["/assets", "Systems", has(session, "asset.read")],
     ["/scans", "Scans", has(session, "scan.read")],
     ["/health", "Health", has(session, "scan.read")],
+    ["/identity", "Identity", has(session, "asset.read")],
     ["/knowledge", "Knowledge", canFindings],
   ];
 
@@ -98,6 +100,7 @@ export function App() {
           <Route path="/assets" element={<Assets />} />
           <Route path="/assets/:id" element={<AssetDetail />} />
           <Route path="/health" element={<Health />} />
+          <Route path="/identity" element={<Identity />} />
           <Route path="/scans" element={<Scans />} />
           <Route path="/scans/:id" element={<ScanDetail />} />
           <Route path="/exposure" element={<Exposure />} />

@@ -184,7 +184,7 @@ export function Health() {
                 <span className={`chip ${h.unresolved_observations > 0 ? "chip-muted" : "chip-ok"}`}>{h.unresolved_observations}</span>
               </div>
               <div className="hrow">
-                <span>Contested identities <span className="faint small">parked for an operator, nothing adjudicates yet</span></span>
+                <span><Link to="/identity">Contested identities</Link> <span className="faint small">parked for an operator's decision on the Identity screen</span></span>
                 <span className={`chip ${h.contested_addresses > 0 || h.resolution_queue_pending > 0 ? "chip-warn" : "chip-muted"}`}>
                   {h.contested_addresses} host{h.contested_addresses === 1 ? "" : "s"} · {h.resolution_queue_pending} item{h.resolution_queue_pending === 1 ? "" : "s"}
                 </span>

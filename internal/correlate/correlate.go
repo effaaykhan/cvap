@@ -419,11 +419,18 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 				if k.Type.Strength() == 0 || k.ObservationID == uuid.Nil {
 					continue
 				}
-				carried[k.ObservationID] = true
 				inserted, err := (store.ResolutionQueue{}).Enqueue(ctx, conn, v, k, h.address, now)
+				if errors.Is(err, store.ErrKeyWithoutService) {
+					// Not carried: the address-only fallback below parks the
+					// observation, or it would re-group alone next sweep.
+					c.log.WarnContext(ctx, "key parked without a service; skipped",
+						slog.String("address", h.address), slog.String("key_type", string(k.Type)))
+					continue
+				}
 				if err != nil {
 					return err
 				}
+				carried[k.ObservationID] = true
 				if inserted {
 					newItems++
 				}

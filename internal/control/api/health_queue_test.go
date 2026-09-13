@@ -48,8 +48,9 @@ func TestHealthCountsPendingItemsAndContestedAddresses(t *testing.T) {
 		}
 		asset = a.ID
 		const ins = `INSERT INTO asset_resolution_queue
-		    (tenant_id, observed_payload, key_type, key_value, candidate_asset_ids, conflict_reason, address)
-		    VALUES ($1, $2, $3::identity_key_type, $4, ARRAY[$5::uuid], 'test', $6::inet) RETURNING resolution_id`
+		    (tenant_id, observed_payload, key_type, key_value, candidate_asset_ids, conflict_reason, address, source)
+		    VALUES ($1, $2, $3::identity_key_type, $4, ARRAY[$5::uuid], 'test', $6::inet,
+		            CASE WHEN $3 = 'ip_window' THEN NULL ELSE '22/tcp' END) RETURNING resolution_id`
 		var id uuid.UUID
 		// Two items at one address: one host. The address column is what is
 		// counted (migration 0045 normalises it at write), so a payload that

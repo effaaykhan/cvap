@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../lib/api";
-import { advisory, score, exactRead, provenanceAge } from "../lib/console";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, has, type IdentityKey } from "../lib/api";
+import { useAuth } from "../lib/auth";
+import { advisory, score, exactRead, provenanceAge, ago } from "../lib/console";
 
 // AttributionSource mirrors the provenance rows the API embeds (ADR-061). The
 // API types it as opaque JSON, so it is narrowed here at the one place it is read.
@@ -165,6 +167,8 @@ export function AssetDetail() {
           ))}</tbody></table>
       ) : <p className="muted">No current addresses.</p>}
 
+      <IdentityKeys assetID={a.id} keys={a.identity_keys ?? []} total={a.identity_keys_total ?? 0} />
+
       <h2>Services</h2>
       {a.services?.length ? (
         <>
@@ -314,6 +318,73 @@ function FindingsOnAsset({ assetID, count }: { assetID: string; count: number })
         </table>
       )}
       {data && data.next_id && <p className="faint small">Showing the first 200 by priority; the triage view can narrow further.</p>}
+    </>
+  );
+}
+
+// What the credentialed engine would make of this asset's keys right now
+// (ADR-094, ADR-096, ADR-097; B39): sightings still needed, or a rotated key
+// waiting for an operator's word. Confirming verifies nothing — the probe
+// checks no possession (B44) — it records a decision and who took it.
+function IdentityKeys({ assetID, keys, total }: { assetID: string; keys: IdentityKey[]; total: number }) {
+  const { session } = useAuth();
+  const qc = useQueryClient();
+  const [reason, setReason] = useState("");
+  const [outcome, setOutcome] = useState("");
+  // Only the keys the operator ticks are confirmed: the rotated set is one an
+  // attacker helps compose, and blessing all of it for one genuine rotation
+  // was measured handing a planted key the credentialed dial.
+  const waiting = keys.filter((k) => k.provenance === "rotation" || k.provenance === "lapsed").map((k) => `${k.key_type} ${k.fingerprint}`);
+  const [ticked, setTicked] = useState<Record<string, boolean>>({});
+  const chosen = waiting.filter((w) => ticked[w]);
+  const confirm = useMutation({
+    mutationFn: () => api.confirmIdentity(assetID, chosen, reason),
+    onSuccess: (res) => {
+      setOutcome(`Confirmed ${res.keys_confirmed.length} of ${res.keys_confirmed.length + res.keys_remaining.length}.`);
+      setTicked({});
+      void qc.invalidateQueries({ queryKey: ["asset", assetID] });
+    },
+    onError: (e: Error) => setOutcome(e.message),
+  });
+  const needsWord = waiting.length > 0;
+  return (
+    <>
+      <h2>Identity keys</h2>
+      {total > keys.length && <p className="small">{total} live keys; the {keys.length} shown are all this page carries. A key past this page cannot be confirmed here.</p>}
+      {keys.length === 0 ? <p className="muted">No identity key on record. A host first seen without one gains it on its next fingerprint pass (ADR-093).</p> : (
+        <table><thead><tr>{needsWord && <th>Confirm</th>}<th>Key</th><th>Service</th><th>Fingerprint</th><th>Seen at</th><th>Scans</th><th>Credentialed trust</th></tr></thead>
+          <tbody>{keys.map((k, i) => (
+            <tr key={i}>
+              {needsWord && <td>{(k.provenance === "rotation" || k.provenance === "lapsed") && (
+                <input type="checkbox" checked={!!ticked[`${k.key_type} ${k.fingerprint}`]}
+                  onChange={(e) => setTicked((t) => ({ ...t, [`${k.key_type} ${k.fingerprint}`]: e.target.checked }))} />
+              )}</td>}
+              <td>{k.key_type}</td>
+              <td className="data">{k.source || "—"}</td>
+              <td className="data">{k.fingerprint}</td>
+              <td className="data">{k.address ? `${k.address} · ${k.last_seen_at ? ago(k.last_seen_at) : ""}` : "—"}</td>
+              <td className="data">{k.scans_seen}</td>
+              <td>
+                <span className={`chip ${k.trust_material ? "chip-ok" : k.provenance === "rotation" || k.provenance === "lapsed" ? "chip-warn" : "chip-muted"}`}>
+                  {k.trust_material ? "trusted" : k.provenance === "rotation" || k.provenance === "lapsed" ? "needs confirmation" : "not yet"}
+                </span>
+                <span className="faint small"> {k.note}</span>
+              </td>
+            </tr>
+          ))}</tbody></table>
+      )}
+      {needsWord && (has(session, "identity.resolve") ? (
+        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <input placeholder="Why this key is the host's own (recorded with your name)" value={reason} onChange={(e) => setReason(e.target.value)} style={{ minWidth: 320 }} />
+          <button className="btn small-btn" disabled={confirm.isPending || !reason || chosen.length === 0} onClick={() => confirm.mutate()}>
+            Confirm {chosen.length === 1 ? "this key" : `${chosen.length} keys`}
+          </button>
+          {outcome && <span className="small">{outcome}</span>}
+          <span className="faint small">Confirming hands the credentialed dial to whoever holds this key. It verifies nothing (B44).</span>
+        </div>
+      ) : (
+        <p className="faint small">A rotated key waits for an operator with identity.resolve to confirm it; until then credentialed scans of this host refuse.</p>
+      ))}
     </>
   );
 }

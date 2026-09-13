@@ -81,6 +81,7 @@ describe("attention with the health read", () => {
     const health: Health = {
       blocked_scans: [{ id: "9c2d41aa-1", scan_type: "discovery", status: "running", policy_id: "p", engine: "discovery", reason: "no online scan point with the discovery engine enabled in a zone this policy allows" }],
       ingest_backlog: 0, unresolved_observations: 0, kill_switch_state: "active",
+      resolution_queue_pending: 0, contested_addresses: 0,
       active_kills: [{ id: "k", scope: "tenant", issued_at: "2026-09-11T00:00:00Z", reason: "runaway", unacknowledged: 2 }],
       credential_grants_unconfirmed: 0, scope_enforcement_sites: 2, computed_at: "2026-09-11T00:00:00Z",
     };
