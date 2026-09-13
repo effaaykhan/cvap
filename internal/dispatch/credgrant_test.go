@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,12 @@ type hostJobSeed struct {
 	seenOnce bool
 	// secondKey seeds a SECOND distinct host key at the target with two
 	// sightings on 22: the handover signature, which must refuse (ADR-094).
+	// Since ADR-096 the schema itself makes that state unreachable on one
+	// service — one live holder per address (0031), one live key per
+	// (asset, type, port, protocol) (0045) — so the seed spells the second
+	// key's service as 22/udp, the one row a pre-B45 build could have left
+	// (B45): the fingerprint read is keyed on the sighting's PORT, and the
+	// refusal is the defence that stays behind the index.
 	secondKey    string
 	secretRef    string
 	target       string
@@ -136,7 +143,7 @@ func seedHostJob(t *testing.T, db *store.DB, tenant store.TenantID, seed hostJob
 					`WITH k AS (
 					   INSERT INTO asset_identity_keys (tenant_id, asset_id, key_type, key_value, strength, provenance,
 					                                    merge_evidence_observation, merge_evidence_payload)
-					   VALUES ($1,$2,'ssh_hostkey',$3,2,'attach',gen_random_uuid(),'{"port":22,"protocol":"tcp"}'::jsonb)
+					   VALUES ($1,$2,'ssh_hostkey',$3,2,'attach',gen_random_uuid(),'{"port":22,"protocol":"udp"}'::jsonb)
 					   RETURNING identity_key_id)
 					 INSERT INTO asset_identity_key_sightings (tenant_id, identity_key_id, address, port, scans_seen, last_seen_scan, last_seen_at)
 					 SELECT $1, identity_key_id, $4::inet, 22, 2, gen_random_uuid(), now() FROM k`,
@@ -416,6 +423,8 @@ func TestHostJobIsRefusedRatherThanDispatchedUncredentialed(t *testing.T) {
 		// observed key.
 		// ADR-094: two distinct host keys both qualifying at one address and port
 		// is the handover signature; whichever machine answers would be accepted.
+		// Reachable only through a legacy protocol spelling since ADR-096 — see
+		// hostJobSeed.secondKey and TestTwoLiveKeysOnOneServiceAreUnreachable.
 		{"two host keys qualify at the target", hostJobSeed{profile: true, username: "lab", observedKey: seedFingerprint,
 			secondKey: "SHA256:" + strings.Repeat("B", 43)}, true, "distinct ssh host keys qualify"},
 		{"key seen once at the target", hostJobSeed{profile: true, username: "lab", observedKey: seedFingerprint, seenOnce: true}, true, "trust-on-first-use is not permitted"},
@@ -595,5 +604,35 @@ func declareHost(t *testing.T, db *store.DB, tenant store.TenantID, spID uuid.UU
 		return err
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The state "two distinct host keys qualify at one address on one service" is
+// unreachable by construction since ADR-096: migration 0045's one-live-key
+// index refuses the second key. The dispatch refusal above it is defence in
+// depth, and this is the test that says which layer carries the property —
+// the seed this suite used before 0045 is exactly what is refused here.
+func TestTwoLiveKeysOnOneServiceAreUnreachable(t *testing.T) {
+	db := testDB(t)
+	tenant, _, _ := enrolledScanPoint(t, db)
+	ctx := context.Background()
+	err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		tid := c.Tenant().UUID()
+		var assetID uuid.UUID
+		if err := c.QueryRow(ctx, `INSERT INTO assets (tenant_id) VALUES ($1) RETURNING asset_id`, tid).Scan(&assetID); err != nil {
+			return err
+		}
+		for _, fp := range []string{seedFingerprint, "SHA256:" + strings.Repeat("B", 43)} {
+			if _, err := c.Exec(ctx, `INSERT INTO asset_identity_keys (tenant_id, asset_id, key_type, key_value, strength, provenance,
+			                                    merge_evidence_observation, merge_evidence_payload)
+			   VALUES ($1,$2,'ssh_hostkey',$3,2,'attach',gen_random_uuid(),'{"port":22,"protocol":"tcp"}'::jsonb)`,
+				tid, assetID, fp); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("a second live key on one (asset, type, port, protocol): err=%v; want the one-live-key index to refuse it", err)
 	}
 }
