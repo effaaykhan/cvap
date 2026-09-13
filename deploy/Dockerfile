@@ -24,7 +24,7 @@ COPY internal/control/api/web/ ./
 RUN npx --no-install vite build
 
 # ---- Stage 2: the Go binaries -----------------------------------------------
-FROM golang:1.25 AS build
+FROM golang:1.26 AS build
 WORKDIR /src
 
 # Modules first, so a source-only change does not re-download the graph.
