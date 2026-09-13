@@ -242,11 +242,17 @@ BEGIN
                 '{"summary":"copied at finding creation, not referenced"}'::jsonb,
                 's3://cvap-evidence/fixture/' || p_tag, now());
 
+    -- `source` is required of every keyed item (migration 0046): the ambiguity
+    -- guard and both operator verbs are keyed on it. A MAC comes from no
+    -- service, so it carries the same 'unknown' the 0046 backfill gives a keyed
+    -- row whose evidence names no port — one service of its own, choosable and
+    -- discardable like any other. A weak key is skipped by the ambiguity guard
+    -- either way; the column is not optional, so the fixture says so.
     INSERT INTO asset_resolution_queue (tenant_id, observation_id, observed_payload, key_type,
-                                        key_value, candidate_asset_ids, conflict_reason)
+                                        key_value, candidate_asset_ids, conflict_reason, source)
         VALUES (p_tenant, v_obs, '{"copied_at_enqueue":true}'::jsonb, 'mac',
                 '02:00:00:00:00:01', ARRAY[v_asset, v_asset2],
-                'fixture: two candidates agree only on a weak key');
+                'fixture: two candidates agree only on a weak key', 'unknown');
 
     -- Enrolment. One redeemed token, and the certificate the scan point holds.
     --
