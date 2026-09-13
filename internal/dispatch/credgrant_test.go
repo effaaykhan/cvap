@@ -272,17 +272,16 @@ func TestHostJobTravelsWithItsGrantAndCoreErasesItsCopy(t *testing.T) {
 	if grant.GetCredKind() != scanpointv1.CredKind_RAW_SECRET {
 		t.Errorf("cred_kind = %v, want RAW_SECRET", grant.GetCredKind())
 	}
-	fs.mu.Lock()
-	sentMaterial := append([]byte(nil), fs.grantMaterial...)
-	fs.mu.Unlock()
+	sentMaterial := fs.sentGrantMaterial()
 	if string(sentMaterial) != string(keyPEM) {
 		t.Errorf("the material that crossed the wire is not the resolved key (%d bytes vs %d)", len(sentMaterial), len(keyPEM))
 	}
-	// Core's copy: erased the moment Send returned. The message object the fake
-	// stream retained is the one the send loop erased.
-	waitUntil(t, "grant material erased after send", func() bool {
-		return len(grant.GetMaterial()) == 0
-	})
+	// Core's copy is erased on the statement after Send returns (ADR-091). The
+	// assertion is at the foot of this test, after the send loop has exited:
+	// reading the message object while that loop runs is a data race on the
+	// bytes eraseGrantMaterial clears, and the race detector failed every CI
+	// run on it. See fakeStream.retainedGrantMaterial for why <-done is the
+	// only happens-before edge available.
 
 	// The release record and the claim.
 	var grantID uuid.UUID
@@ -354,6 +353,19 @@ func TestHostJobTravelsWithItsGrantAndCoreErasesItsCopy(t *testing.T) {
 	fs.closeInbound()
 	cancel()
 	<-done
+
+	// Non-negotiable #8, asserted where it can be: the send loop has returned,
+	// so everything it did — including the erase — happens-before this read.
+	// The pair is what proves it: the secret WAS in the message Send received
+	// (sentMaterial, above) and is not in that same object now. Sabotage is
+	// declared in dispatch_test.go: drop the eraseGrantMaterial call and this
+	// line fails.
+	if left := fs.retainedGrantMaterial(); len(left) != 0 {
+		t.Errorf("Core's copy of the secret survived the send loop: %d bytes still in the message", len(left))
+	}
+	if grant.GetMaterial() != nil {
+		t.Error("the grant the test holds still points at material; the erase nils the slice as well as clearing it")
+	}
 }
 
 // An operator-pinned known_hosts on the profile wins over the observed key, and

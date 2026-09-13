@@ -74,6 +74,25 @@ func (p *pendingGrant) discard() {
 // the transport's buffer (or the send failed and never will be), Core's copy has
 // no further purpose, and the decoded message would otherwise hold the secret
 // until the garbage collector got to it.
+//
+// THIS MUTATES A MESSAGE ALREADY PASSED TO SendMsg, WHICH gRPC DOCUMENTS AS
+// UNSAFE. Not inferred — google.golang.org/grpc@v1.83.1 stream.go:1632, on the
+// ServerStream interface: "It is not safe to modify the message after calling
+// SendMsg. Tracing libraries and stats handlers may use the message lazily."
+// SendMsg also only blocks until there is flow control to schedule the message
+// (stream.go:1620), so "the bytes are in the transport's buffer" is a claim
+// about grpc-go's current behaviour, not about its contract.
+//
+// It is deliberate, and it is a trade, not an oversight: the alternative is a
+// released secret sitting in a decoded message for an unbounded time, which
+// non-negotiable #8 exists to prevent. What makes it safe TODAY is that this
+// server installs no stats handler and no interceptor (cmd/cvap-core/main.go
+// builds mtlsServer with Creds and KeepaliveParams only), so nothing else holds
+// a reference to read. That is a latent limitation, not a dormant defect: the
+// day an observability change adds a StatsHandler, a tracing interceptor or a
+// message-logging middleware, this becomes a live read of freed-in-place bytes.
+// Whoever adds one must move the erase (a codec that zeroises after marshal, or
+// a message Core owns and the transport copies from) in the same change.
 func eraseGrantMaterial(msg *scanpointv1.CoreMessage) {
 	if g := msg.GetCredential(); g != nil {
 		clear(g.Material)

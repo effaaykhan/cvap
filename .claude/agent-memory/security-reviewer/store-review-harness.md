@@ -17,8 +17,13 @@ Reviewing `internal/store` or any migration is testable rather than theoretical 
   `db.pool` and `resolveTenant` are reachable), run with
   `CVAP_TEST_DATABASE_URL="$APP_DATABASE_URL" go test ./internal/store/ -run ...`. Delete
   afterwards. Clean up seeded tenants/scan points from the dev DB too.
-- **`-race` does not work here**: cgo is off and there is no gcc. Data-race findings have to
-  be argued from the Go memory model, not demonstrated.
+- **`-race` DOES work here** (corrected 2026-09-13, after several sessions of the opposite):
+  `CGO_ENABLED=1` and gcc is at `/usr/bin/gcc`. The old note said cgo was off and findings had to
+  be argued from the memory model — that was wrong, and it cost a real defect: a data race on the
+  CREDENTIAL-ERASE path was left to CI because the note said it could not be reproduced locally.
+  `go test -race ./internal/dispatch/ -run ...` reproduces it in 3 s. Check `go env CGO_ENABLED`
+  and `which gcc` before believing any "cannot demonstrate a race here" claim, including this
+  file's.
 - Dev cluster facts worth re-checking rather than assuming: `cvap` is SUPERUSER+BYPASSRLS,
   `cvap_app` is NOLOGIN with no BYPASSRLS, `cvap_app_login` is its only member, and neither
   app role has CREATE on schema `public`. Every table is `FORCE ROW LEVEL SECURITY`.

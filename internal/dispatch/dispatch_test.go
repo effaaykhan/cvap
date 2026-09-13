@@ -36,11 +36,17 @@ import (
 // exactly as gRPC would deliver it, which is the part that matters: identity
 // comes from there and nowhere else.
 type fakeStream struct {
-	// grantMaterial is the bytes of the last CredentialGrant as Send saw them.
-	grantMaterial []byte
-	ctx           context.Context
+	ctx context.Context
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// grantMaterial is the bytes of the last CredentialGrant as Send saw them,
+	// copied inside Send. Guarded by mu like everything else here; it used to
+	// sit outside the mutex, which is a lie about a field two goroutines touch.
+	grantMaterial []byte
+	// grantMsg is the message OBJECT the send loop passed to Send and then
+	// erased. Read it only through retainedGrantMaterial, and only after the
+	// send loop has exited.
+	grantMsg *scanpointv1.CoreMessage
 	inbound  chan *scanpointv1.ScanPointMessage
 	outbound []*scanpointv1.CoreMessage
 	sent     chan *scanpointv1.CoreMessage
@@ -65,6 +71,7 @@ func (f *fakeStream) Send(m *scanpointv1.CoreMessage) error {
 	// here, as the transport would have — a copy taken inside Send.
 	if g := m.GetCredential(); g != nil {
 		f.grantMaterial = append([]byte(nil), g.GetMaterial()...)
+		f.grantMsg = m
 	}
 	f.mu.Unlock()
 	select {
@@ -95,6 +102,35 @@ func (f *fakeStream) closeInbound() {
 		close(f.inbound)
 		f.closed = true
 	}
+}
+
+// retainedGrantMaterial returns what is left of the message object the send
+// loop handed to Send — the object eraseGrantMaterial clears.
+//
+// ONLY AFTER THE SEND LOOP HAS EXITED. The erase runs in the send-loop
+// goroutine, immediately after Send returns and under no lock this type holds,
+// so a reader in the test goroutine has no happens-before edge to it and the
+// race detector says so (measured: a poll of grant.GetMaterial() while the loop
+// ran was a data race on every CI run). Receiving the send loop's return value
+// IS that edge, and it is the only one available: gRPC gives the server no
+// signal that a sent message is finished with — see eraseGrantMaterial.
+//
+// The immediacy of the erase is not something a test can time without racing
+// it. It is structural: `send` in dispatch.go calls eraseGrantMaterial on the
+// statement after stream.Send returns. What this proves is the pair that
+// matters — the secret was in the message when Send received it (grantMaterial,
+// copied inside Send) and is gone from it afterwards.
+func (f *fakeStream) retainedGrantMaterial() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.grantMsg.GetCredential().GetMaterial()
+}
+
+// sentGrantMaterial is the copy Send took, as the transport would have seen it.
+func (f *fakeStream) sentGrantMaterial() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]byte(nil), f.grantMaterial...)
 }
 
 // waitFor drains sent messages until pred matches or the deadline passes.
@@ -951,11 +987,22 @@ func TestANonCanonicalTaskTargetRefusesTheJob(t *testing.T) {
 // service, where -overlay applies.
 //
 // mutate:subject internal/dispatch/dispatch.go
-// mutate:test    ./internal/dispatch/ -run TestNoAssignmentUnderHardBackpressure
+// mutate:test    ./internal/dispatch/ -run TestNoAssignmentUnderHardBackpressure|TestHostJobTravelsWithItsGrantAndCoreErasesItsCopy
 //
 // mutate:case    the HARD case is mislabelled, so a saturated scan point is still fed work
 // mutate:old     		case scanpointv1.BackpressureState_BACKPRESSURE_STATE_HARD:
 // mutate:new     		case scanpointv1.BackpressureState_BACKPRESSURE_STATE_UNSPECIFIED:
+//
+// Non-negotiable #8: Core's copy of a released secret is erased once Send has
+// taken it. The assertion moved to the foot of the test when the race detector
+// found the old poll racing the erase, and a synchronisation fix that also made
+// the assertion vacuous is the shape this repository keeps finding — so the
+// erase is sabotaged here and the test must die with it (measured: 387 bytes
+// still in the message).
+//
+// mutate:case    Core keeps its copy of a released credential after Send
+// mutate:old     		eraseGrantMaterial(msg)
+// mutate:new     		_ = msg
 func TestNoAssignmentUnderHardBackpressure(t *testing.T) {
 	db := testDB(t)
 	tenant, leaf, spID := enrolledScanPoint(t, db)

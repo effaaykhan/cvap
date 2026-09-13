@@ -2239,3 +2239,18 @@ never the empty one the gate uses in CI.
 
 **How to apply:** a `mutate:test` selector must exclude anything that sweeps, and the cost has to be
 measured on a POPULATED database, not the empty one CI uses.
+
+
+**117. A library contract that says the opposite of the comment resting on it.** `eraseGrantMaterial`
+clears a released credential out of a `CoreMessage` on the statement after `stream.Send` returns,
+and the comment justified it with "the bytes are in the transport's buffer". grpc-go's ServerStream
+doc says, in as many words, "It is not safe to modify the message after calling SendMsg. Tracing
+libraries and stats handlers may use the message lazily" (`google.golang.org/grpc@v1.83.1`
+stream.go:1632), and SendMsg blocks only until there is flow control to SCHEDULE the message. The
+erase is still right — a released secret in a decoded message for an unbounded time is what the
+zeroisation rule exists to prevent — but it is a trade against a documented contract, safe only
+because this server installs no StatsHandler and no interceptor.
+**How to apply:** when a security control depends on "the library has finished with this object",
+open the library's doc comment in the module cache and quote it. Inferred-and-true reads the same
+as inferred-and-false until you look. Then check what makes it safe TODAY and write that down as
+the precondition, because that is the thing a future change deletes without noticing.
