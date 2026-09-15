@@ -74,6 +74,11 @@ func usage() {
                      Audited. Use when the deployment's address changed or was set
                      wrong at bootstrap. Needs APP_DATABASE_URL.
 
+  tenant set-password
+                     Replace an operator's password with a generated first-login
+                     one (--tenant, --email), printed once. Audited; the account's
+                     lockout is cleared. For a lost password. Needs APP_DATABASE_URL.
+
 `, version)
 }
 

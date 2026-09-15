@@ -125,7 +125,15 @@ loopback-only install. Getting this wrong does not fail here in a way you would
 notice later: it fails at *first login* with a 401 that looks like a bad password.
 If it is already wrong, or the address changes, correct it with
 `cvap-cli tenant set-domain --tenant <id> --domain <host>` (audited) rather than
-re-bootstrapping.
+re-bootstrapping. When the address changes, also change `CVAP_ADVERTISE_HOST` and
+`CVAP_EXTERNAL_HOST` in `.env` and restart Core: the server certificate is issued
+from those at startup, and a browser at the new address is otherwise shown a
+certificate for the old one.
+
+A lost operator password is reset the same way, since only a verifier is stored:
+`cvap-cli tenant set-password --tenant <id> --email <login>` prints a fresh
+first-login password once (audited, `must_change` set, any lockout cleared) and
+verifies it through the login path before reporting success.
 
 It prints, once, the created ids and a **generated first-login password**:
 
