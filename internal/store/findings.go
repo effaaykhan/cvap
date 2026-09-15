@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -469,30 +471,61 @@ type FindingDetail struct {
 // three zones is one finding (ADR-010). KEV/EPSS/CVSS are LEFT-joined off the
 // finding's optional vuln_def_id: a finding with no CVE, or a CVE unlisted in KEV
 // and unscored by EPSS, simply has no such row — absence, not a low value.
+//
+// The query's SHAPE is a measured decision (ADR-098), because the order is
+// computed: every finding in the tenant is scored before the top page is known,
+// so anything the score references is evaluated 50 000 times at capacity.
+//
+//   - The external/dmz exposure term is a LEFT JOIN against the SET of externally
+//     exposed finding ids (one DISTINCT scan of finding_exposure per query), not a
+//     correlated EXISTS. The EXISTS was a per-row subplan under the generic plan
+//     pgx settles on after five executions — a nested loop into scan_zones for
+//     each of 50k findings (~630 ms) — and, under the custom plan, the reason the
+//     planner's cost estimate crossed the JIT thresholds and paid ~600 ms of LLVM
+//     compilation per request. Both mechanisms, one shape. 1298 ms p95 in CI.
+//   - The exposure count is computed in the OUTER query, after the LIMIT, so it
+//     is fifty index lookups by construction rather than by a planner optimisation
+//     (make_sort_input_target happened to defer it; the estimate still charged it
+//     for every row).
+//   - Optional filters are composed into the SQL only when set. The
+//     `($n IS NULL OR col = $n)` idiom is estimated at ~0.5% selectivity per clause
+//     under a generic plan, which compounds to "one row" at four clauses and makes
+//     the planner nest every join — the wrong plan for the common no-filter page.
+//
+// Measured at 10k assets / 50k findings on the dev database, both exposure
+// distributions: ~37 ms custom plan, ~95 ms generic plan (was 665 / 630 ms).
 func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, beforeScore int64, beforeID uuid.UUID, limit int) (*FindingPage, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	var assetArg, ruleArg any
-	if f.AssetID != uuid.Nil {
-		assetArg = f.AssetID
+
+	// Filters and the cursor are appended to the SQL only when present, each with
+	// its own positional parameter, so the planner sees the predicates that are
+	// actually there (see the shape note above). $1 is always the tenant.
+	args := []any{c.Tenant().UUID()}
+	arg := func(v any) string {
+		args = append(args, v)
+		return "$" + strconv.Itoa(len(args))
 	}
-	if f.RuleID != uuid.Nil {
-		ruleArg = f.RuleID
-	}
-	var statusArg, sevArg any
+	var where strings.Builder
 	if f.Status != "" {
-		statusArg = f.Status
+		where.WriteString(" AND f.status = " + arg(f.Status) + "::finding_status")
 	}
 	if f.Severity != "" {
-		sevArg = f.Severity
+		where.WriteString(" AND f.severity = " + arg(f.Severity) + "::severity")
+	}
+	if f.AssetID != uuid.Nil {
+		where.WriteString(" AND f.asset_id = " + arg(f.AssetID))
+	}
+	if f.RuleID != uuid.Nil {
+		where.WriteString(" AND f.rule_id = " + arg(f.RuleID))
 	}
 	// The cursor is present iff beforeID is set (score alone can be 0 legitimately).
-	var cursorScore any
-	var cursorID any
+	cursor := ""
 	if beforeID != uuid.Nil {
-		cursorScore, cursorID = beforeScore, beforeID
+		cursor = " WHERE (s.priority_score, s.finding_id) < (" + arg(beforeScore) + ", " + arg(beforeID) + ")"
 	}
+	limitArg := arg(limit)
 
 	// Priority (ADR-069), computed here, ordered here. The bit-packing weights KEV
 	// above the sum of every lower term (1e9 vs a max ~1.5e8), so a KEV finding
@@ -507,24 +540,26 @@ func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, beforeSc
 	// the ceiling ADR-074 states — a real per-asset reachability determination (an
 	// external scan point observing the asset) is backlog B32, not this term. The
 	// model says what it weighs rather than implying a precision the input lacks.
-	const q = `
-		SELECT * FROM (
-		  SELECT f.finding_id, r.name, r.category, f.severity::text, f.status::text, coalesce(vd.cve_id, '') AS cve,
-		         f.asset_id, coalesce(a.primary_hostname, ''), coalesce(f.instance_locator, ''),
-		         f.confidence,
-		         (SELECT count(DISTINCT fe.zone_id) FROM finding_exposure fe
-		           WHERE fe.tenant_id = f.tenant_id AND fe.finding_id = f.finding_id) AS exposure_zones,
-		         f.first_seen, f.last_seen,
+	q := `
+		SELECT p.finding_id, p.rule_name, p.category, p.severity, p.status, p.cve,
+		       p.asset_id, p.hostname, p.locator, p.confidence,
+		       (SELECT count(DISTINCT fe.zone_id) FROM finding_exposure fe
+		         WHERE fe.tenant_id = $1 AND fe.finding_id = p.finding_id) AS exposure_zones,
+		       p.first_seen, p.last_seen, p.kev, p.kev_ransomware, p.kev_date_added,
+		       p.epss, p.epss_pct, p.cvss, p.priority_score, p.priority_basis
+		  FROM (
+		  SELECT * FROM (
+		  SELECT f.finding_id, r.name AS rule_name, r.category, f.severity::text AS severity,
+		         f.status::text AS status, coalesce(vd.cve_id, '') AS cve,
+		         f.asset_id, coalesce(a.primary_hostname, '') AS hostname,
+		         coalesce(f.instance_locator, '') AS locator,
+		         f.confidence, f.first_seen, f.last_seen,
 		         (k.cve_id IS NOT NULL) AS kev,
 		         coalesce(k.known_ransomware, false) AS kev_ransomware,
 		         k.date_added AS kev_date_added,
 		         e.score AS epss, e.percentile AS epss_pct, vd.cvss_base AS cvss,
 		         ( (CASE WHEN k.cve_id IS NOT NULL THEN 1 ELSE 0 END)::bigint * 1000000000
-		         + (CASE WHEN EXISTS (SELECT 1 FROM finding_exposure fx
-		                               WHERE fx.tenant_id = f.tenant_id AND fx.finding_id = f.finding_id
-		                                 AND fx.zone_id IN (SELECT z.zone_id FROM scan_zones z
-		                                                     WHERE z.tenant_id = $1 AND z.zone_type IN ('external','dmz')))
-		                 THEN 1 ELSE 0 END)::bigint * 100000000
+		         + (CASE WHEN ext.finding_id IS NOT NULL THEN 1 ELSE 0 END)::bigint * 100000000
 		         + (CASE a.criticality WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)::bigint * 10000000
 		         + coalesce(round(coalesce(e.score, vd.cvss_base/10.0) * 1000), 0)::bigint * 1000
 		         + (CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)::bigint
@@ -541,18 +576,19 @@ func (Findings) List(ctx context.Context, c *Conn, f FindingListFilter, beforeSc
 		    LEFT JOIN vulnerability_defs vd ON vd.vuln_def_id = f.vuln_def_id
 		    LEFT JOIN kev  k ON k.cve_id = vd.cve_id
 		    LEFT JOIN epss e ON e.cve_id = vd.cve_id
-		   WHERE f.tenant_id = $1
-		     AND ($4::finding_status IS NULL OR f.status = $4::finding_status)
-		     AND ($5::severity IS NULL OR f.severity = $5::severity)
-		     AND ($6::uuid IS NULL OR f.asset_id = $6)
-		     AND ($7::uuid IS NULL OR f.rule_id = $7)
-		) s
-		 WHERE ($2::bigint IS NULL OR (s.priority_score, s.finding_id) < ($2, $3))
-		 ORDER BY s.priority_score DESC, s.finding_id DESC
-		 LIMIT $8`
+		    LEFT JOIN (SELECT DISTINCT fx.finding_id
+		                 FROM finding_exposure fx
+		                 JOIN scan_zones z ON z.tenant_id = fx.tenant_id AND z.zone_id = fx.zone_id
+		                WHERE fx.tenant_id = $1 AND z.zone_type IN ('external','dmz')) ext
+		           ON ext.finding_id = f.finding_id
+		   WHERE f.tenant_id = $1` + where.String() + `
+		  ) s` + cursor + `
+		   ORDER BY s.priority_score DESC, s.finding_id DESC
+		   LIMIT ` + limitArg + `
+		  ) p
+		 ORDER BY p.priority_score DESC, p.finding_id DESC`
 
-	rows, err := c.Query(ctx, q, c.Tenant().UUID(), cursorScore, cursorID,
-		statusArg, sevArg, assetArg, ruleArg, limit)
+	rows, err := c.Query(ctx, q, args...)
 	if err != nil {
 		return nil, mapError(err)
 	}

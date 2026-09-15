@@ -1,6 +1,9 @@
 package load
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // The coarse/precise gate split is the load test's contract with CI: CI enforces
 // the coarse ceiling, the precise SLO runs locally and nightly. That split is
@@ -70,5 +73,46 @@ func TestGateHalvesFireIndependently(t *testing.T) {
 	}
 	if v := checkThroughput(4000, tput, false); v.coarseFailed || v.preciseFailed {
 		t.Error("checkThroughput: 4000/sec is above the coarse floor and must be silent in CI")
+	}
+}
+
+// The per-measurement budget is what stops one slow path from spending the whole
+// run and silencing the measurements after it (B47, ADR-098). Two things must
+// hold for that to be a fact: a measurement that overruns its budget stops and
+// SAYS it was truncated, carrying the p95 of what it completed; and one inside
+// its budget completes the full sample untouched. DB-free, so it runs everywhere
+// the coarse gate does.
+func TestMeasurementBudgetTruncatesAndSaysSo(t *testing.T) {
+	// Slow path: every request takes 2 ms against a 20 ms budget.
+	slow := sampleP95(func() float64 { time.Sleep(2 * time.Millisecond); return 2 }, 20*time.Millisecond)
+	if !slow.truncated {
+		t.Fatalf("a measurement that cannot finish inside its budget must report truncated: %+v", slow)
+	}
+	if slow.completed >= sampleRequests {
+		t.Errorf("truncated measurement completed the full sample: %+v", slow)
+	}
+
+	// Inside the budget: the full sample, warmup discarded, p95 of the sample.
+	i := 0
+	fast := sampleP95(func() float64 { i++; return float64(i) }, time.Hour)
+	if fast.truncated || fast.completed != sampleRequests {
+		t.Fatalf("a measurement inside its budget must complete the whole sample: %+v", fast)
+	}
+	// Latencies 21..320 after the 20-request warmup; p95 index 285 -> 306.
+	if want := float64(warmupRequests + int(0.95*float64(sampleRequests)) + 1); fast.p95ms != want {
+		t.Errorf("p95 of the sample = %.0f, want %.0f", fast.p95ms, want)
+	}
+
+	// A measurement truncated before any sample completed has no number to
+	// report, and says 0 completed rather than inventing one.
+	none := sampleP95(func() float64 { time.Sleep(5 * time.Millisecond); return 5 }, 0)
+	if !none.truncated || none.completed != 0 || none.p95ms != 0 {
+		t.Errorf("truncated-in-warmup measurement should carry no sample: %+v", none)
+	}
+
+	// The budget is every request at the coarse ceiling: 320 x 1000 ms for the
+	// finding list.
+	if got := measurementBudget(2 * findingListSLOms); got != 320*time.Second {
+		t.Errorf("measurementBudget(1000ms) = %s, want 320s", got)
 	}
 }

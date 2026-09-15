@@ -810,3 +810,98 @@ func TestSPACatchAllServesWithoutShadowingTheAPI(t *testing.T) {
 		t.Errorf("GET /v1/openapi.json = %d, want 200 (the catch-all must not shadow the API)", w.Code)
 	}
 }
+
+// seedInternalOnlyFinding writes a second finding on the seeded asset with the
+// same severity and no CVE, exposed from the INTERNAL zone only — the twin of
+// seedFinding's DMZ-exposed one on every priority term except exposure.
+func (f *fixture) seedInternalOnlyFinding(t *testing.T, sf seededFinding) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	err := f.db.Write(context.Background(), f.tenant, func(ctx context.Context, c *store.Conn) error {
+		var ruleID uuid.UUID
+		if err := c.QueryRow(ctx, `SELECT rule_id FROM rules WHERE engine='rules' ORDER BY name LIMIT 1`).Scan(&ruleID); err != nil {
+			return err
+		}
+		var err error
+		id, _, err = (store.Findings{}).Upsert(ctx, c, store.Finding{
+			AssetID: sf.assetID, RuleID: ruleID, DedupKey: "dk-" + uuid.NewString(),
+			Locator: "8443/tcp", Severity: "high", Confidence: 0.9,
+		}, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		return (store.Findings{}).SetExposure(ctx, c, id, []uuid.UUID{sf.zoneA}, time.Now().UTC())
+	})
+	if err != nil {
+		t.Fatalf("seed internal-only finding: %v", err)
+	}
+	return id
+}
+
+func (f *fixture) listFindings(t *testing.T, query string, cookies []*http.Cookie, csrf string) api.FindingListResponse {
+	t.Helper()
+	w := f.do(t, http.MethodGet, "/v1/findings"+query, nil, cookies, csrf)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list findings %q: %d %s", query, w.Code, w.Body.String())
+	}
+	var resp api.FindingListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// TestFindingListRanksExternalExposureAboveInternal is the ADR-074 exposure term
+// asserted where it acts — in List's ORDER (§5.7: test the order, not the
+// scorer). Two findings equal on every other term: the one exposed from a DMZ
+// zone ranks first. ADR-098 rewrote the term from a correlated EXISTS to a
+// LEFT JOIN, and the ADR-compliance review found no test asserted it in List.
+func TestFindingListRanksExternalExposureAboveInternal(t *testing.T) {
+	f := newFixture(t, `{"finding.read": true}`)
+	sf := f.seedFinding(t, false)
+	internal := f.seedInternalOnlyFinding(t, sf)
+	cookies, csrf := f.login(t)
+
+	resp := f.listFindings(t, "?asset_id="+sf.assetID.String(), cookies, csrf)
+	if len(resp.Findings) != 2 {
+		t.Fatalf("findings on the asset = %d, want 2", len(resp.Findings))
+	}
+	if resp.Findings[0].ID != sf.findingID.String() || resp.Findings[1].ID != internal.String() {
+		t.Errorf("order = [%s, %s], want the DMZ-exposed finding %s first (ADR-074's categorical term)",
+			resp.Findings[0].ID[:8], resp.Findings[1].ID[:8], sf.findingID.String()[:8])
+	}
+	if resp.Findings[0].ExposureZones != 2 || resp.Findings[1].ExposureZones != 1 {
+		t.Errorf("exposure_zones = %d/%d, want 2/1 (count(DISTINCT zone), ADR-010)", resp.Findings[0].ExposureZones, resp.Findings[1].ExposureZones)
+	}
+}
+
+// TestFindingListPagesByPriorityCursor drives the keyset cursor ADR-069 defines
+// through the rewritten query (ADR-098): page one carries the cursor, page two
+// starts strictly after it, the last page carries none, and no row repeats.
+func TestFindingListPagesByPriorityCursor(t *testing.T) {
+	f := newFixture(t, `{"finding.read": true}`)
+	sf := f.seedFinding(t, false)
+	internal := f.seedInternalOnlyFinding(t, sf)
+	cookies, csrf := f.login(t)
+
+	scope := "?asset_id=" + sf.assetID.String() + "&limit=1"
+	first := f.listFindings(t, scope, cookies, csrf)
+	if len(first.Findings) != 1 || first.NextScore == nil || first.NextID == nil {
+		t.Fatalf("page 1 = %d rows, cursor %v/%v; want 1 row and a cursor", len(first.Findings), first.NextScore, first.NextID)
+	}
+	if first.Findings[0].ID != sf.findingID.String() {
+		t.Fatalf("page 1 row = %s, want the higher-ranked DMZ-exposed finding", first.Findings[0].ID[:8])
+	}
+	second := f.listFindings(t, scope+"&before_score="+*first.NextScore+"&before_id="+*first.NextID, cookies, csrf)
+	if len(second.Findings) != 1 || second.Findings[0].ID != internal.String() {
+		t.Fatalf("page 2 = %+v, want exactly the internal-only finding %s", second.Findings, internal.String()[:8])
+	}
+	if second.NextScore != nil || second.NextID != nil {
+		// One row at limit 1 is a full page, so the store reports a possible
+		// next; the third request must then be empty rather than repeat a row.
+		third := f.listFindings(t, scope+"&before_score="+*second.NextScore+"&before_id="+*second.NextID, cookies, csrf)
+		if len(third.Findings) != 0 {
+			t.Fatalf("page 3 = %d rows, want none (the cursor must not repeat a row)", len(third.Findings))
+		}
+	}
+}

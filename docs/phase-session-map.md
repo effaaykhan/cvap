@@ -1074,6 +1074,80 @@ two batches or two sweeps — a group larger than `Batch` costs nothing to seed 
 
 ---
 
+### 5.16 A wrong note about the environment is a gate disabled by belief — the `-race` that "could not run here"
+
+**What happened (S42→S43).** A session note said the race detector could not run on this box, and the
+Makefile's `test` target has a loud fallback for exactly that case ("Running WITHOUT -race. CI runs with
+it"). The note was wrong: `gcc` is at `/usr/bin/gcc`, `CGO_ENABLED=1`, and `go test -race` runs here in a
+second (S43 measured it). For the sessions the note stood, every "gates green" reported locally was
+measured without the detector — and the data race S42 fixed in the credential-erase assertion went to CI
+to be found rather than being caught at the desk. Nothing in the tree was wrong; a belief about the
+environment was, and it had the same effect as commenting the flag out.
+
+**Why it is its own pattern.** §5.14 is a gate that reports success for work it skipped; this is a gate
+that was never asked to run because a note said it could not. The note cost nothing to write, was never
+re-tested, and every session inherited it. The tell: a capability the harness "cannot" use that nobody has
+tried since the note was written.
+
+**How to apply.** A note that says a tool cannot run here is a claim about the environment; re-measure it
+at the start of a session — one command — before trusting it, and delete it when it fails to reproduce.
+Any claim of green gates names the flags the run had. ([[gate-before-push]] extended: the local gate has
+to be the CI gate, flags included, or the report says which flag it lacked.)
+
+---
+
+### 5.17 A comment claiming a third party's mechanism — the transport's contract, and the planner's
+
+**What happened (S42, B46; S43, ADR-098).** Two instances in two sessions, same shape. (1) The
+credential-erase comment asserted that gRPC keeps no reference to a message after `Send` returns; grpc-go's
+own doc says the opposite in as many words, and the erase is safe today only because `cmd/cvap-core`
+registers no StatsHandler and no interceptor — an undocumented precondition the first observability change
+would break silently. (2) The S37 p95 fix stated that a tenant-keyed zone subquery "evaluates once as an
+InitPlan" so the per-finding EXISTS is an index lookup. S43 profiled the shape under both plan modes:
+neither produces an InitPlan — the custom plan hashes the subquery and charges its estimated size per row
+(which is what tripped JIT), the generic plan pgx actually reaches runs it as a nested loop into
+`scan_zones` fifty thousand times. The commit's improvement was real; the mechanism it named was not the
+one at work, and the comment read as a guarantee for six sessions.
+
+**Why it is its own pattern.** A comment that names a mechanism is a test nobody runs. When the mechanism
+is *ours*, a later reader can grep for it. When it belongs to a third party — a transport's buffer
+ownership, a planner's subplan choice — the comment is a claim about someone else's code that only
+measuring can check, and it accretes the same trust as a measured fact. The tell: "Postgres evaluates",
+"the transport copies", "the runtime guarantees" — a verb whose subject is not in this repository.
+
+**How to apply.** A comment naming a third party's behaviour cites where the third party says so (a doc
+line, a version) or shows the measurement (`EXPLAIN ... EXECUTE` under both `plan_cache_mode` settings; a
+test that adds the StatsHandler and races the erase). If it can do neither, it states the precondition it
+depends on — "safe while no StatsHandler is registered" — where the person who adds one will read it.
+For the planner specifically: `EXPLAIN` with literals shows one of two plans; a statement the driver
+prepares and runs more than five times executes the other. Profile the shape with `PREPARE` and both
+plan modes, or the measurement is of a plan production never runs. ([[measure-dont-read]]; the transport
+variant is B46's fix list.)
+
+---
+
+### 5.18 One budget over four measurements — a gate that reports less than it appears to
+
+**What happened (S42→S43, B47).** The load gate had a single 15-minute `-timeout` across four SLO
+measurements and two trend readings. The first slow path (finding list, 320 requests at ~1.3 s) took most
+of it, the second ran the job into the timeout, and the four measurements behind them — the exposure-2.4
+variant, both exposure trends, ingest throughput — reported *nothing*: not a number, not a verdict. The CI
+badge said "load test failed", which was true, and hid that three of its four gates had not run. Those
+numbers had never been reported since the db-gates chain went red, so they were unknown, not good.
+
+**Why it is its own pattern.** §5.14's green-for-skipped is the friendly face; this is the hostile one — a
+*red* that is also reporting less than it appears to. One failure with several gates behind it is a gate
+whose output is "the first thing that broke", and everything after is unmeasured while looking measured.
+The tell: a job-level timeout that is not the sum of anything.
+
+**How to apply.** Every measurement gets its own budget, sized from its own ceiling (320 requests × the
+coarse ceiling: a measurement that overruns has already failed on average), fails its own gate, and prints
+what it did complete; the job's timeout is the sum. And when a gate has never reported, treat its numbers
+as unknown in every claim until it has — the exposure-2.4 finding list and ingest throughput are in
+ADR-098 for the first time.
+
+---
+
 ## 6. Standing requirement (from S23 onward)
 
 Every session that lands a feature reports whether it needs a dashboard surface,

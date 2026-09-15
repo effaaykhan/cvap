@@ -131,19 +131,64 @@ func (f *loadFix) getMS(t *testing.T, path string, cookies []*http.Cookie) float
 	return float64(d.Microseconds()) / 1000
 }
 
-// p95ms measures steady-state p95 latency of a path (warmup discarded).
-func (f *loadFix) p95ms(t *testing.T, path string, cookies []*http.Cookie) float64 {
+// sample is one measurement's outcome: the p95 of the requests that completed,
+// how many did, and whether the budget cut the measurement short.
+type sample struct {
+	p95ms     float64
+	completed int
+	truncated bool
+}
+
+const (
+	warmupRequests = 20
+	sampleRequests = 300
+)
+
+// measurementBudget is the wall-clock budget ONE measurement gets: every request
+// at the coarse ceiling. A measurement that cannot finish inside it has already
+// failed the coarse ceiling on average, so stopping early loses nothing the gate
+// would have said — and it is what keeps the first slow path from spending the
+// whole job's timeout and silencing every measurement behind it (B47: one
+// 15-minute budget across four measurements meant the exposure-2.4 variant, the
+// exposure trend and ingest throughput reported nothing when the exposure-1.0
+// finding list was slow; ADR-098).
+func measurementBudget(coarseMs int) time.Duration {
+	return time.Duration(warmupRequests+sampleRequests) * time.Duration(coarseMs) * time.Millisecond
+}
+
+// sampleP95 runs fn warmupRequests+sampleRequests times, discards the warmup and
+// returns the p95 of what completed. It stops once budget is spent and says so.
+func sampleP95(fn func() float64, budget time.Duration) sample {
+	start := time.Now()
+	lat := make([]float64, 0, sampleRequests)
+	for i := 0; i < warmupRequests+sampleRequests; i++ {
+		if time.Since(start) > budget {
+			return sample{p95ms: p95(lat), completed: len(lat), truncated: true}
+		}
+		ms := fn()
+		if i >= warmupRequests {
+			lat = append(lat, ms)
+		}
+	}
+	return sample{p95ms: p95(lat), completed: len(lat)}
+}
+
+// p95 of a sample; 0 for an empty one (a measurement truncated inside its warmup
+// has no sample, and the gate reports that rather than a number).
+func p95(lat []float64) float64 {
+	if len(lat) == 0 {
+		return 0
+	}
+	sorted := append([]float64(nil), lat...)
+	sort.Float64s(sorted)
+	return sorted[int(0.95*float64(len(sorted)))]
+}
+
+// p95ms measures steady-state p95 latency of a path (warmup discarded) within
+// its own budget.
+func (f *loadFix) p95ms(t *testing.T, path string, cookies []*http.Cookie, budget time.Duration) sample {
 	t.Helper()
-	for i := 0; i < 20; i++ {
-		f.getMS(t, path, cookies)
-	}
-	const n = 300
-	lat := make([]float64, n)
-	for i := 0; i < n; i++ {
-		lat[i] = f.getMS(t, path, cookies)
-	}
-	sort.Float64s(lat)
-	return lat[int(0.95*float64(n))]
+	return sampleP95(func() float64 { return f.getMS(t, path, cookies) }, budget)
 }
 
 // TestLoadSLOs seeds to capacity and measures each §5 SLO. The coarse ceiling is
@@ -156,33 +201,54 @@ func TestLoadSLOs(t *testing.T) {
 	precise := os.Getenv("CVAP_RUN_LOADTEST") != ""
 	t.Logf("loadtest: precise SLO %s", map[bool]string{true: "ENFORCED (CVAP_RUN_LOADTEST set)", false: "NOT ENFORCED (CVAP_RUN_LOADTEST unset) — coarse ceiling only"}[precise])
 
+	// Each measurement runs as its own subtest with its own budget, so a slow
+	// path fails ITS gate and the ones after it still report (ADR-098). The
+	// budgets are the per-measurement half of what the Makefile's -timeout is
+	// the sum of; see the loadtest target.
+	//
 	// Tenant A: production-reality exposure (1.0 per finding). Carries the asset
 	// and finding SLOs and the ingest measurement.
 	a := newLoadFix(t, db)
 	seedSynthetic(t, db, a.tenant, seedOpts{assets: 10000, findings: 50000, avgExposure: 1.0})
 	ca := a.login(t)
 
-	gateLatency(t, precise, "asset list p95 @10k", a.p95ms(t, "/v1/assets?limit=50", ca), assetListSLOms)
-	gateLatency(t, precise, "finding list p95 @50k, exposure 1.0", a.p95ms(t, "/v1/findings?limit=50", ca), findingListSLOms)
+	t.Run("asset list p95 @10k", func(t *testing.T) {
+		gateLatency(t, precise, "asset list p95 @10k", a.p95ms(t, "/v1/assets?limit=50", ca, measurementBudget(2*assetListSLOms)), assetListSLOms)
+	})
+	t.Run("finding list p95 @50k, exposure 1.0", func(t *testing.T) {
+		gateLatency(t, precise, "finding list p95 @50k, exposure 1.0", a.p95ms(t, "/v1/findings?limit=50", ca, measurementBudget(2*findingListSLOms)), findingListSLOms)
+	})
 
 	// Tenant B: the multi-vantage exposure (~2.4 per finding) the pipeline has
-	// never produced but ADR-010's aggregation must survive. The finding list's
-	// per-row count(DISTINCT zone_id) subquery is what this stresses.
+	// never produced but ADR-010's aggregation must survive. Since ADR-098 the
+	// finding list computes its exposure count for the page only and joins the
+	// external-zone set once, so exposure depth should no longer be visible in it —
+	// this variant is what says whether that holds.
 	b := newLoadFix(t, db)
 	seedSynthetic(t, db, b.tenant, seedOpts{assets: 10000, findings: 50000, avgExposure: 2.4})
 	cb := b.login(t)
-	gateLatency(t, precise, "finding list p95 @50k, exposure 2.4", b.p95ms(t, "/v1/findings?limit=50", cb), findingListSLOms)
+	t.Run("finding list p95 @50k, exposure 2.4", func(t *testing.T) {
+		gateLatency(t, precise, "finding list p95 @50k, exposure 2.4", b.p95ms(t, "/v1/findings?limit=50", cb, measurementBudget(2*findingListSLOms)), findingListSLOms)
+	})
 
 	// The exposure-by-zone endpoint is the UNPAGINATED ADR-010 aggregation — it
 	// groups every finding_exposure row by zone, so unlike the finding LIST its
 	// cost scales with exposure depth. There is no published SLO for it, so these
 	// are reported for the trend and to answer "does the 2.4 distribution the
 	// pipeline has never produced overshoot the aggregation?" — measured at both
-	// variants rather than assumed.
-	t.Logf("loadtest: exposure-by-zone p95 @50k, exposure 1.0 = %.0fms (no published SLO)", a.p95ms(t, "/v1/exposure", ca))
-	t.Logf("loadtest: exposure-by-zone p95 @50k, exposure 2.4 = %.0fms (no published SLO)", b.p95ms(t, "/v1/exposure", cb))
+	// variants rather than assumed. They borrow the finding list's coarse ceiling
+	// as a budget: a truncated trend is reported as ">1 s per request", not failed,
+	// because no SLO is published for it (ADR-058).
+	t.Run("exposure-by-zone p95 @50k, exposure 1.0", func(t *testing.T) {
+		reportTrend(t, "exposure-by-zone p95 @50k, exposure 1.0", a.p95ms(t, "/v1/exposure", ca, measurementBudget(2*findingListSLOms)))
+	})
+	t.Run("exposure-by-zone p95 @50k, exposure 2.4", func(t *testing.T) {
+		reportTrend(t, "exposure-by-zone p95 @50k, exposure 2.4", b.p95ms(t, "/v1/exposure", cb, measurementBudget(2*findingListSLOms)))
+	})
 
-	gateThroughput(t, precise, "observation insert throughput", measureIngestOps(t, db, a.tenant), ingestSLOops)
+	t.Run("observation insert throughput", func(t *testing.T) {
+		gateThroughput(t, precise, "observation insert throughput", measureIngestOps(t, db, a.tenant), ingestSLOops)
+	})
 }
 
 // measureIngestOps measures observation store-insert throughput (obs/sec) — the
@@ -276,9 +342,20 @@ func checkThroughput(measured float64, slo int, precise bool) gateVerdict {
 	return gateVerdict{}
 }
 
-func gateLatency(t *testing.T, precise bool, name string, measuredMs float64, sloMs int) {
+func gateLatency(t *testing.T, precise bool, name string, s sample, sloMs int) {
 	t.Helper()
 	coarse := 2 * sloMs
+	if s.truncated {
+		// The measurement could not finish inside warmup+sample requests at the
+		// coarse ceiling each: it has failed the coarse ceiling on average, and
+		// the sample it did complete is printed so the reader sees the number
+		// rather than a timeout. The gates after this one still run.
+		t.Errorf("%s: measurement exceeded its budget (%d requests at the %dms coarse ceiling) after %d completed — "+
+			"p95 of the completed sample %.0fms — order-of-magnitude regression",
+			name, warmupRequests+sampleRequests, coarse, s.completed, s.p95ms)
+		return
+	}
+	measuredMs := s.p95ms
 	t.Logf("loadtest: %s = %.0fms", name, measuredMs)
 	switch v := checkLatency(measuredMs, sloMs, precise); {
 	case v.coarseFailed:
@@ -292,6 +369,18 @@ func gateLatency(t *testing.T, precise bool, name string, measuredMs float64, sl
 		t.Logf("loadtest: %s coarse ceiling PASSED (p95 %.0fms < %dms), precise SLO NOT ENFORCED (CVAP_RUN_LOADTEST unset)",
 			name, measuredMs, coarse)
 	}
+}
+
+// reportTrend prints a measurement that has no published SLO. A truncated one is
+// printed as such — the number a reader would otherwise infer from a timeout.
+func reportTrend(t *testing.T, name string, s sample) {
+	t.Helper()
+	if s.truncated {
+		t.Logf("loadtest: %s TRUNCATED after %d completed requests (budget %d at %dms each); p95 of the sample %.0fms (no published SLO)",
+			name, s.completed, warmupRequests+sampleRequests, 2*findingListSLOms, s.p95ms)
+		return
+	}
+	t.Logf("loadtest: %s = %.0fms (no published SLO)", name, s.p95ms)
 }
 
 func gateThroughput(t *testing.T, precise bool, name string, measured float64, slo int) {

@@ -520,7 +520,18 @@ loadtest: ## 10k-asset load test against the §5 SLOs. Coarse ceiling always; pr
 	@# runs where the machine is quiet: a developer's `CVAP_RUN_LOADTEST=1 make
 	@# loadtest`, and the nightly job. Every measured number is printed each run
 	@# regardless, so the trend is visible before it crosses anything.
-	CVAP_TEST_DATABASE_URL="$(APP_DATABASE_URL)" go test ./test/load/... -count=1 -timeout 15m -v
+	@#
+	@# -timeout is the SUM of the per-measurement budgets, not a budget of its
+	@# own (ADR-098). Each measurement stops itself at 320 requests x its coarse
+	@# ceiling and fails its own gate, so a slow path cannot spend the whole run
+	@# and silence the gates behind it — which is what a single 15-minute budget
+	@# did (B47). Worst case, everything slow: asset list 320 x 0.6 s = 3.2 min;
+	@# four measurements at the finding-list ceiling (the two SLO'd lists and the
+	@# two exposure trends) at 320 x 1 s = 21.3 min; ingest and two seeds of 50k
+	@# findings on a slow runner ~ 6 min; about 31 min in all. A healthy run is a
+	@# few minutes; this ceiling exists so a fully failing one still reports every
+	@# number rather than one timeout.
+	CVAP_TEST_DATABASE_URL="$(APP_DATABASE_URL)" go test ./test/load/... -count=1 -timeout 40m -v
 
 migrate-new: ## Scaffold a migration pair: make migrate-new NAME=snake_case
 	@test -n "$(NAME)" || { echo "usage: make migrate-new NAME=snake_case"; exit 1; }
