@@ -14,3 +14,4 @@
 - [credhost fleet path findings](credhost_fleet_path_findings.md) — ADR-091: host engine missing from planner `dialsTargets` (hostname bypass), pooled host-key trust, agent nil-panic, no rate model. Measured 2026-09-11
 - [Task status coverage claims](task_status_coverage_claims.md) — S42/ADR-093: status gates no scanning (full reader set listed); MarkRunning unreachable on the wire, `completed` overclaims, sweeper skips tasks
 - [First-chunk retry fix + heartbeat drift](retry_first_chunk_and_heartbeat_drift.md) — submit.go fix complete incl. multi-chunk; no retry const shadows config; HeartbeatTimeout=90s duplicated as SQL literal in kill.go
+- [ADR-099 kernel read findings](adr099_kernel_read_findings.md) — S43/B36: the credentialed remediation loop closes findings the read judged NOTHING about (2 triggers reproduced); read set itself clean

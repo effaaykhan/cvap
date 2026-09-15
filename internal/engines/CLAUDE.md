@@ -35,8 +35,8 @@ Rules:
 ## The engines that send packets
 
 `credhost` holds `net` and `x/crypto/ssh` (ADR-086): it dials port 22 of a resolved target and
-runs two read-only commands over an authenticated session, emitting one `package` observation
-per host. `discovery` holds `net` (ADR-047). `fingerprint` holds `net` plus four crypto imports (ADR-048),
+runs three read-only commands over an authenticated session (`cat /etc/os-release`, `uname -r`,
+then `dpkg-query` or `rpm -qa` — ADR-076/087/099), emitting one `package` observation per host. `discovery` holds `net` (ADR-047). `fingerprint` holds `net` plus four crypto imports (ADR-048),
 and it is the only place in this repository where `InsecureSkipVerify` is correct — a verifying
 dial fails on exactly the certificates worth reporting, so it would return an error where the
 evidence should be. It appears **once**, in `inspectOnlyTLSConfig`, whose name is the argument,

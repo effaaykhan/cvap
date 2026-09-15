@@ -89,6 +89,12 @@ func TestCredentialedInventoryOverTheWire(t *testing.T) {
 	got := map[string]string{}
 	for _, p := range payload.Installed {
 		got[p.Name] = p.Version
+		// The binary name is what tells a kernel row's ABI apart (ADR-099); a
+		// row without one classifies as an ordinary package, which is how B36's
+		// 551 would come back silently. Every dpkg row has one.
+		if p.Binary == "" {
+			t.Errorf("package %s %s: engine reported no binary name", p.Name, p.Version)
+		}
 	}
 	for name, version := range expected {
 		if got[name] != version {
@@ -97,6 +103,12 @@ func TestCredentialedInventoryOverTheWire(t *testing.T) {
 	}
 	if len(got) < len(expected) {
 		t.Errorf("engine reported %d packages, container has at least %d", len(got), len(expected))
+	}
+	// The running kernel, read with `uname -r` (ADR-099): the container answers
+	// with the host's kernel, and the engine must report exactly that — it is
+	// the value that decides which installed kernel version is matched.
+	if want := strings.TrimSpace(dockerExec(t, labSSHContainer, "uname", "-r")); payload.KernelRelease != want {
+		t.Errorf("package payload kernel_release = %q, the container reports %q", payload.KernelRelease, want)
 	}
 
 	subs := h.submissions()
@@ -262,12 +274,14 @@ func (h *harness) seedCredentialed(keyPath, fingerprint string) {
 }
 
 type packagePayload struct {
-	Address   string `json:"address"`
-	Release   string `json:"release"`
-	Family    string `json:"family"`
-	Installed []struct {
+	Address       string `json:"address"`
+	Release       string `json:"release"`
+	Family        string `json:"family"`
+	KernelRelease string `json:"kernel_release"`
+	Installed     []struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
+		Binary  string `json:"binary"`
 	} `json:"installed"`
 }
 

@@ -283,7 +283,7 @@ func measure(ctx context.Context, tenant store.TenantID, assetID uuid.UUID, read
 			}
 			return cves, nil
 		}
-		truth, err := credscan.CredentialedTruth(read.Packages, read.Release.Codename, fixes, vulns)
+		truth, err := credscan.CredentialedTruth(read.Packages, read.Release.Codename, read.KernelRelease, fixes, vulns)
 		if err != nil {
 			return err
 		}
@@ -356,7 +356,7 @@ func measure(ctx context.Context, tenant store.TenantID, assetID uuid.UUID, read
 			}
 		}
 		report.ExposedPackages = len(exposedPkgs)
-		exposedTruth, err := credscan.CredentialedTruth(exposedPkgs, read.Release.Codename, fixes, vulns)
+		exposedTruth, err := credscan.CredentialedTruth(exposedPkgs, read.Release.Codename, read.KernelRelease, fixes, vulns)
 		if err != nil {
 			return err
 		}
@@ -377,6 +377,7 @@ func printInventory(read credscan.HostRead, grep string) {
 	fmt.Printf("host read: %s\n", printable(read.Release.Get("PRETTY_NAME")))
 	fmt.Printf("  /etc/os-release: ID=%s VERSION_ID=%s VERSION_CODENAME=%s\n",
 		read.Release.ID, read.Release.VersionID, read.Release.Codename)
+	fmt.Printf("  running kernel (uname -r): %s\n", read.KernelRelease)
 	fmt.Printf("  packages installed: %d\n", len(read.Packages))
 	if grep == "" {
 		return
@@ -446,7 +447,7 @@ func truthReport(ctx context.Context, tenant store.TenantID, read credscan.HostR
 			return cves, nil
 		}
 		var e error
-		truth, e = credscan.CredentialedTruth(read.Packages, relKey, fixes, vulns)
+		truth, e = credscan.CredentialedTruth(read.Packages, relKey, read.KernelRelease, fixes, vulns)
 		return e
 	})
 	if err != nil {

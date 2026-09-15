@@ -26,3 +26,23 @@ func TestParseOsReleaseRefusesUnboundedAttributionTokens(t *testing.T) {
 		}
 	}
 }
+
+// `uname -r` is one target-controlled token that decides which installed kernel
+// is matched (ADR-099): one line, bounded grammar, or the read is refused.
+func TestParseUnameRefusesAnythingButOneKernelToken(t *testing.T) {
+	for in, want := range map[string]string{
+		"7.0.0-31-generic\n":              "7.0.0-31-generic",
+		"  5.14.0-503.14.1.el9_5.x86_64 ": "5.14.0-503.14.1.el9_5.x86_64",
+		"6.12.1+bpo-amd64\n":              "6.12.1+bpo-amd64",
+	} {
+		got, err := ParseUname(in)
+		if err != nil || got != want {
+			t.Errorf("ParseUname(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "\n", "7.0.0-31-generic\n7.0.0-30-generic\n", "Linux host 7.0.0-31-generic", "7.0.0-31-generic;echo", "../../x"} {
+		if got, err := ParseUname(bad); err == nil {
+			t.Errorf("ParseUname(%q) = %q, want a refusal", bad, got)
+		}
+	}
+}

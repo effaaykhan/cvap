@@ -119,6 +119,12 @@ func TestCredentialedTruth(t *testing.T) {
 		{Source: "openssl", Version: "3.0.2-0ubuntu1.6"}, // below the fix -> vulnerable
 		{Source: "sudo", Version: "1.9.9-1ubuntu2.4"},    // at/above the fix -> not
 		{Source: "bash", Version: "5.1-6ubuntu1"},        // no advisory at all
+		// The kernel: the running ABI's packages match, the leftover ABI's are
+		// inventory (B36) — one USN fixes linux at 5.15.0-91.101; the host runs
+		// -91, and the -89 packages are still on disk.
+		{Source: "linux", Binary: "linux-modules-5.15.0-91-generic", Version: "5.15.0-91.101"},
+		{Source: "linux", Binary: "linux-modules-5.15.0-89-generic", Version: "5.15.0-89.99"},
+		{Source: "linux", Binary: "linux-libc-dev", Version: "5.15.0-91.101"},
 	}
 	fixes := func(release, pkg string) ([]AdvisoryFix, error) {
 		if release != "jammy" {
@@ -135,6 +141,10 @@ func TestCredentialedTruth(t *testing.T) {
 			return []AdvisoryFix{
 				{AdvisoryRef: "USN-5811-1", FixedVersion: "1.9.9-1ubuntu2.4", Comparator: "dpkg"},
 			}, nil
+		case "linux":
+			return []AdvisoryFix{
+				{AdvisoryRef: "USN-6549-1", FixedVersion: "5.15.0-91.101", Comparator: "dpkg"},
+			}, nil
 		default:
 			return nil, nil
 		}
@@ -143,20 +153,43 @@ func TestCredentialedTruth(t *testing.T) {
 		if ref == "USN-5710-1" {
 			return []string{"CVE-2022-3602", "CVE-2022-3786"}, nil // one advisory, two CVEs
 		}
+		if ref == "USN-6549-1" {
+			return []string{"CVE-2023-6111"}, nil
+		}
 		return nil, nil
 	}
-	res, err := CredentialedTruth(pkgs, "jammy", fixes, vulns)
+	res, err := CredentialedTruth(pkgs, "jammy", "5.15.0-91-generic", fixes, vulns)
 	if err != nil {
 		t.Fatalf("truth: %v", err)
 	}
 	if len(res.Keys) != 2 {
-		t.Fatalf("truth keys = %+v, want 2 (openssl x2 CVE)", res.Keys)
+		t.Fatalf("truth keys = %+v, want 2 (openssl x2 CVE; the leftover ABI-89 kernel is inventory, not a finding)", res.Keys)
 	}
 	if res.Keys[0].Package != "openssl" || res.Keys[0].CVE != "CVE-2022-3602" {
 		t.Errorf("first key = %+v", res.Keys[0])
 	}
-	if len(res.Skipped) != 2 { // empty fixed_version + unknown comparator
-		t.Errorf("skipped = %+v, want 2", res.Skipped)
+	if len(res.Skipped) != 3 { // empty fixed_version + unknown comparator + the not-running kernel ABI
+		t.Errorf("skipped = %+v, want 3", res.Skipped)
+	}
+
+	// The reboot-pending host: running -89 with -91 installed. The -89 packages
+	// are the running kernel and DO match — the real exposure is kept visible.
+	res, err = CredentialedTruth(pkgs, "jammy", "5.15.0-89-generic", fixes, vulns)
+	if err != nil {
+		t.Fatalf("truth (reboot pending): %v", err)
+	}
+	if len(res.Keys) != 3 || res.Keys[0].Package != "linux" || res.Keys[0].CVE != "CVE-2023-6111" {
+		t.Fatalf("reboot-pending truth keys = %+v, want linux/CVE-2023-6111 plus openssl x2", res.Keys)
+	}
+
+	// No uname on the read: the kernel packages are judged neither way, and the
+	// skip says so — the pre-B36 shape, honest rather than 551 findings.
+	res, err = CredentialedTruth(pkgs, "jammy", "", fixes, vulns)
+	if err != nil {
+		t.Fatalf("truth (no uname): %v", err)
+	}
+	if len(res.Keys) != 2 || len(res.Skipped) != 4 {
+		t.Fatalf("no-uname truth = %d keys / %d skipped, want 2 / 4 (both ABI-bound kernel packages unjudged, linux-libc-dev ordinary)", len(res.Keys), len(res.Skipped))
 	}
 }
 

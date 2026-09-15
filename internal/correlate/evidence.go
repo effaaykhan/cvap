@@ -92,14 +92,23 @@ type packagePayload struct {
 	// the attribution fields above (credentialedAttribution reads Release/Source/
 	// Family), so an observation without Installed still resolves the release.
 	Installed []installedPackage `json:"installed,omitempty"`
+	// KernelRelease is `uname -r` as read on the host (ADR-099): the kernel that
+	// RUNS, which the inventory alone cannot say. Empty on a pre-ADR-099 read, in
+	// which case kernel packages are judged neither way (domain.KernelUnknown).
+	KernelRelease string `json:"kernel_release,omitempty"`
 }
 
 // installedPackage is one exactly-known package: its source name (the key advisory
 // data uses) and exact installed version. The comparator is not carried — it comes
 // from the matched advisory row (advisory_fixed_packages.comparator, ADR-062).
+// Binary is the installed package's own name, carried because a Debian-family
+// kernel binary names its ABI (linux-image-7.0.0-31-generic) and that is what
+// domain.ClassifyKernelPackage reads to tell the running kernel's packages from a
+// leftover ABI's (B36, ADR-099).
 type installedPackage struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
+	Binary  string `json:"binary,omitempty"`
 }
 
 // addressed is the minimum any observation carries: which address it is about.

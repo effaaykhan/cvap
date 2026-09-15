@@ -24,7 +24,7 @@ The first task of the session is to write this up as the placement ADR, then bui
 ## Build
 
 1. **Credentialed-host engine** (`engine_kind = host`): opens SSH (net), authenticates via the
-   runtime's agent, runs the read-only inventory (`dpkg-query -W`, `cat /etc/os-release`), emits
+   runtime's agent, runs the read-only inventory (`dpkg-query -W`, `cat /etc/os-release`; `uname -r` since ADR-099), emits
    `package` observations — activating ADR-077's dormant path (exact `/etc/os-release` release +
    exact installed versions).
 2. **Correlate on the exact installed version**: the dormant release-precedence rule fires (exact
@@ -64,6 +64,14 @@ truth on the hosts found 551 false kernel findings on `.146` — a stale ABI's p
 source name `linux` and the matcher cannot see which kernel runs (B36). The headline is **0% credentialed
 FP on the measured set with the kernel class excluded and named**; it is 0% only for packages whose
 installed version is unambiguous, and B36 sits ahead of anything that consumes credentialed findings.
+
+**Restated after S43 (ADR-099):** B36 is closed — `uname -r` is the third read-only command, and a kernel
+package is matched only at the running kernel's version (the reboot-pending host still raises; a leftover
+ABI is inventory). The carve-out is no longer a design fact; it is a measurement not yet repeated: the
+integration test reproduces `.146`'s shape (none at the fix, one when the old kernel runs, remediated
+after the reboot), and the fleet re-run on `.146`/`.138` waits on the owned range being authorised in
+`lab/scope.txt` for a session. Until that run, the headline reads **0% credentialed FP on the measured
+set; the kernel class is now judged against the running kernel, fleet re-measurement pending**.
 The fleet engine increment remains: cvap-engine-credhost emitting package observations,
 credential-grant delivery through dispatch, and correlation consuming those observations to activate
 ADR-077's dormant precedence and drive the supersession lifecycle.

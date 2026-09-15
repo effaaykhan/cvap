@@ -15,7 +15,7 @@ import (
 
 // The one host-dependent part of the instrument: an authenticated read of a Linux
 // host over SSH. Everything else in this package is pure and fixture-tested; this
-// runs the two read-only commands and hands their output to the parsers.
+// runs the three read-only commands and hands their output to the parsers.
 //
 // This file holds NO credential material. The credential is the runtime's
 // (ADR-027/076); the command reveals it only to build cfg.Auth and zeroises it
@@ -24,12 +24,19 @@ import (
 // survives — which is why the credential lives only for the job and never touches
 // disk (ADR-020).
 
-// HostRead is one authenticated read of a host: the installed inventory and the
-// exact release, and nothing else. No impact (non-negotiable #9) — both commands
-// are reads, no write, no shell, no data extraction beyond inventory.
+// HostRead is one authenticated read of a host: the installed inventory, the
+// exact release and the running kernel, and nothing else. No impact
+// (non-negotiable #9) — all three commands are reads, no write, no shell, no data
+// extraction beyond inventory.
 type HostRead struct {
 	Packages []Package
 	Release  OSRelease
+	// KernelRelease is `uname -r`: the kernel that is RUNNING, which the package
+	// inventory cannot say — a Debian-family host keeps every installed ABI's
+	// packages side by side and rpm keeps installonly kernels the same way, so
+	// without this the matcher reads a leftover old ABI as the running kernel
+	// (B36: 551 false kernel findings on a host at the fix, ADR-099).
+	KernelRelease string
 }
 
 // SSHConfig is what one authenticated read needs. Auth is built by the command from
@@ -48,7 +55,13 @@ type SSHConfig struct {
 // no impact (non-negotiable #9).
 const osReleaseCommand = "cat /etc/os-release"
 
-// ReadHost dials the host, authenticates with the supplied method, runs the two
+// unameCommand reads the running kernel's release string. A read of the kernel's
+// own identity, no impact (non-negotiable #9). It is the third and last command
+// in the read set (ADR-099): the first two say what is installed, this says what
+// is running, and the kernel is the one package where those differ by design.
+const unameCommand = "uname -r"
+
+// ReadHost dials the host, authenticates with the supplied method, runs the three
 // read-only commands and parses their output. It refuses to connect without host-key
 // verification. It does not construct, hold, or zeroise the credential — that is the
 // command's job (ADR-027/076); this only presents the auth method it was handed.
@@ -95,6 +108,18 @@ func ReadHost(ctx context.Context, cfg SSHConfig) (HostRead, error) {
 		return HostRead{}, fmt.Errorf("credscan: %w", err)
 	}
 
+	// The running kernel, bounded like the os-release tokens. A value outside the
+	// grammar, or a command that fails, leaves the kernel UNREAD ("") rather than
+	// failing the read: Core's KernelUnknown is the designed "cannot say" state
+	// (kernel rows judged neither way), and a host that answers `uname -r` with
+	// a paragraph must not blind the credentialed read of every host behind it in
+	// the job (the scan-safety audit's finding). The os-release refusal stays
+	// fatal because that value KEYS the match; this one only filters one class.
+	kernel := ""
+	if unameOut, uerr := run(ctx, conn, unameCommand); uerr == nil {
+		kernel, _ = ParseUname(unameOut) // "" on refusal, by design
+	}
+
 	var pkgs []Package
 	if rel.IsRPMFamily() {
 		out, rerr := run(ctx, conn, RpmQaCommand)
@@ -113,7 +138,7 @@ func ReadHost(ctx context.Context, cfg SSHConfig) (HostRead, error) {
 			return HostRead{}, fmt.Errorf("credscan: %w", err)
 		}
 	}
-	return HostRead{Packages: pkgs, Release: rel}, nil
+	return HostRead{Packages: pkgs, Release: rel, KernelRelease: kernel}, nil
 }
 
 // dialContext connects and completes the SSH handshake, cancellable by ctx.

@@ -23,7 +23,7 @@ agent memory until now.
 | Phase 2 — discovery, fingerprint, resolution, findings, UI, hardening | Weeks 4–8 | 12–23 | complete (closed S23) |
 | Phase 2 validation — real-network accuracy | S24 | 24 | done; P3.3 entry condition measured & **failed** (ADR-060), then met by S26–S31 |
 | Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–37 | **COMPLETE (close-out S37).** P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ · B29 coverage window (S33) ✅ · P3.4 KEV/EPSS model + ingestion (S34) ✅ · advisory→finding path (S34b, ADR-070) ✅ · confidence by weakest link (S34c/d, ADR-072/073) ✅ · P3.4 ordering acceptance on real findings (S36) ✅ · #6 exposure resolved (S37, ADR-074) ✅ — the chain closes, produces real CVE-linked findings, and orders them by priority (see "What Phase 3 changed", §2). Ceiling is the banner-inferred package identity. Next: enterprise console (#12, designed S37); the Phase 4 credentialed-vs-widen decision (S38, `docs/phase-4-sequencing-decision.md`) is the operator's |
-| Phase 4 — credentialed assessment | §7 path-to-sellable | narrow slice next (decided S38, ADR-075) | **Decided: a NARROW credentialed slice next** — Linux/SSH, package inventory, one VM — as a *validation instrument* (generates the real-host ground truth the §6.2 accuracy gates need; closes B26 if Rocky/Alma; removes B30 for credentialed hosts). Operator overruled the memo's console/B28-first ordering (ADR-075). Full Phase 4 (Windows/WinRM/domain) stays held; reach reasoning preserved. **S39–S42:** the slice landed and ran on the production route (ADR-076–094): grant over the wire, observed trust, exact inventory, supersession — `.146`'s sixteen closed live. Headline as of S42: **credentialed FP 0% on the measured set, kernel class excluded and named** — 551 false kernel findings on a host at the fix, from the matcher not seeing which kernel runs (B36, ahead of any consumer of credentialed findings). |
+| Phase 4 — credentialed assessment | §7 path-to-sellable | narrow slice next (decided S38, ADR-075) | **Decided: a NARROW credentialed slice next** — Linux/SSH, package inventory, one VM — as a *validation instrument* (generates the real-host ground truth the §6.2 accuracy gates need; closes B26 if Rocky/Alma; removes B30 for credentialed hosts). Operator overruled the memo's console/B28-first ordering (ADR-075). Full Phase 4 (Windows/WinRM/domain) stays held; reach reasoning preserved. **S39–S42:** the slice landed and ran on the production route (ADR-076–094): grant over the wire, observed trust, exact inventory, supersession — `.146`'s sixteen closed live. Headline as of S42: **credentialed FP 0% on the measured set, kernel class excluded and named** — 551 false kernel findings on a host at the fix, from the matcher not seeing which kernel runs (B36, ahead of any consumer of credentialed findings). **S43 (ADR-099):** B36 closed — `uname -r` read, kernel packages matched against the running kernel only, a credentialed finding the read no longer matches closes; the carve-out becomes "fleet re-measurement pending" until the owned range is authorised for a run. |
 
 Weeks and sessions are not one-to-one. The eight-week plan assumed a team; this
 build is sequential under one operator with Claude Code, so a "week" of the plan
@@ -1042,7 +1042,12 @@ noted forward.
 
 **How to apply.** A sub-second `ok` on a package that opens a database is a skip. Run the DB suites through
 `make store-test` (narrow with `DB_TEST_PKGS=…`) or `make ci`; `-v | grep SKIP` when in doubt. Never
-report a suite green without naming the command that ran it. ([[gate-before-push]]; [[test-that-proves-
+report a suite green without naming the command that ran it. **A second face (S43):** `make store-test`
+passes `KNOWLEDGE_IMPORT_DATABASE_URL` through from `.env`, and this box's `.env` did not have it — so
+every suite that seeds the advisory keyspace through the import role (the credentialed acceptance
+tests, the priority and release acceptances) skipped inside a green `ok`, for as long as the variable
+was missing. The package reported 1467 s and `ok`, which reads as thorough; the kernel acceptance ran
+only once the variable was exported. `env.example` carries the dev value; `.env` now does too. ([[gate-before-push]]; [[test-that-proves-
 nothing]] shape 3, the fixture the assertion needs is unreachable.)
 
 ---
@@ -1145,6 +1150,35 @@ coarse ceiling: a measurement that overruns has already failed on average), fail
 what it did complete; the job's timeout is the sum. And when a gate has never reported, treat its numbers
 as unknown in every claim until it has — the exposure-2.4 finding list and ingest throughput are in
 ADR-098 for the first time.
+
+---
+
+### 5.19 A rule written in one direction — "judged neither way" on raise, "judged remediated" on withdraw
+
+**What happened (S43, ADR-099).** The kernel fix introduced a `KernelUnknown` state: a credentialed read that
+carries no `uname -r` judges the kernel packages neither way. It was implemented as a `continue` before the
+match loop, so no finding was raised — correct. The same change added, for the first time, a withdrawal:
+a credentialed finding the current read no longer matches closes `remediated`. The withdrawal consulted only
+the match set, so the finding the read had just declined to judge was absent from it and closed. Two
+reviewers measured it independently: a reboot-pending host's true kernel finding closed `remediated` the
+moment an older scan point build read it, and the next new-build read reopened it — a `finding_history` pair
+per sweep, with a recorded cause ("upgraded, removed, or not the running kernel") that had not happened. The
+empty-keyspace variant was the same shape: a release with no advisory rows matched nothing, so every
+credentialed finding on the asset "no longer matched". The integration test that pinned the rule seeded a
+fresh asset, so the close path never executed under it.
+
+**Why it is its own pattern.** A lifecycle has two directions, and a "cannot say" state is a claim about
+both. Written into one, it is silently contradicted by the other, and the contradiction is invisible to the
+test that pins the first direction because that test never carries a finding into the second. §5.1 is a
+control answering the wrong question; this is a control answering half of the right one. The tell: a new
+CLOSE path beside an existing OPEN path, guarded by a set the open path populates.
+
+**How to apply.** For every state that means "no data" or "cannot judge", ask what the close path does with
+it — and test the close on an asset that already carries the finding, across a read that cannot judge it,
+counting history rows (zero). The guard belongs at the unit the finding is keyed on (here the source name,
+because `linux-libc-dev` shares it with the kernel rows), and a store write that may close nothing reports
+whether it did, so the transition is written only for a change. ([[rule-in-one-direction]];
+[[control-keyed-to-the-verdict]]; [[measure-dont-read]] found it twice.)
 
 ---
 

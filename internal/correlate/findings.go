@@ -106,8 +106,12 @@ func (c *Correlator) closeRemediated(ctx context.Context, conn *store.Conn, asse
 		if raised[f.Locator] {
 			continue // still firing
 		}
-		if err := (store.Findings{}).MarkRemediated(ctx, conn, f.ID, now); err != nil {
+		closed, err := (store.Findings{}).MarkRemediated(ctx, conn, f.ID, now)
+		if err != nil {
 			return err
+		}
+		if !closed {
+			continue // a concurrent close got there first; no second history row
 		}
 		if err := (store.Findings{}).RecordTransition(ctx, conn, f.ID,
 			f.Status, "remediated",

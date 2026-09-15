@@ -28,12 +28,20 @@ operator path).
 - **A lie INSIDE the grammar is still permanent and still believed.** `family=ubuntu,
   release=hardy` on a jammy host pins at 1.0 and raises credentialed findings at 1.0. The ADR
   names this and defers it to B39.
-- **`correlate.credentialedInventory` has no grammar check** while `credentialedAttribution`
-  does, and both read the SAME `release` out of the SAME payload. `evaluateCredentialed` keys
-  `Advisories.FixesFor` on that unchecked value and raises `source='credentialed'` findings at
-  confidence 1.0, and its `installed` list can mark real inferred findings
-  `refuted_by_credentialed`. Harmless today only because an out-of-grammar release matches no
-  keyspace row.
+- ~~`correlate.credentialedInventory` has no grammar check~~ — **closed** (2026-09-15):
+  it now applies `ReleaseTokenValid` to `Release` and `Family` and skips the observation.
+  But the "harmless today only because an out-of-grammar release matches no keyspace row"
+  caveat **landed as a defect** in the same session: ADR-099's close-out loop turns
+  "matches no keyspace row" into `status = remediated`, so a WITHIN-grammar rename
+  (`VERSION_CODENAME=jammy2`) now retires every credentialed finding on the host as fixed.
+  Measured 2026-09-15. Exactly the [[latent-limitations]] shape the user keeps naming: a
+  documented-harmless gap that a later capability weaponises.
+- **`uname -r` is a second attacker-durable attribution field** (ADR-099). It is bounded at
+  both sites (`credscan.ParseUname`, `correlate.credentialedInventory` blanks an invalid token),
+  but a within-grammar lie — `generic`, `9.9.9-9-generic` — makes `ClassifyKernelPackage` return
+  `KernelUnknown`/`KernelInstalledNotRunning`, which suppresses every kernel finding AND (until
+  fixed) closes the existing ones as `remediated`. Core's blanking of an invalid token is silent:
+  no warn, no audit row, indistinguishable from a pre-ADR-099 scan point.
 - `OSRelease.ReleaseKey()` is `Codename` or `ID + "-" + major(VersionID)`, so the value that
   actually becomes the attribution can be 129 bytes, not the 64 the ADR states. And
   `ParseOsRelease` bounds only three keys; the rest of `raw` is unbounded and

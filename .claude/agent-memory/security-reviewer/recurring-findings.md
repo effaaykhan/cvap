@@ -1,6 +1,6 @@
 ---
 name: recurring-findings
-description: Recurring security defect classes found in CVAP reviews (114 classes), and the repo-specific constraints that shape acceptable fixes
+description: Recurring security defect classes found in CVAP reviews (121 classes), and the repo-specific constraints that shape acceptable fixes
 metadata:
   type: project
 ---
@@ -2254,3 +2254,77 @@ because this server installs no StatsHandler and no interceptor.
 open the library's doc comment in the module cache and quote it. Inferred-and-true reads the same
 as inferred-and-false until you look. Then check what makes it safe TODAY and write that down as
 the precondition, because that is the thing a future change deletes without noticing.
+
+**118. A "cannot judge" branch reused as a "found nothing" verdict by a new close-out loop.**
+ADR-099 added `domain.KernelUnknown` — "judged neither way" — and in the same change taught
+`evaluateCredentialed` to close any credentialed finding absent from this read's `credVulnerable`
+as `remediated`. Absent-because-unjudged and absent-because-fixed are the same map miss, so a read
+that declined to judge retired the finding it could not judge. Measured: four separate ways to
+reach it (no `kernel_release`, a token Core blanked, a grammar-valid release with no ABI, a
+release naming a kernel that does not exist) each closed a true kernel finding as `remediated`,
+and so did a target-controlled `VERSION_CODENAME` rename, which moves every package out of the
+keyspace it was matched in. The matcher's other decline branches (`fixed_version == ""`,
+unknown comparator) feed the same map.
+**Why:** a close-out loop keyed on "not in the positive set" inherits every reason the positive
+set can be empty, including the ones the same change added deliberately as refusals.
+**How to apply:** when a decision gains the power to CLOSE, enumerate every `continue` upstream of
+the set it reads and ask which of them mean "no" and which mean "don't know". Close only on a
+recorded positive judgement (`judged[pkg]` set where a usable comparison actually ran), never on
+set absence. Probe it by raising a true finding first, then feeding the unjudgeable read —
+`SELECT status FROM findings`, not the sweep's error return, which is nil either way.
+**Residual after the fix (re-measured, same tree):** the guards added were `unjudged[source]` (set
+ONLY on `KernelUnknown`) and `keyspaceAnswered` (asset-wide). Both are keyed to the repro the
+reviewer wrote, not to the property, so two of the four original triggers still close a true
+finding as `remediated`: (a) a read that located NO running kernel row — every kernel row
+classifies `KernelInstalledNotRunning`, which the loop counts as a judgement, so a container
+reporting its HOST's kernel (ADR-099's own consequences bullet says this class is "held as
+inventory rather than judged" — it is not, for the withdrawal) or a rooted host answering
+`uname -r` with any grammar-valid release it does not run retires the finding with one string;
+(b) a release-key change — `keyspaceAnswered` is true if ANY installed package has a fix row for
+the NEW release, so a host editing `VERSION_CODENAME` (or an honest do-release-upgrade to a
+release whose advisories for that package are not imported) closes EVERY credentialed finding
+raised under the old key. Both measured on the dev DB; with `hasAdvisoryFinding` being
+`status IN ('open','confirmed')` in `Assets.AdvisoryStatusInputs`, emptying the set flips the
+asset's ADR-068 verdict to `MatchClean`. The property-shaped guards are: a source with kernel rows
+and none `KernelRunning` is unjudged; and the keyspace test must be per (package, cve) at the
+finding — `FixesFor(release, f.Package)` in the withdrawal branch — not per asset.
+
+**119. Input selection that stayed "first in the batch" after the decision gained the power to close.**
+`credentialedInventory` returns the first `package` observation in the host group, and the group is
+batch order. That was survivable when the read could only raise; once the same payload decides what
+to retire, the oldest read in the window overrules the newest. Measured: two package observations
+for one address in one sweep — a no-uname read at t0 and a running-vulnerable-ABI read at t0+1m —
+produced no finding at all, because the older one won.
+**How to apply:** any "pick the observation" helper feeding a close-out path must pick by
+`ObservedAt` max, not by iteration order. Seed two observations in one sweep to prove which wins.
+**Still open (re-measured 2026-09-15):** `ListUnresolved` is `ORDER BY observed_at` and
+`groupByAddress` keeps batch order, so the OLDEST pending read wins regardless of insertion order
+(proved both orders: older "running the fix" beat newer "reboot pending", 0 findings either way).
+Window is 90 days, batch 500 per tenant per sweep, so any backlog — a Core restart, a re-dispatch,
+two jobs 30 s apart — hands the decision to the stalest read.
+
+**120. The close is recorded and the reopen is not.** `Findings.Upsert` returns `reopened` precisely
+so the caller can write the `remediated -> open` history row; `evaluateCredentialed` discards it
+(`if _, _, err := ...Upsert(...)`). That was inert while nothing closed credentialed findings. With
+ADR-099's close-out it means `finding_history` shows `open -> remediated` and nothing after, while
+the finding is open again — measured end to end (close by a false verdict, reopen by an honest read,
+one history row).
+**How to apply:** a lifecycle change that adds a close must add the matching reopen transition in
+the same change. Assert on `finding_history`, not on `findings.status`.
+**Still open (re-measured 2026-09-15):** close by an honest read, reopen by the next honest read —
+`findings.status = open`, `finding_history` = one row, `open -> remediated`, nothing after. The
+store already reads `priorStatus` inside `Upsert`; returning it (not just the bool) is what lets
+the caller write a truthful `remediated -> open`.
+
+**121. A bounded-grammar refusal that echoes the unbounded hostile value it just refused.**
+`ParseUname` refuses anything outside `[A-Za-z0-9._+~-]{1,64}` and formats the rejected value with
+`%q` — so 8 MiB of target-chosen bytes (the `maxStdout` cap) becomes an 8 MiB error string that the
+engine prints to stderr and the runtime logs in 4 KiB debug chunks. Its sibling `checkReleaseToken`,
+written for the same threat under ADR-095, names the field and never the value: 94 bytes regardless.
+**How to apply:** in a refusal message for a value that failed a LENGTH bound, the value is the one
+thing that must not be interpolated. Grep new `fmt.Errorf` in parsers for `%q` on the input.
+**Fixed at the site named, still open at its two siblings (measured):** `ParseUname` now truncates
+to `MaxReleaseTokenLen` (163-byte error for an 8 MiB input) — but `ParseDpkgQuery` and
+`ParseRpmQa`, twenty lines above in the same file and touched by the same commit, still `%q` the
+whole offending line: 8 388 660 and 8 388 653 bytes of target-chosen output in one error. Same
+class, same file, same threat; fixing only the line the review named is how a class survives.

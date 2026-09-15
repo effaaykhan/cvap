@@ -1,6 +1,9 @@
 package credscan
 
-import "github.com/effaaykhan/cvap/internal/version"
+import (
+	"github.com/effaaykhan/cvap/internal/domain"
+	"github.com/effaaykhan/cvap/internal/version"
+)
 
 // The credentialed ground truth: the advisory finding set computed from the EXACT
 // installed inventory and the EXACT release, which is what §6.2 measures the
@@ -52,10 +55,25 @@ type TruthResult struct {
 // the measurement states what it could not judge rather than under-report in
 // silence — a corrupted ground truth would make the FP/FN number a lie, which is the
 // one thing this instrument must not produce.
-func CredentialedTruth(pkgs []Package, release string, fixes FixLookup, vulns VulnLookup) (TruthResult, error) {
+//
+// kernelRelease is `uname -r`. A kernel package at any other version is installed
+// and not running — inventory, not a finding — and is skipped with its reason;
+// the correlator applies the same domain.ClassifyKernelPackage, so the truth and
+// the fleet path agree by construction (B36, ADR-099).
+func CredentialedTruth(pkgs []Package, release, kernelRelease string, fixes FixLookup, vulns VulnLookup) (TruthResult, error) {
 	seen := map[FindingKey]bool{}
 	var res TruthResult
 	for _, p := range pkgs {
+		switch domain.ClassifyKernelPackage(kernelRelease, p.Source, p.Binary, p.Version) {
+		case domain.KernelInstalledNotRunning:
+			res.Skipped = append(res.Skipped,
+				"installed, not the running kernel ("+kernelRelease+"), "+p.Binary+" "+p.Version)
+			continue
+		case domain.KernelUnknown:
+			res.Skipped = append(res.Skipped,
+				"kernel package with no uname -r on the read, "+p.Binary+" "+p.Version)
+			continue
+		}
 		fs, err := fixes(release, p.Source)
 		if err != nil {
 			return TruthResult{}, err

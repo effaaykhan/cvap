@@ -47,7 +47,7 @@ func ParseDpkgQuery(out string) ([]Package, error) {
 		}
 		f := strings.Split(line, "\t")
 		if len(f) != 4 {
-			return nil, fmt.Errorf("dpkg-query line %d has %d fields, want 4: %q", i+1, len(f), line)
+			return nil, fmt.Errorf("dpkg-query line %d has %d fields, want 4: %q…", i+1, len(f), line[:min(len(line), MaxReleaseTokenLen)])
 		}
 		src := strings.TrimSpace(f[0])
 		bin := strings.TrimSpace(f[1])
@@ -60,6 +60,9 @@ func ParseDpkgQuery(out string) ([]Package, error) {
 			Source: src, Binary: bin,
 			Version: strings.TrimSpace(f[2]), Arch: strings.TrimSpace(f[3]),
 		})
+		if len(pkgs) > MaxPackages {
+			return nil, fmt.Errorf("dpkg-query reported more than %d packages; not an inventory this read accepts", MaxPackages)
+		}
 	}
 	return pkgs, nil
 }
@@ -83,13 +86,16 @@ func ParseRpmQa(out string) ([]Package, error) {
 		}
 		f := strings.Split(line, "\t")
 		if len(f) != 3 {
-			return nil, fmt.Errorf("rpm -qa line %d has %d fields, want 3: %q", i+1, len(f), line)
+			return nil, fmt.Errorf("rpm -qa line %d has %d fields, want 3: %q…", i+1, len(f), line[:min(len(line), MaxReleaseTokenLen)])
 		}
 		name := strings.TrimSpace(f[0])
 		pkgs = append(pkgs, Package{
 			Source: name, Binary: name,
 			Version: strings.TrimSpace(f[1]), Arch: strings.TrimSpace(f[2]),
 		})
+		if len(pkgs) > MaxPackages {
+			return nil, fmt.Errorf("rpm -qa reported more than %d packages; not an inventory this read accepts", MaxPackages)
+		}
 	}
 	return pkgs, nil
 }
@@ -186,3 +192,30 @@ func checkReleaseToken(name, v string) error {
 	}
 	return fmt.Errorf("os-release %s is not a short lowercase token ([a-z0-9._-], at most %d bytes); not attributable", name, MaxReleaseTokenLen)
 }
+
+// ParseUname parses `uname -r`: exactly one line, and a token inside
+// domain.KernelReleaseValid's grammar. Anything else refuses the read — the
+// value decides which installed kernel version is matched (ADR-099), and a host
+// that answers with a paragraph is not a host whose kernel this can name.
+func ParseUname(out string) (string, error) {
+	v := strings.TrimSpace(out)
+	if strings.ContainsAny(v, "\r\n") {
+		return "", fmt.Errorf("uname -r returned more than one line; not attributable")
+	}
+	if !domain.KernelReleaseValid(v) {
+		// The value is target-controlled and up to the read cap long; the
+		// error carries at most a token's worth of it, as checkReleaseToken
+		// carries none.
+		return "", fmt.Errorf("uname -r %q… is not a kernel release token ([A-Za-z0-9._+~-], at most %d bytes); not attributable",
+			v[:min(len(v), MaxReleaseTokenLen)], MaxReleaseTokenLen)
+	}
+	return v, nil
+}
+
+// MaxPackages bounds an inventory read. A real host carries a few thousand
+// packages (1 304 on the lab's Debian, ~3 000 on a desktop); the read is capped
+// at 8 MiB of stdout, and a hostile host that fills it would emit a `package`
+// observation past the wire's 4 MiB message limit — refused there, but only
+// after the scan point buffered it. Bounding the count here refuses it at the
+// read, with the number in the error.
+const MaxPackages = 50000

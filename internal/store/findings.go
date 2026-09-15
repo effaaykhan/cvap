@@ -321,14 +321,20 @@ func (Findings) Supersede(ctx context.Context, c *Conn, findingID uuid.UUID, new
 
 // MarkRemediated moves a finding to remediated. Used by the lifecycle when the
 // endpoint was re-observed and the rule did not fire — the issue is gone, and
-// that is different from the endpoint simply not being scanned.
-func (Findings) MarkRemediated(ctx context.Context, c *Conn, findingID uuid.UUID, at time.Time) error {
+// that is different from the endpoint simply not being scanned. Returns whether
+// it closed a row, so the caller writes a transition only for a change that
+// happened (the same shape as Supersede; a finding_history row per sweep for an
+// already-closed finding is the log-per-scan the table's invariant forbids).
+func (Findings) MarkRemediated(ctx context.Context, c *Conn, findingID uuid.UUID, at time.Time) (bool, error) {
 	const q = `
 		UPDATE findings
 		   SET status = 'remediated', resolved_at = $3, last_seen = $3
 		 WHERE tenant_id = $1 AND finding_id = $2 AND status IN ('open', 'confirmed')`
-	_, err := c.Exec(ctx, q, c.Tenant().UUID(), findingID, at)
-	return mapError(err)
+	tag, err := c.Exec(ctx, q, c.Tenant().UUID(), findingID, at)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // ============================================================================

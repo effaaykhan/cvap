@@ -12,9 +12,10 @@
 // data: targets arrive resolved and pre-authorised, and it verifies the host key
 // against the known-hosts the runtime supplies (no in-engine TOFU).
 //
-// It reads inventory only — two read-only commands (dpkg-query / rpm -qa, and
-// /etc/os-release) via internal/credscan — no write to the target, no exploit
-// (non-negotiable #9). Emits observations only, never assets or findings.
+// It reads inventory only — three read-only commands (dpkg-query / rpm -qa,
+// /etc/os-release, and uname -r for the RUNNING kernel, ADR-099) via
+// internal/credscan — no write to the target, no exploit (non-negotiable #9).
+// Emits observations only, never assets or findings.
 package credhost
 
 import (
@@ -72,16 +73,24 @@ type Emit func(Observation) error
 // packagePayload is the wire shape correlate.packagePayload reads — exact release
 // (os-release) plus the exact installed inventory. The field tags MUST match.
 type packagePayload struct {
-	Address       string             `json:"address"`
-	Release       string             `json:"release"`
-	ReleaseSource string             `json:"release_source"`
-	Family        string             `json:"family,omitempty"` // os-release ID: ground-truth family (ADR-089)
+	Address       string `json:"address"`
+	Release       string `json:"release"`
+	ReleaseSource string `json:"release_source"`
+	Family        string `json:"family,omitempty"` // os-release ID: ground-truth family (ADR-089)
+	// KernelRelease is `uname -r`, the kernel that is running. The inventory
+	// carries every installed kernel version; only this says which one executes
+	// (B36, ADR-099). Core decides what that means — the engine reports it.
+	KernelRelease string             `json:"kernel_release,omitempty"`
 	Installed     []installedPackage `json:"installed,omitempty"`
 }
 
 type installedPackage struct {
-	Name    string `json:"name"`
+	Name    string `json:"name"` // the SOURCE package: the advisory keyspace's key
 	Version string `json:"version"`
+	// Binary is the installed package's own name. A Debian-family kernel binary
+	// carries its ABI here (linux-image-7.0.0-31-generic), which is the only
+	// place the inventory says which kernel version a row belongs to.
+	Binary string `json:"binary,omitempty"`
 }
 
 // Run authenticates to each target over the runtime's signing agent and emits one
@@ -136,10 +145,11 @@ func Run(ctx context.Context, cfg Config, agentConn net.Conn, emit Emit) error {
 			Release:       read.Release.ReleaseKey(),
 			ReleaseSource: "os-release",
 			Family:        read.Release.ID, // ground-truth distro family, read on the host (ADR-089)
+			KernelRelease: read.KernelRelease,
 			Installed:     make([]installedPackage, len(read.Packages)),
 		}
 		for i, p := range read.Packages {
-			payload.Installed[i] = installedPackage{Name: p.Source, Version: p.Version}
+			payload.Installed[i] = installedPackage{Name: p.Source, Version: p.Version, Binary: p.Binary}
 		}
 		blob, err := json.Marshal(payload)
 		if err != nil {
