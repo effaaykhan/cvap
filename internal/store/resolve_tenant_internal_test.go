@@ -52,6 +52,12 @@ func TestResolveTenant(t *testing.T) {
 	okFP := "resolve-ok-" + uuid.NewString()
 	revokedFP := "resolve-revoked-" + uuid.NewString()
 
+	t.Cleanup(func() {
+		_ = db.Write(context.Background(), tenant, func(ctx context.Context, c *Conn) error {
+			_, err := c.Exec(ctx, `DELETE FROM tenants WHERE tenant_id = $1`, tenant.UUID())
+			return err
+		})
+	})
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *Conn) error {
 		if _, err := (Tenants{}).Create(ctx, c, "resolve-"+uuid.NewString()[:8],
 			"res"+strings.ReplaceAll(uuid.NewString(), "-", "")[:20]+".test", DeploymentOnPrem); err != nil {

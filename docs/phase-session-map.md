@@ -1208,6 +1208,34 @@ of §5.7, a correct model undone by the query that reads it.)
 
 ---
 
+### 5.21 A hypothesis that hardened into a fact by restatement — the suspect in the backlog entry
+
+**What happened (S42→S43, B47, ADR-098).** The load gate's first CI failure was filed with a suspect
+attached: "the per-row `count(DISTINCT zone_id)` subquery in the finding list, whose cost scales with
+exposure depth" — the test's own comment said so, ADR-058 had worried about it, and the S37 fix had
+described the remedy as an InitPlan. The entry was carried for several sessions and read as a finding.
+Measured, the subquery ran fifty times in every plan mode; the cost was the plan's *estimate*, which
+tripped JIT under one plan and a one-row misestimate under the other; and the InitPlan the S37 commit
+named exists in neither. A fix built on the entry would have rewritten something that was not slow and
+left the 1.3 s in place.
+
+**Why it is its own pattern — distinct from the entries about tests.** Nothing here was a test that
+proved nothing; it was prose. A suspect written into a backlog item is a hypothesis, and each time it is
+restated — in the test comment, the ADR, the commit message, the next backlog entry — it accretes the
+register of a measurement without anyone having taken one. §5.9 is a *gap* disclosed until it seems
+handled; this is a *diagnosis* repeated until it seems established. This project files many backlog items
+with suspects attached, which is right (a suspect is where to look first), and dangerous when the suspect
+outlives the session that guessed it.
+
+**How to apply.** A backlog suspect is labelled as one — "suspect, unmeasured" — and stays labelled until
+an `EXPLAIN`, a profile, a probe or a bisect is cited beside it; a fix that starts from a suspect measures
+it first and records the measurement whether or not it confirms (ADR-098's table). When a comment names a
+mechanism inside a third party — a planner node, a transport's buffer — it cites the measurement or it is
+a hypothesis (§5.17). Third-party mechanisms are where this happens most, because nobody can grep them.
+([[measure-dont-read]]; [[explain-shows-one-of-two-plans]].)
+
+---
+
 ## 6. Standing requirement (from S23 onward)
 
 Every session that lands a feature reports whether it needs a dashboard surface,

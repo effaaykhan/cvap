@@ -10,6 +10,7 @@ import (
 
 	"github.com/effaaykhan/cvap/internal/control/credential"
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/store/storetest"
 )
 
 // mutate:subject cmd/cvap-cli/bootstrap.go
@@ -61,6 +62,7 @@ func TestBootstrapSelfVerify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	storetest.CleanupTenant(t, db, tenant)
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 		if _, err := (store.Tenants{}).Create(ctx, c, "sv", domain, store.DeploymentOnPrem); err != nil {
 			return err

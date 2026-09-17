@@ -27,6 +27,7 @@ import (
 	"github.com/effaaykhan/cvap/internal/control/ca"
 	"github.com/effaaykhan/cvap/internal/control/enrollment"
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/store/storetest"
 )
 
 func testDB(t *testing.T) *store.DB {
@@ -112,6 +113,7 @@ func tenantWithZone(t *testing.T, db *store.DB) (store.TenantID, uuid.UUID) {
 		t.Fatal(err)
 	}
 	var zoneID uuid.UUID
+	storetest.CleanupTenant(t, db, tenant)
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 		if _, err := (store.Tenants{}).Create(ctx, c, "enr-"+uuid.NewString()[:8],
 			"enr"+strings.ReplaceAll(uuid.NewString(), "-", "")[:20]+".test", store.DeploymentOnPrem); err != nil {

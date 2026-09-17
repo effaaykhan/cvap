@@ -18,6 +18,7 @@ import (
 	"github.com/effaaykhan/cvap/internal/control/api"
 	"github.com/effaaykhan/cvap/internal/control/enrollment"
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/store/storetest"
 )
 
 func testDB(t *testing.T) *store.DB {
@@ -72,6 +73,7 @@ func newFixture(t *testing.T, permissions string) *fixture {
 
 	f := &fixture{db: db, tenant: tenant, domain: domain, email: "op@" + domain, password: testPassword}
 
+	storetest.CleanupTenant(t, db, tenant)
 	err = db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 		if _, err := (store.Tenants{}).Create(ctx, c, "api-"+domain, domain, store.DeploymentOnPrem); err != nil {
 			return err

@@ -22,6 +22,7 @@ import (
 
 	"github.com/effaaykhan/cvap/internal/correlate"
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/store/storetest"
 )
 
 func testDB(t *testing.T) *store.DB {
@@ -67,6 +68,7 @@ func newTenant(t *testing.T, db *store.DB) store.TenantID {
 	if err != nil {
 		t.Fatal(err)
 	}
+	storetest.CleanupTenant(t, db, tenant)
 	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
 		_, err := (store.Tenants{}).Create(ctx, c, "load",
 			"t"+strings.ReplaceAll(tenant.String(), "-", "")[:20]+".test", store.DeploymentSaaS)

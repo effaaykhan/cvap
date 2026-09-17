@@ -16,6 +16,7 @@ import (
 	"github.com/effaaykhan/cvap/internal/control/api"
 	"github.com/effaaykhan/cvap/internal/control/credential"
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/store/storetest"
 )
 
 const loadPassword = "correct horse battery staple"
@@ -65,6 +66,7 @@ func newLoadFix(t *testing.T, db *store.DB) *loadFix {
 	domain := "t" + strings.ReplaceAll(uuid.NewString(), "-", "")[:20] + ".test"
 	f := &loadFix{db: db, tenant: tenant, domain: domain, email: "op@" + domain}
 
+	storetest.CleanupTenant(t, db, tenant)
 	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
 		if _, err := (store.Tenants{}).Create(ctx, c, "load-"+domain, domain, store.DeploymentOnPrem); err != nil {
 			return err
@@ -113,10 +115,19 @@ func (f *loadFix) login(t *testing.T) []*http.Cookie {
 	return w.Result().Cookies()
 }
 
-// getMS runs one GET through the handler and returns its latency in ms.
-func (f *loadFix) getMS(t *testing.T, path string, cookies []*http.Cookie) float64 {
+// getMS runs one GET through the handler and returns its latency in ms. The
+// request carries a deadline of the measurement's budget: a single request
+// that hangs — measured on a fresh database, where the finding list ran for
+// ninety minutes on statistics autoanalyze had not refreshed after the seed —
+// would otherwise sit inside the per-request loop where the budget is never
+// checked, and eat the whole job's timeout (ADR-098's own failure shape one
+// level down). pgx cancels the query when the context ends, so the request
+// returns an error, the gate fails with a number, and the next gate runs.
+func (f *loadFix) getMS(t *testing.T, path string, cookies []*http.Cookie, deadline time.Duration) float64 {
 	t.Helper()
-	r := httptest.NewRequest(http.MethodGet, path, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	r := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
 	r.Host = f.domain
 	for _, c := range cookies {
 		r.AddCookie(c)
@@ -126,6 +137,9 @@ func (f *loadFix) getMS(t *testing.T, path string, cookies []*http.Cookie) float
 	f.srv.Handler().ServeHTTP(w, r)
 	d := time.Since(start)
 	if w.Code != http.StatusOK {
+		if ctx.Err() != nil {
+			t.Fatalf("GET %s: no answer inside the %s request deadline (%d %s) — one hung request is a failed gate, not a hung job", path, deadline, w.Code, w.Body.String())
+		}
 		t.Fatalf("GET %s: %d %s", path, w.Code, w.Body.String())
 	}
 	return float64(d.Microseconds()) / 1000
@@ -188,7 +202,8 @@ func p95(lat []float64) float64 {
 // its own budget.
 func (f *loadFix) p95ms(t *testing.T, path string, cookies []*http.Cookie, budget time.Duration) sample {
 	t.Helper()
-	return sampleP95(func() float64 { return f.getMS(t, path, cookies) }, budget)
+	// One request may take the whole budget and no more.
+	return sampleP95(func() float64 { return f.getMS(t, path, cookies, budget) }, budget)
 }
 
 // TestLoadSLOs seeds to capacity and measures each §5 SLO. The coarse ceiling is

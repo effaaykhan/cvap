@@ -27,6 +27,7 @@ import (
 	"github.com/effaaykhan/cvap/internal/control/ca"
 	"github.com/effaaykhan/cvap/internal/control/enrollment"
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/store/storetest"
 )
 
 const (
@@ -148,6 +149,7 @@ func (h *harness) seed() {
 	}
 	h.tenant = tenant
 
+	storetest.CleanupTenant(h.t, h.db, tenant)
 	if err := h.db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 		tid := c.Tenant().UUID()
 		if _, err := (store.Tenants{}).Create(ctx, c, "e2e-"+uuid.NewString()[:8],

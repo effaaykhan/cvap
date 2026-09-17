@@ -15,6 +15,7 @@ import (
 	"github.com/effaaykhan/cvap/internal/correlate"
 	"github.com/effaaykhan/cvap/internal/domain"
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/store/storetest"
 )
 
 // Week 5's deliverable, end to end against a real database.
@@ -66,6 +67,7 @@ func seed(t *testing.T, db *store.DB, label string) seeded {
 	if err != nil {
 		t.Fatalf("new tenant id: %v", err)
 	}
+	storetest.CleanupTenant(t, db, tenant)
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 		_, err := (store.Tenants{}).Create(ctx, c, label,
 			"t"+strings.ReplaceAll(tenant.String(), "-", "")[:20]+".test", store.DeploymentSaaS)

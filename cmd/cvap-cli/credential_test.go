@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/store/storetest"
 )
 
 // credential pin / unpin end to end against the database: the pin lands on the
@@ -28,6 +29,7 @@ func TestCredentialPinAndUnpinWriteTheProfileAndAudit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	storetest.CleanupTenant(t, db, tenant)
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 		if _, err := (store.Tenants{}).Create(ctx, c, "pin", "pin"+strings.ReplaceAll(uuid.NewString(), "-", "")[:18]+".test", store.DeploymentOnPrem); err != nil {
 			return err

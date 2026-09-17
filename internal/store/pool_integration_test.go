@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/store/storetest"
 )
 
 // Integration tests. They need a migrated database reachable at
@@ -42,6 +43,7 @@ func newTenant(t *testing.T, db *store.DB, name string) store.TenantID {
 	if err != nil {
 		t.Fatalf("new tenant id: %v", err)
 	}
+	storetest.CleanupTenant(t, db, id)
 	err = db.Write(context.Background(), id, func(ctx context.Context, c *store.Conn) error {
 		// The domain is derived from the ID rather than the name, because
 		// tenants.domain is globally unique and these tests reuse names.

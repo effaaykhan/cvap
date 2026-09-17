@@ -25,6 +25,7 @@ import (
 	"github.com/effaaykhan/cvap/internal/control/enrollment"
 	"github.com/effaaykhan/cvap/internal/dispatch"
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/store/storetest"
 )
 
 // fakeStream implements grpc.BidiStreamingServer[ScanPointMessage, CoreMessage].
@@ -226,6 +227,7 @@ func enrolledScanPoint(t *testing.T, db *store.DB) (store.TenantID, *x509.Certif
 		t.Fatal(err)
 	}
 	var zoneID uuid.UUID
+	storetest.CleanupTenant(t, db, tenant)
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 		if _, err := (store.Tenants{}).Create(ctx, c, "disp-"+uuid.NewString()[:8],
 			"disp"+strings.ReplaceAll(uuid.NewString(), "-", "")[:20]+".test", store.DeploymentOnPrem); err != nil {

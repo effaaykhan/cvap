@@ -10,6 +10,7 @@ import (
 
 	"github.com/effaaykhan/cvap/internal/control/credential"
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/store/storetest"
 )
 
 // mutate:subject cmd/cvap-cli/bootstrap.go
@@ -64,6 +65,7 @@ func TestTenantSetDomainChangesAndAudits(t *testing.T) {
 		t.Fatal(err)
 	}
 	d1 := "old" + strings.ReplaceAll(uuid.NewString(), "-", "")[:18] + ".test"
+	storetest.CleanupTenant(t, db, tenant)
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 		_, err := (store.Tenants{}).Create(ctx, c, "sd", d1, store.DeploymentOnPrem)
 		return err
@@ -120,6 +122,7 @@ func TestTenantSetPasswordResetsAndAudits(t *testing.T) {
 		t.Fatal(err)
 	}
 	var userID uuid.UUID
+	storetest.CleanupTenant(t, db, tenant)
 	if err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 		if _, err := (store.Tenants{}).Create(ctx, c, "pw", domain, store.DeploymentOnPrem); err != nil {
 			return err

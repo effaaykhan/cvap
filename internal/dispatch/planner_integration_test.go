@@ -11,6 +11,7 @@ import (
 
 	"github.com/effaaykhan/cvap/internal/dispatch"
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/store/storetest"
 )
 
 // planFixture is a tenant with a policy, so a scan can be created.
@@ -22,6 +23,7 @@ func planFixture(t *testing.T) (*store.DB, store.TenantID, uuid.UUID) {
 		t.Fatal(err)
 	}
 	var policyID uuid.UUID
+	storetest.CleanupTenant(t, db, tenant)
 	if err := db.Write(context.Background(), tenant, func(ctx context.Context, c *store.Conn) error {
 		if _, err := (store.Tenants{}).Create(ctx, c, "plan-"+uuid.NewString()[:8],
 			"plan"+strings.ReplaceAll(uuid.NewString(), "-", "")[:20]+".test", store.DeploymentOnPrem); err != nil {
