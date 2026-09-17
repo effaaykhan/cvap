@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, has, type IdentityKey } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { advisory, score, exactRead, provenanceAge, ago } from "../lib/console";
+import { advisory, score, exactRead, provenanceAge, ago, fmtTime } from "../lib/console";
 
 // AttributionSource mirrors the provenance rows the API embeds (ADR-061). The
 // API types it as opaque JSON, so it is narrowed here at the one place it is read.
@@ -60,6 +60,14 @@ export function AssetDetail() {
       <dl className="facts">
         <div className="kv"><dt>Environment</dt><dd>{a.environment || "—"}</dd></div>
         <div className="kv"><dt>OS attribution</dt><dd>{osAttribution(a.distro_family, a.distro_release ?? undefined, a.os_confidence ?? undefined)}</dd></div>
+        {a.kernel && (
+          <div className="kv"><dt>Running kernel</dt><dd>
+            <span className="data">{a.kernel.running_release || "not read"}</span>
+            {a.kernel.reboot_pending === true && <span className="chip chip-warn" style={{ marginLeft: 8 }}>reboot pending</span>}
+            {a.kernel.reboot_pending === false && <span className="chip chip-ok" style={{ marginLeft: 8 }}>current</span>}
+            {a.kernel.reboot_pending == null && <span className="chip chip-muted" style={{ marginLeft: 8 }}>unjudged</span>}
+          </dd></div>
+        )}
         <div className="kv"><dt>Criticality</dt><dd>{a.criticality}</dd></div>
         <div className="kv"><dt>Fragile</dt><dd>{a.fragile ? "yes" : "no"}</dd></div>
         <div className="kv"><dt>Open findings</dt><dd>{a.open_findings}</dd></div>
@@ -68,6 +76,7 @@ export function AssetDetail() {
         <div className="kv"><dt>Last seen</dt><dd>{fmt(a.last_seen)}</dd></div>
       </dl>
 
+      {(osExact || releaseExact) && <ClearPin assetID={a.id} />}
       {a.distro_family && osExact ? (
         <>
           <h2>How the OS was concluded</h2>
@@ -167,7 +176,26 @@ export function AssetDetail() {
           ))}</tbody></table>
       ) : <p className="muted">No current addresses.</p>}
 
+      {a.kernel && a.kernel.installed.length > 0 && (
+        <>
+          <h2>Installed kernels</h2>
+          <p className="note">
+            From the credentialed read on <span className="data">{fmtTime(a.kernel.read_at)}</span>. A kernel package is matched against advisories
+            only at the version that is running (ADR-099); the others are inventory. A newer version installed and not running is a reboot pending —
+            the fix is on disk and the vulnerable kernel still executes.
+          </p>
+          <table><thead><tr><th>Package</th><th>Version</th><th>State</th></tr></thead>
+            <tbody>{a.kernel.installed.map((k, i) => (
+              <tr key={i}><td className="data">{k.binary}</td><td className="data">{k.version}</td>
+                <td><span className={`chip ${k.state === "kernel-running" ? "chip-ok" : k.state === "kernel-unknown" ? "chip-muted" : "chip-muted"}`}>
+                  {k.state === "kernel-running" ? "running" : k.state === "kernel-installed-not-running" ? "installed, not running" : "unknown (no uname on the read)"}
+                </span></td></tr>
+            ))}</tbody></table>
+        </>
+      )}
       <IdentityKeys assetID={a.id} keys={a.identity_keys ?? []} total={a.identity_keys_total ?? 0} />
+
+      <Timeline assetID={a.id} />
 
       <h2>Services</h2>
       {a.services?.length ? (
@@ -386,5 +414,69 @@ function IdentityKeys({ assetID, keys, total }: { assetID: string; keys: Identit
         <p className="faint small">A rotated key waits for an operator with identity.resolve to confirm it; until then credentialed scans of this host refuse.</p>
       ))}
     </>
+  );
+}
+
+// Timeline: every audit event keyed to this asset, where the asset is (ADR-100):
+// contests, rotations, expiries, the operator's decisions and refusals, cleared
+// attributions. Newest first.
+function Timeline({ assetID }: { assetID: string }) {
+  const { data, isLoading } = useQuery({ queryKey: ["asset-events", assetID], queryFn: () => api.assetEvents(assetID) });
+  const events = data?.events ?? [];
+  return (
+    <>
+      <h2>Timeline</h2>
+      {isLoading ? <p className="muted">Loading…</p> : events.length === 0 ? (
+        <p className="muted">Nothing recorded against this system yet. Contests, rotations, decisions and refusals land here.</p>
+      ) : (
+        <table><thead><tr><th>When</th><th>What</th><th>Who</th><th>Detail</th></tr></thead>
+          <tbody>{events.map((e) => (
+            <tr key={e.id}>
+              <td className="data">{fmtTime(e.occurred_at)}</td>
+              <td className="data">{e.action}</td>
+              <td className="data">{e.actor_type === "user" ? (e.actor_id ? e.actor_id.slice(0, 8) : "operator (cli)") : e.actor_type}</td>
+              <td className="small">{summarise(e.detail)}</td>
+            </tr>
+          ))}</tbody></table>
+      )}
+    </>
+  );
+}
+
+// summarise renders an event's detail as "key: value" pairs, skipping the notes
+// the API writes for auditors reading the raw log.
+function summarise(detail?: Record<string, unknown>): string {
+  if (!detail) return "";
+  return Object.entries(detail)
+    .filter(([k, v]) => k !== "note" && v !== null && v !== undefined && v !== "")
+    .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : typeof v === "object" ? JSON.stringify(v) : String(v)}`)
+    .join(" · ");
+}
+
+// ClearPin lifts an exact attribution's rank (ADR-095, ADR-100): the values stay
+// until the next sweep re-derives them. For a host that lied within the token
+// grammar; an operator with identity.resolve, with a reason.
+function ClearPin({ assetID }: { assetID: string }) {
+  const { session } = useAuth();
+  const qc = useQueryClient();
+  const [reason, setReason] = useState("");
+  const [outcome, setOutcome] = useState("");
+  const clear = useMutation({
+    mutationFn: () => api.clearAttribution(assetID, reason),
+    onSuccess: (res) => {
+      setOutcome(`Cleared: ${res.cleared.join(", ")}. The next sweep re-derives.`);
+      void qc.invalidateQueries({ queryKey: ["asset", assetID] });
+      void qc.invalidateQueries({ queryKey: ["asset-events", assetID] });
+    },
+    onError: (e: Error) => setOutcome(e.message),
+  });
+  if (!has(session, "identity.resolve")) return null;
+  return (
+    <div className="row small" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+      <span className="faint">This attribution was read on the host and outranks inference. If the host lied:</span>
+      <input placeholder="Why (recorded with your name)" value={reason} onChange={(e) => setReason(e.target.value)} style={{ minWidth: 260 }} />
+      <button className="btn small-btn" disabled={clear.isPending || !reason} onClick={() => clear.mutate()}>Clear the pinned attribution</button>
+      {outcome && <span>{outcome}</span>}
+    </div>
   );
 }

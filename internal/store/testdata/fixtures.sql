@@ -313,6 +313,11 @@ BEGIN
     -- needs a row or case 1's sweep proves nothing for it — which is how the
     -- sweep found them missing rather than a reviewer having to.
 
+    -- Identity tuning (migration 0047, ADR-100): one row per tenant with a
+    -- non-default window, so the RLS sweep has a row to prove isolation on.
+    INSERT INTO identity_settings (tenant_id, sighting_window)
+        VALUES (p_tenant, interval '14 days');
+
     INSERT INTO tenant_auth_config (tenant_id, method, oidc_issuer, oidc_client_id)
         VALUES (p_tenant, 'oidc', 'https://idp.invalid/', 'fixture-client-' || p_tag);
 

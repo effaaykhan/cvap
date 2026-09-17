@@ -302,7 +302,62 @@ func (s *Server) routes() {
 		Handler:  s.listAssets,
 	})
 
+	// --------------------------------------------------- credential profiles
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/credential-profiles",
+		Summary: "List credential profiles",
+		Description: "The non-secret face of each profile: name, type, user, and whether an operator pin is set. " +
+			"Never the secret or its pointer.",
+		Access: AccessPermission, Permission: PermPolicyRead,
+		Response: CredentialProfileListResponse{},
+		Handler:  s.listCredentialProfiles,
+	})
+
+	r.Register(Route{
+		Method: http.MethodPut, Path: "/v1/credential-profiles/{profile_id}/known-hosts",
+		Summary: "Pin host keys on a credential profile",
+		Description: "Operator-pinned known_hosts lines outrank whatever discovery observed for the hosts they name " +
+			"(ADR-091 §4) — the one trust root chosen by a person. Validated as plain known_hosts lines; markers and " +
+			"hashed hosts are refused. Recorded with the operator and the pinned fingerprints. A trust decision, not a " +
+			"verification (B44).",
+		Access: AccessPermission, Permission: PermCredentialPin,
+		Request: PinKnownHostsRequest{}, Response: PinKnownHostsResponse{},
+		Handler: s.pinKnownHosts,
+	})
+
+	r.Register(Route{
+		Method: http.MethodDelete, Path: "/v1/credential-profiles/{profile_id}/known-hosts",
+		Summary: "Clear the pin on a credential profile",
+		Description: "The fleet path uses the observed key again for this profile's targets (two sightings at the " +
+			"address, ADR-094). Recorded with the operator.",
+		Access: AccessPermission, Permission: PermCredentialPin,
+		Request: ClearPinRequest{}, Response: CredentialProfileResponse{},
+		Handler: s.clearKnownHosts,
+	})
+
 	// ------------------------------------------------------------ identity
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/settings/identity",
+		Summary: "The identity sighting window",
+		Description: "How long a sighting counts toward the observed trust root and an address is evidence of the same " +
+			"host (ADR-094/096; ADR-100). Shown beside its bounds and the tenant's measured scan cadence.",
+		Access: AccessPermission, Permission: PermAssetRead,
+		Response: IdentitySettingsResponse{},
+		Handler:  s.getIdentitySettings,
+	})
+
+	r.Register(Route{
+		Method: http.MethodPut, Path: "/v1/settings/identity",
+		Summary: "Set the identity sighting window",
+		Description: "Bounded, and refused below twice the measured scan cadence: two scans must land inside one window " +
+			"for an observed key to become trust material, so a shorter window turns the credentialed path off quietly. " +
+			"Recorded with the operator.",
+		Access: AccessPermission, Permission: PermPolicyWrite,
+		Request: IdentitySettingsRequest{}, Response: IdentitySettingsResponse{},
+		Handler: s.putIdentitySettings,
+	})
 
 	r.Register(Route{
 		Method: http.MethodGet, Path: "/v1/identity/queue",
@@ -339,6 +394,28 @@ func (s *Server) routes() {
 		Access: AccessPermission, Permission: PermIdentityResolve,
 		Request: ConfirmIdentityRequest{}, Response: ConfirmIdentityResponse{},
 		Handler: s.confirmIdentity,
+	})
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/assets/{asset_id}/events",
+		Summary: "The asset's timeline",
+		Description: "Every audit event keyed to the asset, newest first: identity contests, rotations, expiries, " +
+			"the operator's decisions and refusals, cleared attributions. What happened to this host, where the host is (ADR-100).",
+		Access: AccessPermission, Permission: PermAssetRead,
+		Response: AssetEventsResponse{},
+		Handler:  s.listAssetEvents,
+	})
+
+	r.Register(Route{
+		Method: http.MethodPost, Path: "/v1/assets/{asset_id}/attribution/clear",
+		Summary: "Clear a pinned exact attribution",
+		Description: "An attribution read on the host (/etc/os-release, the package manager) outranks every inferred " +
+			"sweep for ever (ADR-095). When a host lied within the token grammar, this is the operator's way to lift that " +
+			"rank: the values stay, their provenance is re-stamped operator_cleared, and the next sweep re-derives. " +
+			"Recorded with the operator.",
+		Access: AccessPermission, Permission: PermIdentityResolve,
+		Request: ClearAttributionRequest{}, Response: ClearAttributionResponse{},
+		Handler: s.clearAttribution,
 	})
 
 	r.Register(Route{

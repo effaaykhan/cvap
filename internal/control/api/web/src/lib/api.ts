@@ -105,7 +105,27 @@ export const api = {
   getFinding: (id: string) => request<Finding>("GET", `/v1/findings/${id}`),
   exposure: () => request<ExposureByZone>("GET", "/v1/exposure"),
   knowledgeFreshness: () => request<KnowledgeFreshness>("GET", "/v1/knowledge/freshness"),
-  identityQueue: (address = "") => request<IdentityQueue>("GET", `/v1/identity/queue${address ? `?address=${encodeURIComponent(address)}` : ""}`),
+  identityQueue: (address = "", cursor?: { before: string; before_address: string }, limit = 25) => {
+    const q = new URLSearchParams();
+    if (address) q.set("address", address);
+    q.set("limit", String(limit));
+    if (cursor) {
+      q.set("before", cursor.before);
+      q.set("before_address", cursor.before_address);
+    }
+    return request<IdentityQueue>("GET", `/v1/identity/queue?${q.toString()}`);
+  },
+  assetEvents: (assetID: string) => request<Schemas["AssetEventsResponse"]>("GET", `/v1/assets/${assetID}/events`),
+  clearAttribution: (assetID: string, reason: string) =>
+    request<Schemas["ClearAttributionResponse"]>("POST", `/v1/assets/${assetID}/attribution/clear`, { reason }),
+  identitySettings: () => request<Schemas["IdentitySettingsResponse"]>("GET", "/v1/settings/identity"),
+  setIdentityWindow: (sighting_window_hours: number, reason: string) =>
+    request<Schemas["IdentitySettingsResponse"]>("PUT", "/v1/settings/identity", { sighting_window_hours, reason }),
+  listCredentialProfiles: () => request<Schemas["CredentialProfileListResponse"]>("GET", "/v1/credential-profiles"),
+  pinKnownHosts: (profileID: string, known_hosts: string, reason: string) =>
+    request<Schemas["PinKnownHostsResponse"]>("PUT", `/v1/credential-profiles/${profileID}/known-hosts`, { known_hosts, reason }),
+  clearPin: (profileID: string, reason: string) =>
+    request<Schemas["CredentialProfileResponse"]>("DELETE", `/v1/credential-profiles/${profileID}/known-hosts`, { reason }),
   resolveIdentity: (body: Schemas["ResolveIdentityRequest"]) =>
     request<ResolveIdentityResult>("POST", "/v1/identity/queue/resolve", body),
   confirmIdentity: (assetID: string, keys: string[], reason: string) =>

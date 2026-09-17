@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { api, has, type IdentityQueueGroup } from "../lib/api";
+import { api, has, type IdentityQueue, type IdentityQueueGroup } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { ago, fmtTime } from "../lib/console";
 
@@ -19,7 +19,15 @@ export function Identity() {
   const canResolve = has(session, "identity.resolve");
   const qc = useQueryClient();
   const [only, setOnly] = useState("");
-  const { data, isLoading, error } = useQuery({ queryKey: ["identity-queue", only], queryFn: () => api.identityQueue(only) });
+  // Keyset paging (ADR-100): a page at every cap measured 9.6 MB for one
+  // screen, so the listing comes 25 addresses at a time and "show more" walks
+  // the cursor. Earlier pages are kept; a decision invalidates them all.
+  const [pages, setPages] = useState<IdentityQueue[]>([]);
+  const cursor = pages.length ? pages[pages.length - 1] : undefined;
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["identity-queue", only, pages.length],
+    queryFn: () => api.identityQueue(only, cursor?.next_before && cursor?.next_before_address ? { before: cursor.next_before, before_address: cursor.next_before_address } : undefined),
+  });
   const [reason, setReason] = useState<Record<string, string>>({});
   const [outcome, setOutcome] = useState<Record<string, string>>({});
 
@@ -31,15 +39,18 @@ export function Identity() {
       const head = v.decision === "discard" ? "Discarded" : `${v.decision === "same_host" ? "Merged into" : "New asset"} ${res.asset_id.slice(0, 8)}`;
       const recorded = res.keys_recorded.length ? part("recorded", res.keys_recorded) : v.decision === "discard" ? "" : " · recorded nothing";
       setOutcome((o) => ({ ...o, [v.address]: `${head} · ${res.items_closed} item${res.items_closed === 1 ? "" : "s"} closed${recorded}${part("retired", res.keys_retired)}${part("discarded", res.keys_discarded)}${part("left on another asset", res.keys_held_elsewhere)}` }));
+      setPages([]);
       void qc.invalidateQueries({ queryKey: ["identity-queue"] });
       void qc.invalidateQueries({ queryKey: ["health"] });
     },
     onError: (e: Error, v) => setOutcome((o) => ({ ...o, [v.address]: e.message })),
   });
 
-  if (isLoading) return <p className="muted">Loading the queue…</p>;
+  if (isLoading && pages.length === 0) return <p className="muted">Loading the queue…</p>;
   if (error) return <p className="error">{(error as Error).message}</p>;
-  const groups = data?.groups ?? [];
+  const groups = [...pages.flatMap((p) => p.groups), ...(data?.groups ?? [])];
+  const total = data?.addresses_total ?? cursor?.addresses_total ?? 0;
+  const more = !!(data?.next_before && data?.next_before_address);
 
   return (
     <section className="detail">
@@ -50,8 +61,8 @@ export function Identity() {
         SSH host key is an echo until the probe checks possession (B44).
       </p>
       <p className="row small" style={{ gap: 8, alignItems: "center" }}>
-        <span>{data?.addresses_total ?? 0} contested address{(data?.addresses_total ?? 0) === 1 ? "" : "es"}{(data?.addresses_total ?? 0) > groups.length ? ` · showing the newest ${groups.length}` : ""}</span>
-        <input placeholder="Find an address" value={only} onChange={(e) => setOnly(e.target.value.trim())} style={{ minWidth: 200 }} />
+        <span>{total} contested address{total === 1 ? "" : "es"}{total > groups.length ? ` · showing the newest ${groups.length}` : ""}</span>
+        <input placeholder="Find an address" value={only} onChange={(e) => { setPages([]); setOnly(e.target.value.trim()); }} style={{ minWidth: 200 }} />
       </p>
       {groups.length === 0 ? (
         <p className="muted">{only ? "Nothing is contested at that address." : "Nothing is contested."}</p>
@@ -62,6 +73,11 @@ export function Identity() {
             outcome={outcome[g.address]} busy={resolve.isPending}
             onResolve={(decision, asset_id, key_choices) => resolve.mutate({ address: g.address, decision, asset_id, key_choices, reason: reason[g.address] ?? "", seen_through: g.last_seen })} />
         ))
+      )}
+      {more && data && (
+        <p><button className="btn small-btn" disabled={isLoading} onClick={() => setPages((p) => [...p, data])}>
+          Show more ({total - groups.length} older address{total - groups.length === 1 ? "" : "es"})
+        </button></p>
       )}
     </section>
   );

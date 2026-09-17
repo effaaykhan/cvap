@@ -245,6 +245,12 @@ func (s *Service) trustMaterial(ctx context.Context, c *store.Conn, profile *sto
 		return hostkeytrust.SourceOperator, b.String(), nil
 	}
 	var b strings.Builder
+	// The tenant's sighting window, once per job: every task's trust root is
+	// judged against the same value (ADR-100).
+	win, err := (store.IdentitySettings{}).Window(ctx, c)
+	if err != nil {
+		return "", "", err
+	}
 	for _, t := range tasks {
 		addr, err := netip.ParseAddr(t.TaskTarget)
 		if err != nil {
@@ -257,7 +263,7 @@ func (s *Service) trustMaterial(ctx context.Context, c *store.Conn, profile *sto
 		// Config.Port is never set), so this constant IS the engine's port;
 		// the day an assignment carries a port, this must follow it or the
 		// verification fails closed against the wrong service's key (ADR-094).
-		fps, err := (store.AssetIdentityKeys{}).SSHHostKeyFingerprintsAt(ctx, c, addr.String(), sshalgo.DefaultPort, store.SightingWindow)
+		fps, err := (store.AssetIdentityKeys{}).SSHHostKeyFingerprintsAt(ctx, c, addr.String(), sshalgo.DefaultPort, win)
 		if err != nil {
 			return "", "", err
 		}

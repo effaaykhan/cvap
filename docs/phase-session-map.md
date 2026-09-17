@@ -23,7 +23,7 @@ agent memory until now.
 | Phase 2 — discovery, fingerprint, resolution, findings, UI, hardening | Weeks 4–8 | 12–23 | complete (closed S23) |
 | Phase 2 validation — real-network accuracy | S24 | 24 | done; P3.3 entry condition measured & **failed** (ADR-060), then met by S26–S31 |
 | Phase 3 — knowledge pipeline / CVE matching | §7 path-to-sellable | 25–37 | **COMPLETE (close-out S37).** P3.1 comparators (S27) ✅ · P3.2 advisory ingestion (S28) ✅ · P3.3 release resolution (S31) ✅ · B29 coverage window (S33) ✅ · P3.4 KEV/EPSS model + ingestion (S34) ✅ · advisory→finding path (S34b, ADR-070) ✅ · confidence by weakest link (S34c/d, ADR-072/073) ✅ · P3.4 ordering acceptance on real findings (S36) ✅ · #6 exposure resolved (S37, ADR-074) ✅ — the chain closes, produces real CVE-linked findings, and orders them by priority (see "What Phase 3 changed", §2). Ceiling is the banner-inferred package identity. Next: enterprise console (#12, designed S37); the Phase 4 credentialed-vs-widen decision (S38, `docs/phase-4-sequencing-decision.md`) is the operator's |
-| Phase 4 — credentialed assessment | §7 path-to-sellable | narrow slice next (decided S38, ADR-075) | **Decided: a NARROW credentialed slice next** — Linux/SSH, package inventory, one VM — as a *validation instrument* (generates the real-host ground truth the §6.2 accuracy gates need; closes B26 if Rocky/Alma; removes B30 for credentialed hosts). Operator overruled the memo's console/B28-first ordering (ADR-075). Full Phase 4 (Windows/WinRM/domain) stays held; reach reasoning preserved. **S39–S42:** the slice landed and ran on the production route (ADR-076–094): grant over the wire, observed trust, exact inventory, supersession — `.146`'s sixteen closed live. Headline as of S42: **credentialed FP 0% on the measured set, kernel class excluded and named** — 551 false kernel findings on a host at the fix, from the matcher not seeing which kernel runs (B36, ahead of any consumer of credentialed findings). **S43 (ADR-099):** B36 closed — `uname -r` read, kernel packages matched against the running kernel only, a credentialed finding the read no longer matches closes; the carve-out becomes "fleet re-measurement pending" until the owned range is authorised for a run. |
+| Phase 4 — credentialed assessment | §7 path-to-sellable | narrow slice next (decided S38, ADR-075) | **Decided: a NARROW credentialed slice next** — Linux/SSH, package inventory, one VM — as a *validation instrument* (generates the real-host ground truth the §6.2 accuracy gates need; closes B26 if Rocky/Alma; removes B30 for credentialed hosts). Operator overruled the memo's console/B28-first ordering (ADR-075). Full Phase 4 (Windows/WinRM/domain) stays held; reach reasoning preserved. **S39–S42:** the slice landed and ran on the production route (ADR-076–094): grant over the wire, observed trust, exact inventory, supersession — `.146`'s sixteen closed live. Headline as of S42: **credentialed FP 0% on the measured set, kernel class excluded and named** — 551 false kernel findings on a host at the fix, from the matcher not seeing which kernel runs (B36, ahead of any consumer of credentialed findings). **S43 (ADR-099):** B36 closed — `uname -r` read, kernel packages matched against the running kernel only, a credentialed finding the read no longer matches closes; the carve-out becomes "fleet re-measurement pending" until the owned range is authorised for a run. B39's second slice landed (ADR-100): queue paging, refused-verb audit, the sighting window as a cadence-checked tenant setting, the pin writer in API and CLI, the asset timeline, clearing a pinned attribution. |
 
 Weeks and sessions are not one-to-one. The eight-week plan assumed a team; this
 build is sequential under one operator with Claude Code, so a "week" of the plan
@@ -1179,6 +1179,32 @@ counting history rows (zero). The guard belongs at the unit the finding is keyed
 because `linux-libc-dev` shares it with the kernel rows), and a store write that may close nothing reports
 whether it did, so the transition is written only for a change. ([[rule-in-one-direction]];
 [[control-keyed-to-the-verdict]]; [[measure-dont-read]] found it twice.)
+
+---
+
+### 5.20 A keyset cursor that contradicts its own ORDER BY — and a test that seeds the case the system never produces
+
+**What happened (S43, ADR-100).** The identity queue gained keyset paging: `ORDER BY last_seen DESC, address`
+with a cursor predicate `(max(enqueued_at), address) < ($before, $address)`. A whole-tuple `<` means both
+columns descending; the listing's second column is ascending. On a tie in `last_seen` the predicate
+selects the addresses already shown and excludes the ones not yet shown — and ties are the *normal* case,
+because one sweep stamps every address it contests with the one `now` it took at the start. The
+ADR-compliance review measured it: five contested addresses, pages of two, page two empty, "show more"
+gone while the header still said five. The shipped paging test seeded three addresses at three *distinct*
+instants, so it passed and proved less than the ADR claimed.
+
+**Why it is its own pattern.** The tie is not an edge case the test forgot; it is the shape the writer
+guarantees, and the test author chose distinct keys because distinct keys make a paging test easy to
+reason about. A test that avoids the case the system produces by construction is [[test-that-proves-
+nothing]] with a plausible alibi: it exercises the code path and misses the data shape. The tell: a
+composite keyset cursor written as a tuple comparison against an ORDER BY whose columns do not all
+run the same way.
+
+**How to apply.** Write a composite cursor as the explicit disjunction (`a < $a OR (a = $a AND b > $b)`)
+and never as a tuple unless every column has the same direction; then walk the cursor in the test over
+rows that share the first key across a page boundary, asserting each row once and the walk ending. Ask
+of any keyset test: what does the writer make equal? Seed that. ([[measure-dont-read]]; the second face
+of §5.7, a correct model undone by the query that reads it.)
 
 ---
 

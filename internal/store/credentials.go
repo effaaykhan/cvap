@@ -66,6 +66,78 @@ func (CredentialProfiles) SSHForJob(ctx context.Context, c *Conn, jobID uuid.UUI
 	return &p, true, nil
 }
 
+// CredentialProfileSummary is a profile's non-secret face: what an operator
+// sees to choose one and to see whether it carries a pin (ADR-100). Never the
+// secret, never the pointer.
+type CredentialProfileSummary struct {
+	ID        uuid.UUID
+	Name      string
+	CredType  string
+	Username  string
+	PinLines  int // known_hosts lines pinned by an operator; 0 = the observed key is used
+	UpdatedAt time.Time
+}
+
+// List returns the tenant's credential profiles, by name.
+func (CredentialProfiles) List(ctx context.Context, c *Conn) ([]CredentialProfileSummary, error) {
+	const q = `
+		SELECT credential_profile_id, name, cred_type::text, coalesce(username, ''),
+		       coalesce(array_length(string_to_array(trim(both E'\n' from known_hosts), E'\n'), 1), 0),
+		       updated_at
+		  FROM credential_profiles
+		 WHERE tenant_id = $1
+		 ORDER BY name`
+	rows, err := c.Query(ctx, q, c.Tenant().UUID())
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	var out []CredentialProfileSummary
+	for rows.Next() {
+		var p CredentialProfileSummary
+		if err := rows.Scan(&p.ID, &p.Name, &p.CredType, &p.Username, &p.PinLines, &p.UpdatedAt); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, p)
+	}
+	return out, mapError(rows.Err())
+}
+
+// GetByName resolves a profile by its tenant-unique name.
+func (CredentialProfiles) GetByName(ctx context.Context, c *Conn, name string) (*CredentialProfileSummary, error) {
+	all, err := (CredentialProfiles{}).List(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	for i := range all {
+		if all[i].Name == name {
+			return &all[i], nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+// SetKnownHosts writes an operator pin — validated by the caller with
+// hostkeytrust.ValidatePin — or clears it with "" (NULL: the observed key is
+// used again). The pin outranks the observed key outright (ADR-091 §4), so
+// the write is the trust decision and the caller records it. ErrNotFound for
+// a profile the tenant does not hold.
+func (CredentialProfiles) SetKnownHosts(ctx context.Context, c *Conn, id uuid.UUID, material string, at time.Time) error {
+	var m any
+	if material != "" {
+		m = material
+	}
+	tag, err := c.Exec(ctx, `UPDATE credential_profiles SET known_hosts = $3, updated_at = $4 WHERE tenant_id = $1 AND credential_profile_id = $2`,
+		c.Tenant().UUID(), id, m, at)
+	if err != nil {
+		return mapError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // CredentialGrants is the release record migration 0006 keeps: one row per
 // delivery of credential material to a scan point (ADR-020). It never holds the
 // material — the row is the account of a secret having left Core, not a cache.

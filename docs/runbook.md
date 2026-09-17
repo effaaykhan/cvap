@@ -223,8 +223,7 @@ counts them and links to the **Identity** screen.
   user id and reason in `audit_events` (`identity.resolved`, `identity.confirmed`). Confirming a
   key an attacker rotated in hands that attacker the credentialed dial; when in doubt, leave the
   host parked. (Pinning the key on the credential profile — ADR-091 §4, an `operator` line wins
-  outright — is the stronger answer, but the profile has no pin writer in the API or CLI yet; B39's
-  second slice.) A contest that nobody re-presents for a window expires on its own; a persistent
+  outright — is the stronger answer: `PUT /v1/credential-profiles/{id}/known-hosts` or `cvap-cli credential pin --known-hosts FILE`, under the `credential.pin` permission (ADR-100); a tenant bootstrapped before that permission existed has it in no role, and the CLI is the path there.) A contest that nobody re-presents for a window expires on its own; a persistent
   one is visible until you act.
 
 ---

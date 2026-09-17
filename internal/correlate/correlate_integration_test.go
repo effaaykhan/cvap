@@ -743,7 +743,7 @@ func TestAnUncorroboratedContradictionRecordsNoKey(t *testing.T) {
 	var fps []string
 	if err := db.Read(ctx, s.tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
-		fps, err = (store.AssetIdentityKeys{}).SSHHostKeyFingerprintsAt(ctx, c, "10.10.0.30", 22, store.SightingWindow)
+		fps, err = (store.AssetIdentityKeys{}).SSHHostKeyFingerprintsAt(ctx, c, "10.10.0.30", 22, store.DefaultSightingWindow)
 		return err
 	}); err != nil {
 		t.Fatal(err)

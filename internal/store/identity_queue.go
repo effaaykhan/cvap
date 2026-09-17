@@ -92,6 +92,20 @@ type AmbiguousService struct {
 	ValuesTotal int
 }
 
+// QueueCursor is the keyset cursor over ListPending's order: the last rendered
+// group's last_seen and address. Groups strictly older (or, at the same
+// instant, at a greater address) follow it. The tie half matters: one sweep
+// parks every address it contests at one instant, so ties are the normal case,
+// and a whole-tuple `<` (both columns descending) was measured re-serving page
+// one and leaving the tail reachable only by ?address= (ADR-compliance review).
+type QueueCursor struct {
+	LastSeen time.Time
+	Address  string
+}
+
+// MaxQueuePage bounds one page of the queue listing.
+const MaxQueuePage = 200
+
 // ListPending returns the pending queue grouped by address, newest address
 // first, at most `limit` addresses. The whole tenant's pending set is read
 // (bounded by the same growth the Health counters report) and grouped here,
@@ -106,13 +120,21 @@ type AmbiguousService struct {
 // contest an attacker's newer parks have pushed off the first page (the
 // ordering key is one the attacker refreshes every scan). The full pending
 // address count travels beside the page (PendingAddresses).
-func (ResolutionQueue) ListPending(ctx context.Context, c *Conn, limit int, only string) ([]QueueGroup, error) {
-	if limit <= 0 {
-		limit = 200
+//
+// `before`, when set, is a keyset cursor over the listing's own order — the
+// last rendered group's (last_seen, address) — so a client pages through a
+// large queue instead of receiving it whole: a page at every cap measured
+// 9.6 MB (200 addresses × 50 items × 200 keys) for one screen (ADR-100).
+func (ResolutionQueue) ListPending(ctx context.Context, c *Conn, limit int, only string, before *QueueCursor) ([]QueueGroup, error) {
+	if limit <= 0 || limit > MaxQueuePage {
+		limit = MaxQueuePage
 	}
-	var onlyArg any
+	var onlyArg, beforeAt, beforeAddr any
 	if only != "" {
 		onlyArg = only
+	}
+	if before != nil {
+		beforeAt, beforeAddr = before.LastSeen, before.Address
 	}
 	const q = `
 		WITH addrs AS (
@@ -121,6 +143,9 @@ func (ResolutionQueue) ListPending(ctx context.Context, c *Conn, limit int, only
 		     WHERE tenant_id = $1 AND state = 'pending' AND address IS NOT NULL
 		       AND ($4::inet IS NULL OR address = host($4::inet)::inet)
 		     GROUP BY address
+		    HAVING ($5::timestamptz IS NULL
+		            OR max(enqueued_at) < $5::timestamptz
+		            OR (max(enqueued_at) = $5::timestamptz AND address > host($6::inet)::inet))
 		     ORDER BY last_seen DESC, address
 		     LIMIT $2),
 		ranked AS (
@@ -140,7 +165,7 @@ func (ResolutionQueue) ListPending(ctx context.Context, c *Conn, limit int, only
 		  FROM ranked
 		 WHERE rn <= $3
 		 ORDER BY address, enqueued_at DESC, resolution_id`
-	rows, err := c.Query(ctx, q, c.Tenant().UUID(), limit, MaxItemsPerGroup, onlyArg)
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), limit, MaxItemsPerGroup, onlyArg, beforeAt, beforeAddr)
 	if err != nil {
 		return nil, mapError(err)
 	}

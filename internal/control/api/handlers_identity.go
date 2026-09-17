@@ -80,16 +80,21 @@ type AmbiguousServiceResponse struct {
 	ValuesTotal int      `json:"values_total"`
 }
 
-// IdentityQueueResponse is the pending queue, newest contest first.
+// IdentityQueueResponse is one page of the pending queue, newest contest first.
 type IdentityQueueResponse struct {
-	Groups         []IdentityQueueGroupResponse `json:"groups" doc:"The newest 200 contested addresses, or the one named by ?address=."`
-	AddressesTotal int64                        `json:"addresses_total" doc:"Every contested address, listed or not — an attacker's newer parks can push a real contest off the page; name it with ?address= to reach it."`
+	Groups         []IdentityQueueGroupResponse `json:"groups" doc:"The newest contested addresses — ?limit= of them (default 25, at most 200) — or the one named by ?address=."`
+	AddressesTotal int64                        `json:"addresses_total" doc:"Every contested address, listed or not — an attacker's newer parks can push a real contest off the page; name it with ?address= to reach it, or page with the cursor."`
+	// Keyset cursor (ADR-100): pass next_before as ?before= and next_before_address
+	// as ?before_address= for the next page. Absent on the last page.
+	NextBefore        *string `json:"next_before,omitempty" doc:"The last group's last_seen; send it back as ?before= with next_before_address for the next page."`
+	NextBeforeAddress *string `json:"next_before_address,omitempty"`
 }
 
 func (s *Server) listIdentityQueue(w http.ResponseWriter, r *http.Request) {
 	tenant, _ := tenantFrom(r.Context())
+	q := r.URL.Query()
 	only := ""
-	if v := r.URL.Query().Get("address"); v != "" {
+	if v := q.Get("address"); v != "" {
 		ip, err := netip.ParseAddr(v)
 		if err != nil || ip.Zone() != "" {
 			writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest, "address must be a bare IP address.", err)
@@ -97,11 +102,44 @@ func (s *Server) listIdentityQueue(w http.ResponseWriter, r *http.Request) {
 		}
 		only = ip.Unmap().String()
 	}
+	limit := 25
+	if v := q.Get("limit"); v != "" {
+		n, err := atoiBounded(v, 1, store.MaxQueuePage)
+		if err != nil {
+			writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest,
+				fmt.Sprintf("limit must be an integer between 1 and %d.", store.MaxQueuePage), err)
+			return
+		}
+		limit = n
+	}
+	// The cursor is both fields or neither: the listing's order is
+	// (last_seen, address) and half a key would page from an arbitrary point.
+	var before *store.QueueCursor
+	if bt, ba := q.Get("before"), q.Get("before_address"); bt != "" || ba != "" {
+		at, err := time.Parse(time.RFC3339Nano, bt)
+		if err != nil || ba == "" {
+			writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest,
+				"before (the previous page's next_before, RFC 3339) and before_address must be sent together.", err)
+			return
+		}
+		ip, err := netip.ParseAddr(ba)
+		if err != nil || ip.Zone() != "" {
+			writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest, "before_address must be a bare IP address.", err)
+			return
+		}
+		before = &store.QueueCursor{LastSeen: at, Address: ip.Unmap().String()}
+	}
 	var groups []store.QueueGroup
 	var total int64
 	err := s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
-		if groups, err = (store.ResolutionQueue{}).ListPending(ctx, c, 200, only); err != nil {
+		// One more than the page, so a cursor is offered only while there IS a
+		// next group — not on a page that happens to be full.
+		fetch := limit + 1
+		if fetch > store.MaxQueuePage {
+			fetch = store.MaxQueuePage + 1
+		}
+		if groups, err = (store.ResolutionQueue{}).ListPending(ctx, c, fetch, only, before); err != nil {
 			return err
 		}
 		total, err = (store.ResolutionQueue{}).PendingAddresses(ctx, c)
@@ -111,7 +149,16 @@ func (s *Server) listIdentityQueue(w http.ResponseWriter, r *http.Request) {
 		storeError(w, r, s.log, err)
 		return
 	}
+	more := len(groups) > limit
+	if more {
+		groups = groups[:limit]
+	}
 	out := IdentityQueueResponse{Groups: make([]IdentityQueueGroupResponse, 0, len(groups)), AddressesTotal: total}
+	if more && only == "" {
+		last := groups[len(groups)-1]
+		nb, na := last.LastSeen.UTC().Format(time.RFC3339Nano), last.Address
+		out.NextBefore, out.NextBeforeAddress = &nb, &na
+	}
 	for _, g := range groups {
 		gr := IdentityQueueGroupResponse{
 			Address: g.Address, Reason: g.Reason,
@@ -288,6 +335,13 @@ func (s *Server) resolveIdentity(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
+		// A refusal is a decision the store declined to make; it rolled back
+		// with the transaction, so the record of it is written here, in its own
+		// transaction, from the captured error — a probe of the verbs is
+		// otherwise visible only in the request log (ADR-097's open item).
+		s.recordRefusal(r, who, "identity.resolve", s.holderOf(r, address), err, map[string]any{
+			"address": address, "decision": req.Decision, "asset_id": req.AssetID, "reason": req.Reason, "seen_through": req.SeenThrough,
+			"key_choices_count": len(req.KeyChoices)})
 		switch {
 		case errors.Is(err, store.ErrNothingPending):
 			writeError(w, r, s.log, http.StatusConflict, CodeConflict,
@@ -390,6 +444,7 @@ func (s *Server) confirmIdentity(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
+		s.recordRefusal(r, who, "identity.confirm", &id, err, map[string]any{"keys": boundedNames(req.Keys, 20, 128), "keys_count": len(req.Keys), "reason": req.Reason})
 		switch {
 		case errors.Is(err, store.ErrNothingPending):
 			writeError(w, r, s.log, http.StatusConflict, CodeConflict,
@@ -453,26 +508,26 @@ type IdentityKeyResponse struct {
 	Note          string  `json:"note" doc:"Why it is or is not trust material, in words: sightings still needed, or the operator confirmation that would unlock it."`
 }
 
-func identityKeyResponses(keys []store.KeySighting, now time.Time) []IdentityKeyResponse {
+func identityKeyResponses(keys []store.KeySighting, now time.Time, window time.Duration) []IdentityKeyResponse {
 	out := make([]IdentityKeyResponse, 0, len(keys))
 	for _, k := range keys {
 		r := IdentityKeyResponse{
 			KeyType: string(k.Type), Fingerprint: k.Value, Source: k.Source, Provenance: string(k.Provenance),
 			Address: k.Address, Port: k.Port, AddressHeld: k.AddressHeld, ScansSeen: k.ScansSeen,
-			TrustMaterial: k.TrustMaterial(now, store.SightingWindow, sshalgo.DefaultPort),
+			TrustMaterial: k.TrustMaterial(now, window, sshalgo.DefaultPort),
 		}
 		if k.LastSeenAt != nil {
 			v := k.LastSeenAt.UTC().Format(time.RFC3339)
 			r.LastSeenAt = &v
 		}
-		r.Note = trustNote(k, now)
+		r.Note = trustNote(k, now, window)
 		out = append(out, r)
 	}
 	return out
 }
 
 // trustNote is the sentence beside a key on the asset page.
-func trustNote(k store.KeySighting, now time.Time) string {
+func trustNote(k store.KeySighting, now time.Time, window time.Duration) string {
 	switch {
 	case k.Provenance == store.KeyFromRotation:
 		return "recorded by a key rotation; excluded from credentialed trust and from corroborating a renewal until an operator confirms it"
@@ -488,8 +543,88 @@ func trustNote(k store.KeySighting, now time.Time) string {
 		return "sighted on a port the credentialed engine does not dial"
 	case k.ScansSeen < 2:
 		return "one more sighting at this address is needed (ADR-094)"
-	case k.LastSeenAt == nil || k.LastSeenAt.Before(now.Add(-store.SightingWindow)):
+	case k.LastSeenAt == nil || k.LastSeenAt.Before(now.Add(-window)):
 		return "last sighting is outside the window; two sightings inside it are needed"
 	}
 	return "credentialed trust material at this address (two sightings inside the window; an echo, not a proof — B44)"
+}
+
+// refusalCodes are the store errors that are a refused DECISION rather than a
+// failure: the verb ran, examined the queue, and declined. Each is audited as
+// identity.refused; anything else is an error, logged as such.
+var refusalCodes = []struct {
+	err  error
+	code string
+}{
+	{store.ErrNothingPending, "nothing_pending"},
+	{store.ErrAmbiguousGroup, "ambiguous_group"},
+	{store.ErrKeyNotParked, "key_not_parked"},
+	{store.ErrNothingToRecord, "nothing_to_record"},
+	{store.ErrTooManyKeys, "too_many_keys"},
+	{store.ErrKeysChanged, "keys_changed"},
+}
+
+// recordRefusal writes identity.refused for a verb the store declined, in its
+// own transaction (the decision's transaction rolled back with the refusal).
+// The detail carries what was asked and the refusal code, never the store's
+// message verbatim beyond a bound. A failure to write the record is logged
+// and does not change the response: the refusal stands either way.
+func (s *Server) recordRefusal(r *http.Request, who *uuid.UUID, verb string, resource *uuid.UUID, cause error, asked map[string]any) {
+	code := ""
+	for _, rc := range refusalCodes {
+		if errors.Is(cause, rc.err) {
+			code = rc.code
+			break
+		}
+	}
+	if code == "" {
+		return // not a refusal: storeError logs it as the failure it is
+	}
+	detail := map[string]any{"verb": verb, "code": code}
+	for k, v := range asked {
+		detail[k] = v
+	}
+	tenant, _ := tenantFrom(r.Context())
+	if err := s.db.Write(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
+		return (store.AuditEvents{}).Record(ctx, c, store.AuditEvent{
+			ActorID: who, ActorType: store.ActorUser,
+			Action: "identity.refused", ResourceType: "asset", ResourceID: resource, Detail: detail,
+		})
+	}); err != nil {
+		s.log.ErrorContext(r.Context(), "identity.refused audit event not written", "verb", verb, "code", code, "err", err)
+	}
+}
+
+// holderOf is the asset holding an address live, for keying a refusal to a
+// timeline the operator will look at — never the asset id the caller named,
+// which need not exist (a prober would otherwise choose where the mark lands,
+// or that it lands nowhere). Nil when nothing holds the address.
+func (s *Server) holderOf(r *http.Request, address string) *uuid.UUID {
+	tenant, _ := tenantFrom(r.Context())
+	var holder uuid.UUID
+	err := s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
+		id, _, err := (store.AssetAddresses{}).LiveHolder(ctx, c, address)
+		if err != nil {
+			return err
+		}
+		holder = id
+		return nil
+	})
+	if err != nil || holder == uuid.Nil {
+		return nil
+	}
+	return &holder
+}
+
+// boundedNames is the first n of a caller-supplied list, each cut to width, for
+// an audit detail: the record says what was asked, not how much of it.
+func boundedNames(names []string, n, width int) []string {
+	out := make([]string, 0, min(n, len(names)))
+	for _, s := range names[:min(n, len(names))] {
+		if len(s) > width {
+			s = s[:width] + "…"
+		}
+		out = append(out, s)
+	}
+	return out
 }

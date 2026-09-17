@@ -410,3 +410,30 @@ func (Observations) Resolve(ctx context.Context, c *Conn, observationID uuid.UUI
 	}
 	return nil
 }
+
+// LatestPackageForAsset returns the newest accepted `package` observation
+// resolved to the asset — the credentialed read the asset page shows the running
+// kernel from (ADR-099) — or ErrNotFound. Bounded to the last 90 days because
+// observations is partitioned by observed_at; a read older than that is not a
+// current account of the host anyway.
+func (Observations) LatestPackageForAsset(ctx context.Context, c *Conn, assetID uuid.UUID, now time.Time) (*Observation, error) {
+	q := `SELECT ` + observationColumns + `
+		    FROM observations
+		   WHERE tenant_id = $1 AND asset_id = $2 AND observation_type = 'package'
+		     AND observed_at >= $3 AND observed_at < $4
+		     AND ingest_state = 'accepted'
+		   ORDER BY observed_at DESC
+		   LIMIT 1`
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), assetID, now.Add(-90*24*time.Hour), now.Add(time.Hour))
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out, err := scanObservations(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, ErrNotFound
+	}
+	return &out[0], nil
+}

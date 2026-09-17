@@ -46,6 +46,11 @@ func main() {
 			log.Error("tenant command failed", slog.Any("error", err))
 			os.Exit(1)
 		}
+	case "credential":
+		if err := credentialCmd(log, os.Args[2:]); err != nil {
+			log.Error("credential command failed", slog.Any("error", err))
+			os.Exit(1)
+		}
 	default:
 		log.Error("unknown command", slog.String("command", os.Args[1]))
 		usage()
@@ -78,6 +83,14 @@ func usage() {
                      Replace an operator's password with a generated first-login
                      one (--tenant, --email), printed once. Audited; the account's
                      lockout is cleared. For a lost password. Needs APP_DATABASE_URL.
+
+  credential pin     Pin host keys on a credential profile (--tenant, --profile,
+                     --known-hosts FILE, --reason): plain known_hosts lines that
+                     outrank the observed key for the hosts they name (ADR-091).
+                     Audited with the fingerprints. Needs APP_DATABASE_URL.
+
+  credential unpin   Clear the pin (--tenant, --profile, --reason); the observed
+                     key is used again. Audited. Needs APP_DATABASE_URL.
 
 `, version)
 }

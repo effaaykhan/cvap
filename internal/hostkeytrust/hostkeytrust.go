@@ -33,6 +33,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // Source is where the trust material came from.
@@ -139,4 +141,75 @@ func LinesCovering(material, target string) []string {
 		}
 	}
 	return out
+}
+
+// Bounds on an operator pin (ADR-100). A pin is a trust root chosen by hand; a
+// thousand lines is a fleet, and past 64 KiB it is not something a person
+// reviewed.
+const (
+	MaxPinBytes = 64 << 10
+	MaxPinLines = 1000
+)
+
+// ValidatePin checks operator-supplied known_hosts material before it is
+// written to a credential profile (ADR-091 §4): every non-comment line must be
+// a plain known_hosts line — "host[,host] keytype base64" — that x/crypto's
+// parser accepts, with no @cert-authority/@revoked marker and no hashed host
+// (a hashed host cannot be matched to a target by name, so it pins nothing an
+// engine can use; LinesCovering skips it). At least one such line is required:
+// an empty pin is not "no pin", it is a TOFU shape, and clearing a pin is its
+// own verb. Returns the canonical material (trimmed lines joined by newlines)
+// and the SHA256 fingerprint of every pinned key, for the audit record.
+func ValidatePin(material string) (canonical string, fingerprints []string, err error) {
+	if len(material) > MaxPinBytes {
+		return "", nil, fmt.Errorf("hostkeytrust: pin exceeds %d bytes", MaxPinBytes)
+	}
+	var lines []string
+	for i, raw := range strings.Split(material, "\n") {
+		line := strings.TrimSpace(strings.TrimRight(raw, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if len(lines) >= MaxPinLines {
+			return "", nil, fmt.Errorf("hostkeytrust: pin exceeds %d key lines", MaxPinLines)
+		}
+		if strings.ContainsFunc(line, func(r rune) bool { return (r < 0x20 && r != '\t') || r == 0x7f }) {
+			return "", nil, fmt.Errorf("hostkeytrust: line %d carries a control character", i+1)
+		}
+		if strings.HasPrefix(line, "@") {
+			marker := strings.Fields(line)[0]
+			return "", nil, fmt.Errorf("hostkeytrust: line %d carries a marker (%s); only plain host-key lines are pinned", i+1, marker[:min(len(marker), 32)])
+		}
+		if strings.HasPrefix(line, "|") {
+			return "", nil, fmt.Errorf("hostkeytrust: line %d has a hashed host; a pin names its host in clear so it can be matched to a target", i+1)
+		}
+		_, hosts, key, _, rest, perr := ssh.ParseKnownHosts([]byte(line))
+		if perr != nil {
+			return "", nil, fmt.Errorf("hostkeytrust: line %d is not a known_hosts line: %w", i+1, perr)
+		}
+		if len(hosts) == 0 || strings.TrimSpace(string(rest)) != "" {
+			return "", nil, fmt.Errorf("hostkeytrust: line %d is not exactly one known_hosts line", i+1)
+		}
+		// A pattern or a negation matches no target by name either (LinesCovering
+		// compares the host field to the target exactly), so it pins nothing an
+		// engine can use and every job for the host it meant to cover refuses.
+		for _, h := range hosts {
+			if strings.ContainsAny(h, "*?") || strings.HasPrefix(h, "!") {
+				return "", nil, fmt.Errorf("hostkeytrust: line %d names a host pattern (%s); a pin names each host exactly", i+1, h[:min(len(h), 64)])
+			}
+			// The engine dials port 22 only (credhost.Config.Port is never set)
+			// and LinesCovering matches "host" or "[host]:22": a line for another
+			// port covers nothing, and a pin that covers nothing turns the
+			// profile's credentialed scans off.
+			if strings.HasPrefix(h, "[") && !strings.HasSuffix(h, "]:22") {
+				return "", nil, fmt.Errorf("hostkeytrust: line %d names a port other than 22 (%s), which the engine does not dial; pin the host bare or as [host]:22", i+1, h[:min(len(h), 64)])
+			}
+		}
+		lines = append(lines, line)
+		fingerprints = append(fingerprints, ssh.FingerprintSHA256(key))
+	}
+	if len(lines) == 0 {
+		return "", nil, ErrNoMaterial
+	}
+	return strings.Join(lines, "\n") + "\n", fingerprints, nil
 }

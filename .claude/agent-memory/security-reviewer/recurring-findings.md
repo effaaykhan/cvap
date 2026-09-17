@@ -1,6 +1,6 @@
 ---
 name: recurring-findings
-description: Recurring security defect classes found in CVAP reviews (121 classes), and the repo-specific constraints that shape acceptable fixes
+description: Recurring security defect classes found in CVAP reviews (125 classes), and the repo-specific constraints that shape acceptable fixes
 metadata:
   type: project
 ---
@@ -2328,3 +2328,46 @@ to `MaxReleaseTokenLen` (163-byte error for an 8 MiB input) — but `ParseDpkgQu
 `ParseRpmQa`, twenty lines above in the same file and touched by the same commit, still `%q` the
 whole offending line: 8 388 660 and 8 388 653 bytes of target-chosen output in one error. Same
 class, same file, same threat; fixing only the line the review named is how a class survives.
+
+**122. A `RETURNING` boolean over a NULLABLE column, scanned into a Go `bool`.**
+`Assets.ClearExactAttribution` (ADR-100) returns
+`(os_provenance ->> 'source' = 'operator_cleared' AND …)`. On a row where `os_provenance` or
+`release_provenance` IS NULL the whole expression is SQL NULL, pgx refuses
+("cannot scan NULL into *bool"), and the handler's documented 409 ("nothing exact is held")
+becomes a 500. Measured: an unattributed asset and an asset with only the exact OS read both
+500; with `coalesce(…, false)` both answer `false` and the 409 fires.
+**How to apply:** every `RETURNING <boolean expression>` over a nullable column needs
+`coalesce(…, false)` or a `*bool` destination. The giveaway is a test that sets *both* columns
+before exercising the "nothing was held" branch — the branch the ADR specifies is then only
+ever reached on rows where the columns happen to be non-NULL.
+
+**123. A refusal's audit detail echoing the unbounded request field that caused the refusal.**
+`recordRefusal` copies `req.Keys` verbatim into `identity.refused`. `ErrTooManyKeys` /
+`ErrKeysChanged` is exactly the refusal a huge `keys` array produces, so one 1 MiB request (the
+`MaxBodyBytes` cap) writes a ~0.97 MiB `audit_events.detail` row; measured 403 refusals/s
+in-process, no rate limit, no bound in `AuditEvents.Record`. Class 121's shape moved from an
+error string to a durable table — and the same rows are then served by
+`GET /v1/assets/{id}/events` at `limit=500` (~481 MiB in one response, assembled in memory:
+two caps nobody multiplied, again).
+**How to apply:** an audit detail built from a request must carry a COUNT and a bounded sample,
+never the field. Cap the count before the store call, not only inside the store.
+
+**124. A keyset cursor whose tuple comparison contradicts its own ORDER BY.**
+`ListPending` orders `last_seen DESC, address ASC` and paged with
+`(max(enqueued_at), address) < ($before, $addr)` — right for the DESC column, backwards for the
+ASC one. Ties are the NORMAL case here: `correlateTenant` takes `now := c.now()` once and stamps
+every `Enqueue` of that sweep with it, so a whole sweep's contests share one `enqueued_at`.
+Measured: 5 pending addresses, `?limit=2` → page 2 EMPTY, three addresses reachable only by
+`?address=`, and the console's "Show more" button gone while the header still says 5.
+**How to apply:** for `(a DESC, b ASC)` the predicate is `a < $a OR (a = $a AND b > $b)`. Seed
+the tie case explicitly — a paging test with distinct timestamps asserts nothing about the only
+ordering the producer actually generates. (Found and fixed by a parallel session mid-review.)
+
+**125. An int request field multiplied into a `time.Duration` before its bounds check.**
+`putIdentitySettings` does `time.Duration(req.SightingWindowHours) * time.Hour` and then checks
+`[24h, 2160h]`. int64 nanoseconds overflow past ~2 562 047 hours, so `5124120` wraps to
+`24h25m26s` — inside the bounds, accepted 200, stored, and reported back as "24" hours. No
+invariant is broken (the wrapped value is what is enforced), but the direction of the surprise is
+the dangerous one: the largest number an operator can type yields the SHORTEST window, which is
+what the cadence rule exists to prevent.
+**How to apply:** bound the integer in its own domain first, then convert.

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 
 	"github.com/effaaykhan/cvap/internal/domain"
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/version"
 )
 
 // advisoryStatusOf computes the asset's advisory posture (ADR-068) from the
@@ -115,6 +117,13 @@ type AssetResponse struct {
 	// accumulating for it. Absent when there is no resolved release.
 	ReleaseCoverageState *string `json:"release_coverage_state,omitempty" doc:"covered | out_of_coverage | unknown. out_of_coverage means a no-advisory result is cannot-know, not clean — the release is past its feed's window."`
 	ReleaseCoverageEnd   *string `json:"release_coverage_end,omitempty" doc:"The effective last-covered date for the release: the newest advisory the keyspace holds for it, or the feed's ESM end."`
+
+	// Kernel is what the newest credentialed read said about the running kernel
+	// (ADR-099): `uname -r`, each installed kernel version's state against it,
+	// and whether a newer version is installed but not running — the reboot
+	// pending signal the matcher now judges by. Absent without a credentialed
+	// read that carried the kernel.
+	Kernel *AssetKernelResponse `json:"kernel,omitempty"`
 }
 
 func assetSummary(a *store.Asset) AssetSummary {
@@ -207,13 +216,27 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 	var d *store.AssetDetail
 	var keys []store.KeySighting
 	var keysTotal int
+	var window time.Duration
+	var kernel *AssetKernelResponse
 	err = s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
 		if d, err = (store.Assets{}).GetDetail(ctx, c, id); err != nil {
 			return err
 		}
-		keys, keysTotal, err = (store.AssetIdentityKeys{}).SightingsFor(ctx, c, id)
-		return err
+		if window, err = (store.IdentitySettings{}).Window(ctx, c); err != nil {
+			return err
+		}
+		if keys, keysTotal, err = (store.AssetIdentityKeys{}).SightingsFor(ctx, c, id); err != nil {
+			return err
+		}
+		pkg, err := (store.Observations{}).LatestPackageForAsset(ctx, c, id, time.Now().UTC())
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if pkg != nil {
+			kernel = kernelSection(pkg)
+		}
+		return nil
 	})
 	if err != nil {
 		storeError(w, r, s.log, err)
@@ -231,6 +254,7 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 	}
 	out := AssetResponse{
 		AssetSummary: summary,
+		Kernel:       kernel,
 		OSVersion:    d.OSVersion, Vendor: d.Vendor, Owner: d.Owner,
 		Addresses:    make([]AssetAddressResponse, 0, len(d.Addresses)),
 		Services:     make([]AssetServiceResponse, 0, len(d.Services)),
@@ -238,7 +262,7 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 		OSConfidence: d.OSConfidence, OSProvenance: d.OSProvenance,
 		ReleaseConfidence: d.ReleaseConfidence, ReleaseProvenance: d.ReleaseProvenance,
 		ReleaseCoverageState: d.ReleaseCoverageState, ReleaseCoverageEnd: dateOrNil(d.ReleaseCoverageEnd),
-		IdentityKeys:      identityKeyResponses(keys, time.Now().UTC()),
+		IdentityKeys:      identityKeyResponses(keys, time.Now().UTC(), window),
 		IdentityKeysTotal: keysTotal,
 	}
 	for _, a := range d.Addresses {
@@ -286,4 +310,209 @@ func setKeysetNext(nextBefore **string, nextID **string, before time.Time, id uu
 	b := before.Format(time.RFC3339Nano)
 	i := id.String()
 	*nextBefore, *nextID = &b, &i
+}
+
+// ---------------------------------------------------------------------------
+// B39's second slice (ADR-100): the asset's timeline, and clearing a pin.
+// ---------------------------------------------------------------------------
+
+// AssetEventResponse is one audit event keyed to the asset.
+type AssetEventResponse struct {
+	ID         string         `json:"id"`
+	Action     string         `json:"action" doc:"identity.contested | identity.rotated | identity.contest_expired | identity.resolved | identity.confirmed | identity.refused | asset.attribution_cleared, and whatever else names the asset."`
+	ActorType  string         `json:"actor_type"`
+	ActorID    *string        `json:"actor_id,omitempty" doc:"The operator, when a person acted; absent for the system."`
+	OccurredAt time.Time      `json:"occurred_at"`
+	Detail     map[string]any `json:"detail,omitempty"`
+}
+
+// AssetEventsResponse is the asset's timeline, newest first.
+type AssetEventsResponse struct {
+	AssetID string               `json:"asset_id"`
+	Events  []AssetEventResponse `json:"events" doc:"Newest first, at most ?limit= (default 100, at most 500)."`
+}
+
+func (s *Server) listAssetEvents(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "asset_id")
+	if err != nil {
+		writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest, "asset_id is not a uuid.", err)
+		return
+	}
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := atoiBounded(v, 1, 500)
+		if err != nil {
+			writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest, "limit must be an integer between 1 and 500.", err)
+			return
+		}
+		limit = n
+	}
+	tenant, _ := tenantFrom(r.Context())
+	var events []store.AuditEvent
+	err = s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
+		if _, err := (store.Assets{}).GetByID(ctx, c, id); err != nil {
+			return err
+		}
+		var err error
+		events, err = (store.AuditEvents{}).ListByResource(ctx, c, "asset", id, limit)
+		return err
+	})
+	if err != nil {
+		storeError(w, r, s.log, err)
+		return
+	}
+	out := AssetEventsResponse{AssetID: id.String(), Events: make([]AssetEventResponse, 0, len(events))}
+	for _, e := range events {
+		ev := AssetEventResponse{ID: e.ID.String(), Action: e.Action, ActorType: string(e.ActorType), OccurredAt: e.OccurredAt, Detail: e.Detail}
+		if e.ActorID != nil {
+			a := e.ActorID.String()
+			ev.ActorID = &a
+		}
+		out.Events = append(out.Events, ev)
+	}
+	writeJSON(w, r, s.log, http.StatusOK, out)
+}
+
+// ClearAttributionRequest is an operator's word that an exact attribution
+// should no longer outrank inference.
+type ClearAttributionRequest struct {
+	Reason string `json:"reason" doc:"Why. Recorded in the audit log beside who cleared it. At most 4 KiB."`
+}
+
+// ClearAttributionResponse names what was cleared.
+type ClearAttributionResponse struct {
+	AssetID string   `json:"asset_id"`
+	Cleared []string `json:"cleared" doc:"os (the /etc/os-release family read), release (the package-manager release read), or both. The values stay; the next inferred sweep may replace them."`
+}
+
+func (s *Server) clearAttribution(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "asset_id")
+	if err != nil {
+		writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest, "asset_id is not a uuid.", err)
+		return
+	}
+	var req ClearAttributionRequest
+	if err := decode(w, r, &req); err != nil {
+		writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest,
+			"The request body could not be read as this endpoint's schema.", err)
+		return
+	}
+	if req.Reason == "" {
+		writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest, "reason is required.", nil)
+		return
+	}
+	if len(req.Reason) > maxReason {
+		writeError(w, r, s.log, http.StatusBadRequest, CodeBadRequest, "reason is too long (4 KiB at most).", nil)
+		return
+	}
+	tenant, _ := tenantFrom(r.Context())
+	who := actor(r)
+	now := time.Now().UTC()
+	var cleared []string
+	err = s.db.Write(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
+		var err error
+		if cleared, err = (store.Assets{}).ClearExactAttribution(ctx, c, id, who, now); err != nil {
+			return err
+		}
+		if len(cleared) == 0 {
+			return store.ErrNothingPending
+		}
+		return (store.AuditEvents{}).Record(ctx, c, store.AuditEvent{
+			ActorID: who, ActorType: store.ActorUser,
+			Action: "asset.attribution_cleared", ResourceType: "asset", ResourceID: &id,
+			Detail: map[string]any{"reason": req.Reason, "cleared": cleared,
+				"note": "the exact read no longer outranks inference on this asset; the next sweep re-derives (ADR-095)"},
+		})
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrNothingPending) {
+			writeError(w, r, s.log, http.StatusConflict, CodeConflict,
+				"That asset holds no exact attribution to clear; what it has was inferred.", err)
+			return
+		}
+		storeError(w, r, s.log, err)
+		return
+	}
+	writeJSON(w, r, s.log, http.StatusOK, ClearAttributionResponse{AssetID: id.String(), Cleared: cleared})
+}
+
+// ---------------------------------------------------------------------------
+// The running kernel, from the newest credentialed read (ADR-099).
+// ---------------------------------------------------------------------------
+
+// AssetKernelPackageResponse is one installed kernel package against the
+// running kernel.
+type AssetKernelPackageResponse struct {
+	Binary  string `json:"binary"`
+	Version string `json:"version"`
+	State   string `json:"state" doc:"kernel-running | kernel-installed-not-running | kernel-unknown (the read carried no uname -r)."`
+}
+
+// AssetKernelResponse is the kernel section of the asset page.
+type AssetKernelResponse struct {
+	RunningRelease string                       `json:"running_release,omitempty" doc:"uname -r as read on the host; absent on a read that did not carry it."`
+	ReadAt         time.Time                    `json:"read_at"`
+	RebootPending  *bool                        `json:"reboot_pending,omitempty" doc:"A kernel package newer than the running one is installed and not running. Absent when it cannot be judged (no running kernel found among the installed packages)."`
+	Installed      []AssetKernelPackageResponse `json:"installed" doc:"Every kernel package the read carried, with its state; ordinary packages are not listed."`
+}
+
+// kernelPackagePayload mirrors the fields of the engine's package observation
+// the kernel section reads. Decoded here, at the one place the API reads it.
+type kernelPackagePayload struct {
+	Family        string `json:"family"`
+	KernelRelease string `json:"kernel_release"`
+	Installed     []struct {
+		Name    string `json:"name"`
+		Binary  string `json:"binary"`
+		Version string `json:"version"`
+	} `json:"installed"`
+}
+
+// kernelSection classifies the read's kernel rows with the same pure function
+// the matcher uses (domain.ClassifyKernelPackage), so the page and the findings
+// agree about which kernel runs. Reboot pending is a version comparison in the
+// family's own scheme between the running kernel and each installed-not-running
+// kernel package — a newer one on disk is the exposure ADR-099 kept visible.
+func kernelSection(o *store.Observation) *AssetKernelResponse {
+	var p kernelPackagePayload
+	if err := json.Unmarshal(o.Payload, &p); err != nil {
+		return nil
+	}
+	if p.KernelRelease != "" && !domain.KernelReleaseValid(p.KernelRelease) {
+		p.KernelRelease = "" // the Core-side grammar site: treated as unread, as the matcher does
+	}
+	out := &AssetKernelResponse{RunningRelease: p.KernelRelease, ReadAt: o.ObservedAt, Installed: []AssetKernelPackageResponse{}}
+	scheme := version.SchemeDpkg
+	switch p.Family {
+	case "rhel", "fedora", "centos", "almalinux", "rocky", "ol", "amzn":
+		scheme = version.SchemeRPM
+	}
+	running := ""
+	var notRunning []string
+	for _, row := range p.Installed {
+		st := domain.ClassifyKernelPackage(p.KernelRelease, row.Name, row.Binary, row.Version)
+		if st == domain.NotKernel {
+			continue
+		}
+		out.Installed = append(out.Installed, AssetKernelPackageResponse{Binary: row.Binary, Version: row.Version, State: st.String()})
+		switch st {
+		case domain.KernelRunning:
+			if running == "" || version.Compare(scheme, row.Version, running) > 0 {
+				running = row.Version
+			}
+		case domain.KernelInstalledNotRunning:
+			notRunning = append(notRunning, row.Version)
+		}
+	}
+	if running != "" {
+		pending := false
+		for _, v := range notRunning {
+			if version.Compare(scheme, v, running) > 0 {
+				pending = true
+				break
+			}
+		}
+		out.RebootPending = &pending
+	}
+	return out
 }

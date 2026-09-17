@@ -297,12 +297,8 @@ func (AssetIdentityKeys) ForAsset(ctx context.Context, c *Conn, assetID uuid.UUI
 	return out, mapError(rows.Err())
 }
 
-// SightingWindow is how long a sighting counts toward ADR-091 observed trust
-// (ADR-094). It equals correlate.AddressWindow — the window inside which an
-// address is evidence a host has not changed — and correlate's tests assert
-// the two stay equal; a trust root that outlived the address relationship it
-// rests on would trust a key at an address nobody has held for a week.
-const SightingWindow = 7 * 24 * time.Hour
+// The sighting window is a per-tenant setting since ADR-100: see
+// IdentitySettings.Window (identity_settings.go), DefaultSightingWindow.
 
 // KeyProvenance mirrors identity_key_provenance (migration 0044, ADR-094): how a
 // key came to be held. Audit only — trust is decided by the sightings table,
@@ -416,13 +412,17 @@ func (AssetIdentityKeys) Record(ctx context.Context, c *Conn, assetID uuid.UUID,
 		      WHERE EXCLUDED.last_seen_scan IS DISTINCT FROM asset_identity_key_sightings.last_seen_scan
 		        AND EXCLUDED.last_seen_at > asset_identity_key_sightings.last_seen_at`
 	// The count DECAYS with the window it is read at: a sighting more than
-	// SightingWindow after the previous one starts over at 1, so an attacker
+	// the tenant's sighting window after the previous one starts over at 1, so an attacker
 	// who paid the two-scan cost, left, and returned is not trusted on the
 	// return — the review measured "at least two ever, and one recently" being
 	// satisfied by exactly that. Anything scanned more often than its address
 	// window never crosses the reset.
+	window, err := (IdentitySettings{}).Window(ctx, c)
+	if err != nil {
+		return false, err
+	}
 	if _, err := c.Exec(ctx, sight, c.Tenant().UUID(), assetID, scanID, at, address, string(k.Type), k.Value, port,
-		SightingWindow.String()); err != nil {
+		window.String()); err != nil {
 		return false, mapError(err)
 	}
 	return inserted, nil

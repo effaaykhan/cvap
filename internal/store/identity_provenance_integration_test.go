@@ -64,7 +64,7 @@ func TestAnObservedKeyIsTrustMaterialOnlyAfterTwoScansAtTheAddress(t *testing.T)
 		var out []string
 		if err := db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 			var err error
-			out, err = (store.AssetIdentityKeys{}).SSHHostKeyFingerprintsAt(ctx, c, ip, port, store.SightingWindow)
+			out, err = (store.AssetIdentityKeys{}).SSHHostKeyFingerprintsAt(ctx, c, ip, port, store.DefaultSightingWindow)
 			return err
 		}); err != nil {
 			t.Fatal(err)
@@ -154,7 +154,7 @@ func TestAnObservedKeyIsTrustMaterialOnlyAfterTwoScansAtTheAddress(t *testing.T)
 		   FROM asset_identity_keys k
 		  WHERE k.tenant_id = s.tenant_id AND k.identity_key_id = s.identity_key_id
 		    AND s.tenant_id = $1 AND k.key_value = $3 AND s.address = $4::inet AND s.port = 22`,
-			c.Tenant().UUID(), (store.SightingWindow + time.Hour).String(), key.Value, addr)
+			c.Tenant().UUID(), (store.DefaultSightingWindow + time.Hour).String(), key.Value, addr)
 		return err
 	}); err != nil {
 		t.Fatal(err)

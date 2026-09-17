@@ -49,18 +49,10 @@ import (
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
-// AddressWindow is how long an address is evidence that a host has not changed.
-//
-// ADR-007 ranks "IP within a time window" as weak, and the window is the whole
-// of its meaning: an address seen on this asset an hour ago is reasonable
-// evidence, and the same address last seen three months ago is evidence of
-// nothing. Outside it an observation becomes a new asset and the stale interval
-// is closed.
-//
-// Seven days is a DHCP lease scale rather than a scan interval: the question is
-// "could this address plausibly still be the same host", and a fortnightly scan
-// of a network on 24-hour leases should not merge across the gap.
-const AddressWindow = 7 * 24 * time.Hour
+// The address window — how long an address is evidence that a host has not
+// changed — is the tenant's sighting window (store.IdentitySettings, ADR-100):
+// one value, so the trust root cannot outlive the address relationship it
+// rests on. It is read inside each per-tenant transaction that uses it.
 
 // Interval is how often the sweep runs.
 //
@@ -272,7 +264,11 @@ func (c *Correlator) unstampAge(tenant store.TenantID) {
 // intervals close.
 func (c *Correlator) ageTenant(ctx context.Context, tenant store.TenantID, now time.Time) error {
 	return c.db.Write(ctx, tenant, func(ctx context.Context, conn *store.Conn) error {
-		expired, err := (store.ResolutionQueue{}).ExpireUnplaceable(ctx, conn, now.Add(-AddressWindow), now)
+		win, err := (store.IdentitySettings{}).Window(ctx, conn)
+		if err != nil {
+			return err
+		}
+		expired, err := (store.ResolutionQueue{}).ExpireUnplaceable(ctx, conn, now.Add(-win), now)
 		if err != nil {
 			return err
 		}
@@ -298,7 +294,7 @@ func (c *Correlator) ageTenant(ctx context.Context, tenant store.TenantID, now t
 				return err
 			}
 		}
-		n, err := (store.AssetAddresses{}).CloseStale(ctx, conn, now.Add(-AddressWindow), now)
+		n, err := (store.AssetAddresses{}).CloseStale(ctx, conn, now.Add(-win), now)
 		if err == nil && n > 0 {
 			c.log.InfoContext(ctx, "closed stale address intervals",
 				slog.String("tenant_id", tenant.String()), slog.Int64("closed", n))
@@ -373,12 +369,16 @@ func (c *Correlator) correlateTenant(ctx context.Context, tenant store.TenantID)
 // written.
 func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h host, zoneType func(uuid.UUID) string, now time.Time) error {
 	return c.db.Write(ctx, tenant, func(ctx context.Context, conn *store.Conn) error {
+		win, err := (store.IdentitySettings{}).Window(ctx, conn)
+		if err != nil {
+			return err
+		}
 		candidates, err := c.candidatesFor(ctx, conn, h)
 		if err != nil {
 			return err
 		}
 
-		v := domain.Resolve(h.keys, candidates, now, AddressWindow)
+		v := domain.Resolve(h.keys, candidates, now, win)
 		// A handover verdict names the contradicting keys; measure the four
 		// continuity facts for the address holder and ask once more
 		// (ADR-096). Only a contested host pays for the reads. The decision
@@ -388,12 +388,12 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 				if candidates[i].AssetID != v.Candidates[0] || candidates[i].HeldAddress != h.address {
 					continue
 				}
-				f, err := c.continuityFor(ctx, conn, candidates[i], h, v.Handover, now)
+				f, err := c.continuityFor(ctx, conn, candidates[i], h, v.Handover, now, win)
 				if err != nil {
 					return err
 				}
 				candidates[i].Continuity = &f
-				v = domain.Resolve(h.keys, candidates, now, AddressWindow)
+				v = domain.Resolve(h.keys, candidates, now, win)
 				break
 			}
 		}
@@ -684,7 +684,7 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		established := false
 		if len(v.Contradicted) > 0 {
 			for _, k := range v.Corroborated {
-				ok, err := (store.AssetIdentityKeys{}).EstablishedAt(ctx, conn, assetID, k, h.address, portOf(k.Source), store.SightingWindow)
+				ok, err := (store.AssetIdentityKeys{}).EstablishedAt(ctx, conn, assetID, k, h.address, portOf(k.Source), win)
 				if err != nil {
 					return err
 				}
@@ -795,7 +795,7 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 		// this sighting. A fresh contest never reaches here.
 		for _, cand := range candidates {
 			if cand.AssetID != assetID || cand.HeldAddress != h.address || !cand.PendingContested ||
-				domain.ContestFresh(cand, now, AddressWindow) {
+				domain.ContestFresh(cand, now, win) {
 				continue
 			}
 			expired, err := (store.ResolutionQueue{}).CloseExpired(ctx, conn, h.address, assetID, h.seenAt)
@@ -1125,9 +1125,9 @@ func osEvidence(h host) []domain.OSEvidence {
 // continuityFor gathers ADR-096's continuity DATA about a contested address
 // for the asset holding it. Data only — every rule is domain.rotationFailures.
 // Every input is public banner data; the ADR says what that buys and does not.
-func (c *Correlator) continuityFor(ctx context.Context, conn *store.Conn, cand domain.Candidate, h host, handover []domain.IdentityKey, now time.Time) (domain.Continuity, error) {
+func (c *Correlator) continuityFor(ctx context.Context, conn *store.Conn, cand domain.Candidate, h host, handover []domain.IdentityKey, now time.Time, win time.Duration) (domain.Continuity, error) {
 	f := domain.Continuity{Keys: map[string]domain.KeyContinuity{}}
-	since := now.Add(-store.SightingWindow)
+	since := now.Add(-win)
 	assetID := cand.AssetID
 
 	for _, k := range handover {

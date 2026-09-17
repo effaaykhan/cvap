@@ -425,6 +425,46 @@ func (Assets) SetRelease(ctx context.Context, c *Conn, id uuid.UUID, release *st
 	return nil
 }
 
+// ClearExactAttribution lifts an operator pin (ADR-095, B39's second slice):
+// an EXACT attribution — os_provenance read from /etc/os-release, and/or
+// release_provenance read from the package manager — is re-stamped
+// `operator_cleared`, keeping the previous provenance under `was` and the
+// values themselves in place, so the next inferred sweep may land where the
+// exact rank would otherwise hold for ever (SetAttribution/SetRelease protect
+// only the two exact sources). The repair for a host that lied within the
+// token grammar was another credentialed read or SQL; this is the operator
+// path. Returns which columns were cleared ("os", "release"); none when
+// nothing exact was held, which the caller reports rather than records.
+func (Assets) ClearExactAttribution(ctx context.Context, c *Conn, id uuid.UUID, by *uuid.UUID, at time.Time) ([]string, error) {
+	stamp := func(which string) []byte {
+		b, _ := json.Marshal(map[string]any{"source": "operator_cleared", "cleared_at": at.UTC(), "cleared_by": by, "of": which})
+		return b
+	}
+	const q = `
+		UPDATE assets
+		   SET os_provenance = CASE WHEN jsonb_typeof(os_provenance) = 'object' AND os_provenance ->> 'source' = 'os-release'
+		                            THEN $3::jsonb || jsonb_build_object('was', os_provenance) ELSE os_provenance END,
+		       release_provenance = CASE WHEN jsonb_typeof(release_provenance) = 'object' AND release_provenance ->> 'source' = 'package_manager'
+		                            THEN $4::jsonb || jsonb_build_object('was', release_provenance) ELSE release_provenance END
+		 WHERE tenant_id = $1 AND asset_id = $2
+		 RETURNING coalesce(os_provenance ->> 'source' = 'operator_cleared' AND (os_provenance -> 'was' ->> 'source') = 'os-release' AND (os_provenance ->> 'cleared_at') = $5, false),
+		           coalesce(release_provenance ->> 'source' = 'operator_cleared' AND (release_provenance -> 'was' ->> 'source') = 'package_manager' AND (release_provenance ->> 'cleared_at') = $5, false)`
+	var osCleared, relCleared bool
+	atText, _ := json.Marshal(at.UTC())
+	if err := c.QueryRow(ctx, q, c.Tenant().UUID(), id, string(stamp("os")), string(stamp("release")), string(atText[1:len(atText)-1])).
+		Scan(&osCleared, &relCleared); err != nil {
+		return nil, mapError(err)
+	}
+	var out []string
+	if osCleared {
+		out = append(out, "os")
+	}
+	if relCleared {
+		out = append(out, "release")
+	}
+	return out, nil
+}
+
 // ============================================================================
 // Asset detail (session 18): the base row plus its current addresses and
 // services, for the operator UI's asset view.

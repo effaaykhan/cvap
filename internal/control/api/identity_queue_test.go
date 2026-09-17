@@ -276,7 +276,7 @@ func (q *queueFixture) trustAt(t *testing.T) []string {
 	var fps []string
 	if err := q.db.Read(context.Background(), q.tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
-		fps, err = (store.AssetIdentityKeys{}).SSHHostKeyFingerprintsAt(ctx, c, qAddr, 22, store.SightingWindow)
+		fps, err = (store.AssetIdentityKeys{}).SSHHostKeyFingerprintsAt(ctx, c, qAddr, 22, store.DefaultSightingWindow)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -583,7 +583,7 @@ func TestConfirmReStampsARotatedKeyAndNothingElse(t *testing.T) {
 		var fps []string
 		if err := f.db.Read(ctx, f.tenant, func(ctx context.Context, c *store.Conn) error {
 			var err error
-			fps, err = (store.AssetIdentityKeys{}).SSHHostKeyFingerprintsAt(ctx, c, qAddr, 22, store.SightingWindow)
+			fps, err = (store.AssetIdentityKeys{}).SSHHostKeyFingerprintsAt(ctx, c, qAddr, 22, store.DefaultSightingWindow)
 			return err
 		}); err != nil {
 			t.Fatal(err)

@@ -64,6 +64,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/assets/{asset_id}/attribution/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear a pinned exact attribution
+         * @description An attribution read on the host (/etc/os-release, the package manager) outranks every inferred sweep for ever (ADR-095). When a host lied within the token grammar, this is the operator's way to lift that rank: the values stay, their provenance is re-stamped operator_cleared, and the next sweep re-derives. Recorded with the operator.
+         */
+        post: operations["postV1AssetsByAsset_idAttributionClear"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assets/{asset_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The asset's timeline
+         * @description Every audit event keyed to the asset, newest first: identity contests, rotations, expiries, the operator's decisions and refusals, cleared attributions. What happened to this host, where the host is (ADR-100).
+         */
+        get: operations["getV1AssetsByAsset_idEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/assets/{asset_id}/identity/confirm": {
         parameters: {
             query?: never;
@@ -199,6 +239,50 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/credential-profiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List credential profiles
+         * @description The non-secret face of each profile: name, type, user, and whether an operator pin is set. Never the secret or its pointer.
+         */
+        get: operations["getV1Credential-profiles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/credential-profiles/{profile_id}/known-hosts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Pin host keys on a credential profile
+         * @description Operator-pinned known_hosts lines outrank whatever discovery observed for the hosts they name (ADR-091 §4) — the one trust root chosen by a person. Validated as plain known_hosts lines; markers and hashed hosts are refused. Recorded with the operator and the pinned fingerprints. A trust decision, not a verification (B44).
+         */
+        put: operations["putV1Credential-profilesByProfile_idKnown-hosts"];
+        post?: never;
+        /**
+         * Clear the pin on a credential profile
+         * @description The fleet path uses the observed key again for this profile's targets (two sightings at the address, ADR-094). Recorded with the operator.
+         */
+        delete: operations["deleteV1Credential-profilesByProfile_idKnown-hosts"];
         options?: never;
         head?: never;
         patch?: never;
@@ -645,6 +729,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/settings/identity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The identity sighting window
+         * @description How long a sighting counts toward the observed trust root and an address is evidence of the same host (ADR-094/096; ADR-100). Shown beside its bounds and the tenant's measured scan cadence.
+         */
+        get: operations["getV1SettingsIdentity"];
+        /**
+         * Set the identity sighting window
+         * @description Bounded, and refused below twice the measured scan cadence: two scans must land inside one window for an observed key to become trust material, so a shorter window turns the credentialed path off quietly. Recorded with the operator.
+         */
+        put: operations["putV1SettingsIdentity"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/zones": {
         parameters: {
             query?: never;
@@ -731,6 +839,40 @@ export interface components {
              */
             valid_from: string;
         };
+        AssetEventResponse: {
+            /** @description identity.contested | identity.rotated | identity.contest_expired | identity.resolved | identity.confirmed | identity.refused | asset.attribution_cleared, and whatever else names the asset. */
+            action: string;
+            /** @description The operator, when a person acted; absent for the system. */
+            actor_id?: string | null;
+            actor_type: string;
+            detail?: {
+                [key: string]: unknown;
+            };
+            id: string;
+            /** Format: date-time */
+            occurred_at: string;
+        };
+        AssetEventsResponse: {
+            asset_id: string;
+            /** @description Newest first, at most ?limit= (default 100, at most 500). */
+            events: components["schemas"]["AssetEventResponse"][];
+        };
+        AssetKernelPackageResponse: {
+            binary: string;
+            /** @description kernel-running | kernel-installed-not-running | kernel-unknown (the read carried no uname -r). */
+            state: string;
+            version: string;
+        };
+        AssetKernelResponse: {
+            /** @description Every kernel package the read carried, with its state; ordinary packages are not listed. */
+            installed: components["schemas"]["AssetKernelPackageResponse"][];
+            /** Format: date-time */
+            read_at: string;
+            /** @description A kernel package newer than the running one is installed and not running. Absent when it cannot be judged (no running kernel found among the installed packages). */
+            reboot_pending?: boolean | null;
+            /** @description uname -r as read on the host; absent on a read that did not carry it. */
+            running_release?: string;
+        };
         AssetListResponse: {
             assets: components["schemas"]["AssetSummary"][];
             /** @description Cursor for the next page; pass as before with next_id. Absent on the last page. */
@@ -761,6 +903,7 @@ export interface components {
             /** @description At most 200 rows, one per key per address it was seen at, keys awaiting confirmation first; identity_keys_total counts those rows, so a larger total means keys are missing from this page. */
             identity_keys: components["schemas"]["IdentityKeyResponse"][];
             identity_keys_total: number;
+            kernel?: components["schemas"]["AssetKernelResponse"];
             /** @description Open findings whose CVE is in CISA KEV. */
             kev_findings: number;
             /** Format: date-time */
@@ -867,6 +1010,19 @@ export interface components {
             rule: string;
             severity: string;
         };
+        ClearAttributionRequest: {
+            /** @description Why. Recorded in the audit log beside who cleared it. At most 4 KiB. */
+            reason: string;
+        };
+        ClearAttributionResponse: {
+            asset_id: string;
+            /** @description os (the /etc/os-release family read), release (the package-manager release read), or both. The values stay; the next inferred sweep may replace them. */
+            cleared: string[];
+        };
+        ClearPinRequest: {
+            /** @description Why. Recorded in the audit log. At most 4 KiB. */
+            reason: string;
+        };
         ConfirmIdentityRequest: {
             /** @description The keys the operator is confirming, as 'key_type fingerprint' — each a live rotated or lapsed key on the asset. Named keys only: the others stay excluded. A named key that is not rotated or lapsed (confirmed already, retired, never there) refuses the whole request (409). */
             keys: string[];
@@ -889,6 +1045,19 @@ export interface components {
             scan_type: string;
             /** @description At least one. All must be attested as authorised. */
             targets: components["schemas"]["ScanTargetInput"][];
+        };
+        CredentialProfileListResponse: {
+            profiles: components["schemas"]["CredentialProfileResponse"][];
+        };
+        CredentialProfileResponse: {
+            cred_type: string;
+            id: string;
+            name: string;
+            /** @description known_hosts lines an operator pinned; 0 means the fleet path uses the key CVAP observed for the target. */
+            pin_lines: number;
+            /** Format: date-time */
+            updated_at: string;
+            username?: string;
         };
         EnrollmentTokenRequest: {
             description?: string;
@@ -1141,10 +1310,32 @@ export interface components {
             source?: string;
         };
         IdentityQueueResponse: {
-            /** @description Every contested address, listed or not — an attacker's newer parks can push a real contest off the page; name it with ?address= to reach it. */
+            /** @description Every contested address, listed or not — an attacker's newer parks can push a real contest off the page; name it with ?address= to reach it, or page with the cursor. */
             addresses_total: number;
-            /** @description The newest 200 contested addresses, or the one named by ?address=. */
+            /** @description The newest contested addresses — ?limit= of them (default 25, at most 200) — or the one named by ?address=. */
             groups: components["schemas"]["IdentityQueueGroupResponse"][];
+            /** @description The last group's last_seen; send it back as ?before= with next_before_address for the next page. */
+            next_before?: string | null;
+            next_before_address?: string | null;
+        };
+        IdentitySettingsRequest: {
+            /** @description Why. Recorded in the audit log beside who changed it. At most 4 KiB. */
+            reason: string;
+            /** @description Between min_hours and max_hours, and at least twice the measured scan cadence. */
+            sighting_window_hours: number;
+        };
+        IdentitySettingsResponse: {
+            default_hours: number;
+            /** @description True when no operator has set it; the value shown is the default. */
+            is_default: boolean;
+            max_hours: number;
+            min_hours: number;
+            /** @description Median hours between the last completed scans; a window under twice this is refused. */
+            scan_cadence_hours?: number | null;
+            /** @description How many completed scans the cadence was measured over. */
+            scan_cadence_samples: number;
+            /** @description How long a sighting counts toward observed trust and an address is evidence of the same host. */
+            sighting_window_hours: number;
         };
         IssueKillRequest: {
             /** @description Required. A fleet stop with no stated reason is unreviewable afterwards. */
@@ -1218,6 +1409,18 @@ export interface components {
             key_value: string;
             last_seen: string;
             source: string;
+        };
+        PinKnownHostsRequest: {
+            /** @description Plain known_hosts lines — host[,host] keytype base64 — one per line; comments allowed, markers and hashed hosts refused. At most 64 KiB / 1000 lines. */
+            known_hosts: string;
+            /** @description Why. Recorded in the audit log beside who pinned. At most 4 KiB. */
+            reason: string;
+        };
+        PinKnownHostsResponse: {
+            /** @description SHA256 fingerprints of the pinned keys — public material, recorded in the audit event too. */
+            fingerprints: string[];
+            lines: number;
+            profile_id: string;
         };
         PolicyListResponse: {
             policies: components["schemas"]["PolicyResponse"][];
@@ -1538,6 +1741,126 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AssetResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold asset.read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    postV1AssetsByAsset_idAttributionClear: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClearAttributionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClearAttributionResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold identity.resolve, or the X-CVAP-CSRF header is missing or does not match the session, or the request did not come from this site. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getV1AssetsByAsset_idEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetEventsResponse"];
                 };
             };
             /** @description The request body or a path parameter was malformed. */
@@ -1906,6 +2229,186 @@ export interface operations {
             };
             /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    "getV1Credential-profiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialProfileListResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold policy.read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    "putV1Credential-profilesByProfile_idKnown-hosts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PinKnownHostsRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PinKnownHostsResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold credential.pin, or the X-CVAP-CSRF header is missing or does not match the session, or the request did not come from this site. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    "deleteV1Credential-profilesByProfile_idKnown-hosts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClearPinRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialProfileResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold credential.pin, or the X-CVAP-CSRF header is missing or does not match the session, or the request did not come from this site. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3394,6 +3897,122 @@ export interface operations {
                 };
             };
             /** @description Refused because the session's role does not hold scan.safety_mode, or the X-CVAP-CSRF header is missing or does not match the session, or the request did not come from this site. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getV1SettingsIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentitySettingsResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold asset.read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    putV1SettingsIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IdentitySettingsRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentitySettingsResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold policy.write, or the X-CVAP-CSRF header is missing or does not match the session, or the request did not come from this site. */
             403: {
                 headers: {
                     [name: string]: unknown;

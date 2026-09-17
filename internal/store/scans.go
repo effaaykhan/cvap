@@ -578,3 +578,28 @@ func (Scans) SettleIfDone(ctx context.Context, c *Conn, scanID uuid.UUID) (ScanS
 	}
 	return ScanStatus(st), nil
 }
+
+// RecentCompletions returns the completion times of the tenant's newest
+// completed scans, newest first, at most n — the sample the identity window's
+// cadence check measures over (ADR-100).
+func (Scans) RecentCompletions(ctx context.Context, c *Conn, n int) ([]time.Time, error) {
+	if n <= 0 || n > 100 {
+		n = 10
+	}
+	rows, err := c.Query(ctx, `SELECT completed_at FROM scans
+		 WHERE tenant_id = $1 AND status = 'completed' AND completed_at IS NOT NULL
+		 ORDER BY completed_at DESC LIMIT $2`, c.Tenant().UUID(), n)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	var out []time.Time
+	for rows.Next() {
+		var t time.Time
+		if err := rows.Scan(&t); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, t)
+	}
+	return out, mapError(rows.Err())
+}

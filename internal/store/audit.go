@@ -41,6 +41,11 @@ type AuditEvent struct {
 
 type AuditEvents struct{}
 
+// MaxAuditDetailBytes bounds one event's detail. The audit log records
+// decisions and their reasons — a handful of fingerprints, a 4 KiB reason —
+// never a request body.
+const MaxAuditDetailBytes = 16 << 10
+
 // Record appends an event.
 //
 // Detail is marshalled here rather than by the caller so there is one place to
@@ -54,6 +59,15 @@ func (AuditEvents) Record(ctx context.Context, c *Conn, e AuditEvent) error {
 		b, err := json.Marshal(e.Detail)
 		if err != nil {
 			return fmt.Errorf("store: marshal audit detail: %w", err)
+		}
+		if len(b) > MaxAuditDetailBytes {
+			// A caller echoed something the size of a request body into the
+			// log (measured: a refused confirm carrying a 1 MiB keys array,
+			// ~400 MiB/s of audit rows from one operator, and a 481 MiB
+			// timeline page). The record keeps the action and the fact of
+			// truncation; the row is not what stores request bodies.
+			b, _ = json.Marshal(map[string]any{"truncated": true, "detail_bytes": len(b),
+				"note": "audit detail exceeded " + fmt.Sprint(MaxAuditDetailBytes) + " bytes and was not stored"})
 		}
 		detail = b
 	}

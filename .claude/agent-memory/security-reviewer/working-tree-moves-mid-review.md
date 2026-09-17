@@ -16,6 +16,12 @@ appeared, fixing the two defects I had just measured. Two unrelated files
 there at the start. Reporting from the earlier read would have described code that no
 longer existed.
 
+Again in the ADR-100 review (2026-09-15): a parallel session fixed THREE findings while I was
+probing — the keyset cursor's tie predicate, the full-last-page cursor (now `limit+1`), and the
+refusal's resource id (now `holderOf(address)` rather than the caller's `asset_id`) — and added
+pattern/negation refusal to `hostkeytrust.ValidatePin`. Re-RUNNING the probes, not re-reading the
+diff, is what established which findings were still live.
+
 **How to apply:** checkpoint with `md5sum` on the files under review before a long test
 run and compare after. Report findings against the tree as it stands at the end, and say
 plainly which findings were already fixed during the session rather than silently

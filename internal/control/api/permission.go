@@ -71,6 +71,11 @@ const (
 	// (B44), and the authority to give it is not the authority to look.
 	PermIdentityResolve Permission = "identity.resolve"
 
+	// Pinning a host key on a credential profile re-roots credentialed trust
+	// by hand — an operator line outranks whatever discovery saw (ADR-091 §4) —
+	// so it is its own authority, like identity.resolve, not policy.write.
+	PermCredentialPin Permission = "credential.pin"
+
 	PermAuthConfigRead  Permission = "auth.read"
 	PermAuthConfigWrite Permission = "auth.write"
 )
@@ -87,6 +92,7 @@ var allPermissions = map[Permission]bool{
 	PermAssetRead: true, PermFindingRead: true,
 	PermFindingExportAll: true, PermAssetExportAll: true,
 	PermIdentityResolve: true,
+	PermCredentialPin:   true,
 }
 
 // PermissionNames lists the closed set, sorted. For the OpenAPI document and
