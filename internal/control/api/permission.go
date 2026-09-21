@@ -74,6 +74,14 @@ const (
 	// Pinning a host key on a credential profile re-roots credentialed trust
 	// by hand — an operator line outranks whatever discovery saw (ADR-091 §4) —
 	// so it is its own authority, like identity.resolve, not policy.write.
+	//
+	// #nosec G101 -- this is a permission NAME, not a credential. G101 matches
+	// the identifier against /cred/ and sees a string literal assigned to it;
+	// every Permission in this block is one arm of a closed enum of authority
+	// names, all of them appear verbatim in the API surface and in role rows,
+	// and none is secret. Annotated rather than renamed: the name is the
+	// authority, and bending it to satisfy a LOW-confidence taint match would
+	// make the permission read as something other than what it grants.
 	PermCredentialPin Permission = "credential.pin"
 
 	PermAuthConfigRead  Permission = "auth.read"
