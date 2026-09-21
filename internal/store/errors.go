@@ -85,6 +85,19 @@ var (
 	// in the transaction whose fate is in question.
 	ErrStatementTimeout = errors.New("store: statement exceeded its time budget")
 
+	// ErrPoolExhausted means no pooled connection became available within the
+	// budget (ADR-102). The statement never ran.
+	//
+	// Held apart from ErrStatementTimeout because they are opposite diagnoses
+	// that look identical from inside inTx: a statement timeout names a query
+	// whose plan needs profiling, while this names a deployment that has run out
+	// of connections — usually because of load belonging to some OTHER tenant.
+	// A security review measured `SELECT 1` coming back as ErrStatementTimeout
+	// while another tenant held the only connection, which told the operator to
+	// profile `SELECT 1` and moved the victim's Health counter for the noisy
+	// tenant's load. Capacity is a 503; it is not a slow query.
+	ErrPoolExhausted = errors.New("store: no pooled connection available within the budget")
+
 	// ErrTenantNotResolved means a scan point certificate fingerprint did not
 	// resolve to a tenant (ADR-031).
 	//

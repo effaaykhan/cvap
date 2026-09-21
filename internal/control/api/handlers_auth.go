@@ -185,7 +185,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if readErr != nil && isInfrastructureError(readErr) {
 		// A genuine database fault must not present as bad credentials: it would
 		// hide an outage behind a message telling operators to check their
-		// password.
+		// password. The budget firing IS such a fault — isInfrastructureError
+		// says so explicitly, because that switch DEFAULTS to "refusal" and a
+		// timeout was answered 401 until it was listed there.
+		s.noteTimeout(r, readErr)
 		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
 			"An unexpected error occurred.", readErr)
 		return
@@ -269,24 +272,29 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		// storeError maps ErrNotFound to 404, which on a login endpoint is a
 		// user-existence oracle. Every fault here is one flat 500 instead.
 		//
-		// The budget is the one exception (ADR-101). A timeout is a property of
-		// how long a statement took, not of whether this account exists, so it
-		// carries no signal about the user — and reporting "the server is
-		// broken" when the server merely ran out of budget sends an operator
-		// looking for a bug instead of a plan. Checked explicitly rather than by
-		// delegating to storeError, so the anti-oracle default stays intact.
+		// ADR-101 carved the budget out as "the one fault that carries no signal
+		// about the user" and answered it 504. A security review MEASURED that
+		// and it is false (ADR-102). `refuse` above returns before this
+		// transaction is ever opened, so phase 3 is reachable ONLY for an
+		// existing, active, local-auth account: a 504 from here means "this
+		// account exists", as a clean positive needing no timing statistics.
+		// And the probe is free — the rolled-back transaction leaves
+		// failed_attempts unmoved and writes no auth.login_failed row, so it is
+		// the one probe that neither counts toward lockout nor leaves a trace.
 		//
-		// Note what a timeout on THIS path costs: the transaction rolled back,
-		// so the failed-attempt counter and the auth.login_failed audit event
-		// this closure records are gone with it. The attempt happened and left
-		// nothing behind. That is the honest consequence of the bound, recorded
-		// in ADR-101 rather than papered over — and it is why `err` is checked
-		// before `denied`: a refusal that was not recorded must not be reported
-		// as though it was.
-		if errors.Is(err, store.ErrStatementTimeout) {
-			s.storeError(w, r, err)
-			return
-		}
+		// The exception is withdrawn. The timeout is still metered and logged,
+		// so the operator keeps the signal; the STATUS is the part the attacker
+		// reads, and it is the same flat 500 every other fault gets.
+		//
+		// Note what a timeout here costs regardless: the transaction rolled
+		// back, so the failed-attempt counter and the auth.login_failed audit
+		// event this closure records went with it. That is why `err` is checked
+		// before `denied` — a refusal that was not recorded must not be reported
+		// as though it was — and it is why moving those records into their own
+		// transaction is not optional: that move is also what would let the
+		// unknown-user path open a write, closing the residual 500-vs-401
+		// differential this fix does not reach.
+		s.noteTimeout(r, err)
 		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
 			"An unexpected error occurred.", err)
 		return
@@ -551,6 +559,14 @@ func isInfrastructureError(err error) bool {
 		errors.Is(err, store.ErrSessionInvalid):
 		return false
 	case errors.Is(err, store.ErrNotPermitted),
+		// The budget firing is a fault, not an outcome. Listed explicitly
+		// because this switch DEFAULTS to "refusal", so a sentinel added to the
+		// store after this function was written silently becomes a 401 (ADR-101,
+		// and it did).
+		errors.Is(err, store.ErrStatementTimeout),
+		// Out of connections is a deployment fault too. Same reasoning, and it
+		// would otherwise default to "refusal" exactly as the timeout did.
+		errors.Is(err, store.ErrPoolExhausted),
 		errors.Is(err, store.ErrTenantIsolation),
 		errors.Is(err, store.ErrNoTenantContext),
 		errors.Is(err, store.ErrTransactionEnded),

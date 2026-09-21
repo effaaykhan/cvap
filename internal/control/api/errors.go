@@ -55,6 +55,12 @@ const (
 	// profiling, and an alert that cannot tell them apart pages the wrong
 	// person.
 	CodeTimeout = "timeout"
+
+	// CodeCapacity is the deployment being out of connections, not a slow
+	// query. Separate from CodeTimeout for the same reason CodeTimeout is
+	// separate from CodeInternal: they send the operator to different places —
+	// add capacity, versus profile a statement (ADR-102).
+	CodeCapacity = "capacity"
 )
 
 // writeError sends an error response and logs the real one.
@@ -96,6 +102,11 @@ func (s *Server) storeError(w http.ResponseWriter, r *http.Request, err error) {
 		// broken when their account is simply locked.
 		writeError(w, r, log, http.StatusUnauthorized, CodeUnauthorized,
 			"Those credentials are not valid.", err)
+	case errors.Is(err, store.ErrPoolExhausted):
+		// 503, and NOT metered as a query timeout: the statement never ran, and
+		// the cause is usually load belonging to another tenant.
+		writeError(w, r, log, http.StatusServiceUnavailable, CodeCapacity,
+			"The server is at capacity. Try again shortly.", err)
 	case errors.Is(err, store.ErrStatementTimeout):
 		// 504, not 500: the request was well formed and the server simply did
 		// not finish it inside the budget. writeError logs this at Error with
@@ -107,7 +118,7 @@ func (s *Server) storeError(w http.ResponseWriter, r *http.Request, err error) {
 		// Metered before the response is written, so Health can say the bound
 		// fired without an operator having to find it in the log.
 		if tenant, ok := tenantFrom(r.Context()); ok {
-			s.timeouts.note(tenant)
+			s.timeouts.note(tenant, authenticatedFrom(r.Context()))
 		}
 		writeError(w, r, log, http.StatusGatewayTimeout, CodeTimeout,
 			"The server did not finish this request within its time budget.", err)
@@ -133,6 +144,29 @@ func (s *Server) storeError(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, r, log, http.StatusInternalServerError, CodeInternal,
 			"An unexpected error occurred.", err)
 	}
+}
+
+// internalError is the flat-500 path, with the one exception the budget earns.
+//
+// Some handlers deliberately do NOT call storeError: on the login and OIDC
+// surfaces its ErrNotFound -> 404 would be a user-existence oracle, so every
+// fault there collapses to one indistinguishable 500. That is right for faults
+// that could carry a signal about the subject, and wrong for a budget timeout,
+// which is a property of how long a statement took and says nothing about who
+// asked (ADR-101).
+//
+// A helper rather than a branch repeated at a dozen call sites, because the
+// review that found this found it at TWO of them — the session Touch that runs
+// on every authenticated request, and the whole OIDC flow — after the first was
+// fixed by hand. A per-call-site branch is one somebody adds a thirteenth site
+// without.
+func (s *Server) internalError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, store.ErrStatementTimeout) || errors.Is(err, store.ErrPoolExhausted) {
+		s.storeError(w, r, err)
+		return
+	}
+	writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
+		"An unexpected error occurred.", err)
 }
 
 func writeJSON(w http.ResponseWriter, r *http.Request, log *slog.Logger, status int, body any) {

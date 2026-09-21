@@ -1,6 +1,9 @@
 package api
 
 import (
+	"context"
+	"errors"
+	"net/http"
 	"sync"
 	"time"
 
@@ -41,36 +44,83 @@ type timeoutMeter struct {
 type timeoutTally struct {
 	n    int
 	last time.Time
+	// anon counts timeouts on requests that never reached a session. Kept in
+	// its OWN number because an anonymous caller can drive it at will — a
+	// security review measured an unauthenticated login request moving a
+	// tenant's count from 0 to 1, repeatable without limit (ADR-102). Mixing it
+	// into `n` would let a stranger decide what an operator investigates.
+	anon int
 }
 
 func newTimeoutMeter() *timeoutMeter {
 	return &timeoutMeter{seen: map[store.TenantID]timeoutTally{}}
 }
 
-// note records one timeout against a tenant.
-func (m *timeoutMeter) note(tenant store.TenantID) {
+// note records one timeout against a tenant, in the bucket its trust level
+// earns.
+func (m *timeoutMeter) note(tenant store.TenantID, authenticated bool) {
 	if m == nil || tenant.IsZero() {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t := m.seen[tenant]
-	t.n++
-	t.last = time.Now().UTC()
+	if authenticated {
+		t.n++
+		t.last = time.Now().UTC()
+	} else {
+		t.anon++
+	}
 	m.seen[tenant] = t
 }
 
-// read returns the count and the most recent timeout for one tenant.
-func (m *timeoutMeter) read(tenant store.TenantID) (int, *time.Time) {
+// read returns the authenticated count, the most recent authenticated timeout,
+// and the anonymous count, for one tenant.
+func (m *timeoutMeter) read(tenant store.TenantID) (int, *time.Time, int) {
 	if m == nil || tenant.IsZero() {
-		return 0, nil
+		return 0, nil, 0
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t, ok := m.seen[tenant]
-	if !ok || t.n == 0 {
-		return 0, nil
+	if !ok {
+		return 0, nil, 0
+	}
+	if t.n == 0 {
+		return 0, nil, t.anon
 	}
 	last := t.last
-	return t.n, &last
+	return t.n, &last, t.anon
+}
+
+// noteTimeout meters a budget timeout without changing the response.
+//
+// For the surfaces that must answer ONE status for every fault — login above
+// all, where the status code is what an attacker reads (ADR-102) — the operator
+// still needs to know the bound fired. This records it and logs it; the caller
+// writes whatever response its own anti-oracle rules demand.
+//
+// A non-timeout error is ignored, so call sites can hand it whatever they have.
+func (s *Server) noteTimeout(r *http.Request, err error) {
+	if !errors.Is(err, store.ErrStatementTimeout) {
+		return
+	}
+	s.log.Error("a transaction exceeded its time budget",
+		"request_id", requestIDFrom(r.Context()),
+		"method", r.Method, "path", r.URL.Path, "err", err)
+	if tenant, ok := tenantFrom(r.Context()); ok {
+		s.timeouts.note(tenant, authenticatedFrom(r.Context()))
+	}
+}
+
+// authenticatedFrom reports whether this request reached a real session.
+//
+// The meter keys on it because an ANONYMOUS caller must not be able to move the
+// number an operator reads to decide a query needs profiling. A security review
+// measured an unauthenticated login request driving a tenant's
+// timed_out_requests from 0 to 1, unbounded by repetition and poisoning
+// last_timeout_at with it (ADR-102).
+func authenticatedFrom(ctx context.Context) bool {
+	_, ok := sessionFrom(ctx)
+	return ok
 }

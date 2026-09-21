@@ -185,8 +185,7 @@ func (s *Server) startOIDC(w http.ResponseWriter, r *http.Request) {
 			refuse(errors.New("tenant has no auth configuration"))
 			return
 		}
-		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
-			"An unexpected error occurred.", err)
+		s.internalError(w, r, err)
 		return
 	}
 	if cfg.Method != store.AuthOIDC {
@@ -209,28 +208,24 @@ func (s *Server) startOIDC(w http.ResponseWriter, r *http.Request) {
 
 	state, stateHash, err := newToken()
 	if err != nil {
-		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
-			"An unexpected error occurred.", err)
+		s.internalError(w, r, err)
 		return
 	}
 	nonce, nonceHash, err := newToken()
 	if err != nil {
-		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
-			"An unexpected error occurred.", err)
+		s.internalError(w, r, err)
 		return
 	}
 	verifier, challenge, err := newPKCE()
 	if err != nil {
-		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
-			"An unexpected error occurred.", err)
+		s.internalError(w, r, err)
 		return
 	}
 	// The browser binding. See the column comment in migration 0029: state gives
 	// single-use, this gives user-agent binding, and the flow needs both.
 	browserTok, browserHash, err := newToken()
 	if err != nil {
-		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
-			"An unexpected error occurred.", err)
+		s.internalError(w, r, err)
 		return
 	}
 
@@ -242,8 +237,7 @@ func (s *Server) startOIDC(w http.ResponseWriter, r *http.Request) {
 	// could influence it would receive the authorization code.
 	redirectURI, err := s.redirectURI(r.Context(), tenant)
 	if err != nil {
-		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
-			"An unexpected error occurred.", err)
+		s.internalError(w, r, err)
 		return
 	}
 
@@ -261,8 +255,7 @@ func (s *Server) startOIDC(w http.ResponseWriter, r *http.Request) {
 				"Too many sign-in attempts are in flight. Try again shortly.", err)
 			return
 		}
-		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
-			"An unexpected error occurred.", err)
+		s.internalError(w, r, err)
 		return
 	}
 
@@ -394,8 +387,7 @@ func (s *Server) callbackOIDC(w http.ResponseWriter, r *http.Request) {
 			refuse(err)
 			return
 		}
-		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
-			"An unexpected error occurred.", err)
+		s.internalError(w, r, err)
 		return
 	}
 	if mismatch {
@@ -549,8 +541,7 @@ func (s *Server) callbackOIDC(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
-			"An unexpected error occurred.", err)
+		s.internalError(w, r, err)
 		return
 	}
 	if denied != nil {

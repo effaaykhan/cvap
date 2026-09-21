@@ -154,8 +154,7 @@ func (s *Server) resolveTenant(next http.Handler) http.Handler {
 		tenant, err := s.db.ResolveDomainTenant(r.Context(), r.Host)
 		if err != nil {
 			if !errors.Is(err, store.ErrTenantNotResolved) {
-				writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
-					"An unexpected error occurred.", err)
+				s.internalError(w, r, err)
 				return
 			}
 			s.log.Info("host did not resolve to a tenant",
@@ -245,8 +244,7 @@ func (s *Server) authenticate(r Route, next http.Handler) http.Handler {
 				s.unauthorized(w, r2, err)
 				return
 			}
-			writeError(w, r2, s.log, http.StatusInternalServerError, CodeInternal,
-				"An unexpected error occurred.", err)
+			s.internalError(w, r2, err)
 			return
 		}
 
@@ -269,8 +267,7 @@ func (s *Server) authenticate(r Route, next http.Handler) http.Handler {
 			// Corrupt permissions deny, and say so loudly. Treating them as an
 			// empty set would also deny, but silently, and an operator whose
 			// access vanished would have nothing to look at.
-			writeError(w, r2, s.log, http.StatusInternalServerError, CodeInternal,
-				"An unexpected error occurred.", err)
+			s.internalError(w, r2, err)
 			return
 		}
 

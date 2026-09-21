@@ -66,10 +66,22 @@ makes the predicate NULL and silently returns nothing instead of raising.
 
 ## The pool
 
-`Read` and `Write` are the only doors, and a `TenantID` is what opens them. There is no
-`Acquire`, no `Begin`, no exported accessor for the pool or a connection.
+`Read`, `Write`, `ReadWithin` and `WriteWithin` are the only doors, and a `TenantID` is what opens
+them. There is no `Acquire`, no `Begin`, no exported accessor for the pool or a connection.
 
-- **`SET LOCAL` inside a transaction, always.** A session `SET` would have to be undone by
+**Every transaction carries a time budget (ADR-101).** `Read`/`Write` take `OperatorBudget` (30 s);
+`ReadWithin`/`WriteWithin` take the caller's, and a zero or negative budget is REFUSED rather than
+treated as unbounded. The budget is applied TWICE, and neither is redundant: a context deadline,
+which bounds the whole transaction and is the bound that actually holds, and `SET LOCAL
+statement_timeout`, which bounds each STATEMENT. `statement_timeout` alone bounds nothing over a
+callback — measured: three `pg_sleep(0.8)` statements in one transaction under a 1 s
+`statement_timeout` all completed, 2.4 s, none cancelled, because the setting resets per statement.
+Exceeding either gives `ErrStatementTimeout`, which the API maps to 504.
+
+- **`SET LOCAL` inside a transaction, always** — now TWO of them, `app.tenant_id` and
+  `statement_timeout`, both set with `set_config(..., true)` and both VERIFIED on the round trip
+  that sets them (the timeout compares as an `interval`, because `set_config` normalises `30000` to
+  `30s`). A session `SET` would have to be undone by
   our own cleanup on release, and cleanup that must run is cleanup that eventually does not.
   Postgres discards `SET LOCAL` at `COMMIT`/`ROLLBACK`, so a connection returning to the pool
   *cannot* carry the previous tenant. **This is why there is no non-transactional path, and
@@ -223,6 +235,27 @@ err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
 **The shape to write instead**: return `nil`, and carry the refusal out in a captured variable.
 Only a genuine FAULT — a database error, a broken constraint — returns an error, because only a
 fault wants the transaction undone.
+
+**That shape is NECESSARY AND NOT SUFFICIENT, since ADR-101.** A transaction can now be ended by
+its own time budget, and when it is, the refusal record rolls back whether or not the closure
+returned nil — measured: an `INSERT` committed earlier in a transaction that then times out leaves
+0 rows. So a fourth way to lose the record exists, and returning nil does not close it.
+
+Two rules follow, and the second is the one people get wrong:
+
+1. **Check the transaction error BEFORE the refusal variable.** `if err != nil` first, then
+   `if denied != nil`. A refusal that was not recorded must never be reported as though it was.
+2. **A timeout is not the same as "nothing happened".** "A transaction that times out commits
+   nothing" is FALSE and was measured to be false: sweeping the deadline across the COMMIT round
+   trip, **42 of 400 trials committed durably while the call returned `ErrStatementTimeout`**
+   (the error reads `store: commit: ... context deadline exceeded`). Zero trials went the other
+   way — a write never returned nil and was lost — so the dangerous direction is still
+   unreachable, but code that treats a timeout as proof the write did not land is wrong. Where
+   that matters, ask the database.
+
+The durable answer for a refusal that MUST leave a record is the one `identity.refused` already
+uses (ADR-100): write it in its OWN transaction, so the decision's fate and the record's fate are
+separate. Login, `changePassword` and the OIDC state consume have not been moved yet.
 
 ```go
 var denied error

@@ -35,6 +35,20 @@ import (
 // class, and a handler that needed the whole list would be a handler acting
 // outside the tenant that authenticated it.
 func (db *DB) ActiveTenantIDs(ctx context.Context) ([]TenantID, error) {
+	// Bounded like everything else (ADR-102). This runs on the raw pool, outside
+	// inTx, so ADR-101's budget never reached it — and it is the FIRST statement
+	// of both background loops, the dispatch sweeper (ADR-012 lease expiry and
+	// PlanPending) and the correlator. A scan-safety audit measured it blocked
+	// for 1m15s with no error, no log line and no bound: one stall there freezes
+	// lease expiry and the whole correlation pipeline indefinitely.
+	//
+	// PreTenantBudget, not OperatorBudget: this is one parameterless STABLE
+	// SECURITY DEFINER call returning a handful of uuids. A sweep that cannot
+	// enumerate tenants in five seconds should say so and let the next tick try,
+	// which is what every caller already does with an error.
+	ctx, cancel := context.WithTimeout(ctx, PreTenantBudget)
+	defer cancel()
+
 	rows, err := db.pool.Query(ctx, `SELECT active_tenant_ids()`)
 	if err != nil {
 		return nil, fmt.Errorf("store: enumerate active tenants: %w", err)

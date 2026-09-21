@@ -99,7 +99,11 @@ func (s *Server) exportFindingsCSV(w http.ResponseWriter, r *http.Request) {
 
 	tenant, _ := tenantFrom(r.Context())
 	var rowsOut []store.FindingSummary
-	err := s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
+	// A CSV export reads far more than a page, which is what BulkBudget is for
+	// (ADR-101). It was on the 30 s operator bound until an ADR-compliance review
+	// measured that the ADR, the index, pool.go and the Health doc string all
+	// SAID exports took the bulk number while the code did not.
+	err := s.db.ReadWithin(r.Context(), tenant, store.BulkBudget, func(ctx context.Context, c *store.Conn) error {
 		var err error
 		rowsOut, err = (store.Findings{}).ListForExport(ctx, c, f, rowCap+1)
 		return err
@@ -180,7 +184,11 @@ func (s *Server) exportAssetsCSV(w http.ResponseWriter, r *http.Request) {
 
 	tenant, _ := tenantFrom(r.Context())
 	var rowsOut []store.Asset
-	err := s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
+	// A CSV export reads far more than a page, which is what BulkBudget is for
+	// (ADR-101). It was on the 30 s operator bound until an ADR-compliance review
+	// measured that the ADR, the index, pool.go and the Health doc string all
+	// SAID exports took the bulk number while the code did not.
+	err := s.db.ReadWithin(r.Context(), tenant, store.BulkBudget, func(ctx context.Context, c *store.Conn) error {
 		var err error
 		rowsOut, err = (store.Assets{}).ListForExport(ctx, c, f, rowCap+1)
 		return err

@@ -336,18 +336,23 @@ func (c *Conn) SendBatch(ctx context.Context, b *Batch) BatchResults {
 //
 // The numbers come from the measured p95s, not from taste. ADR-058 sets the
 // load gate's coarse ceiling at 1000 ms for the finding list and 600 ms for the
-// asset list; ADR-098 measured that list at 1298 ms custom / ~500 ms generic
-// after the LEFT JOIN, and ADR-100 measured the identity queue's pages well
-// under a second. OperatorBudget is thirty times the slowest of those: large
-// enough that no measured page comes near it, small enough that a human still
-// has an answer. BulkBudget is four times OperatorBudget, for exports and
-// sweeps that legitimately read more than a page.
+// asset list; ADR-098 measured that list at 37 ms custom / ~95 ms generic AFTER
+// the LEFT JOIN (1298 ms was the PRE-fix breach and ~500 ms the published SLO —
+// this comment quoted those two by mistake, which an ADR-compliance review
+// measured); ADR-100 measured a full identity-queue page at ~540 ms before it
+// was paged. OperatorBudget is a round number comfortably above the slowest of
+// those — about fifty times ADR-100's ~540 ms — large enough that no measured
+// page comes near it, small enough that a human still has an answer. It is not
+// a target and not an SLO. BulkBudget is four times OperatorBudget, for exports,
+// the correlator and ingest, which legitimately read more than a page.
 const (
 	// OperatorBudget bounds a read or write made on behalf of a waiting human.
 	OperatorBudget = 30 * time.Second
 
-	// BulkBudget bounds work that legitimately reads more than one page —
-	// exports, sweeps, backfills. Not for anything an operator waits on.
+	// BulkBudget bounds work that legitimately reads more than one page — the
+	// CSV exports, the correlator, ingest. Not for anything an operator waits
+	// on, and NOT the dispatch sweeper, which takes the operator number because
+	// its statements are single-row.
 	BulkBudget = 120 * time.Second
 )
 
@@ -428,6 +433,16 @@ func (db *DB) inTx(ctx context.Context, tenant TenantID, opts pgx.TxOptions, bud
 	// never be recycled.
 	pconn, err := db.pool.Acquire(ctx)
 	if err != nil {
+		// NOT mapError here. Acquire failing on the deadline means the pool was
+		// empty for the whole budget, so no statement ever ran — mapping it
+		// through mapError turned "we are out of connections" into
+		// ErrStatementTimeout, i.e. a 504 telling the operator to profile a
+		// query that never executed, metered against the tenant that WAITED
+		// rather than the one holding the connections (ADR-102, measured on
+		// `SELECT 1`).
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("%w: waited %s", ErrPoolExhausted, budget)
+		}
 		return fmt.Errorf("store: acquire: %w", mapError(err))
 	}
 
@@ -592,7 +607,26 @@ func (db *DB) inTx(ctx context.Context, tenant TenantID, opts pgx.TxOptions, bud
 // place in this package that happens. That is the exception ADR-041 describes,
 // and keeping it in one function is what stops it becoming a habit: a new member
 // calls this, and gets the shape for free.
+// PreTenantBudget bounds the three pre-tenant lookups (ADR-102).
+//
+// They run on the raw pool, OUTSIDE inTx, so ADR-101's budget never reached
+// them — and ResolveDomainTenant runs on EVERY operator request, including
+// unauthenticated ones, because a session cookie cannot be validated until the
+// tenant is known. A security review measured it blocking 28.1 s under load
+// with no bound at all; Go's http.Server WriteTimeout does not cancel a request
+// context, so a handler blocked before its first write is never cancelled, and
+// a pre-auth request could occupy a goroutine indefinitely.
+//
+// Five seconds is deliberately far below OperatorBudget: these are three
+// single-row STABLE SECURITY DEFINER lookups on indexed columns. Anything
+// slower is a deployment in trouble, and failing fast is what keeps the
+// pre-auth surface from being an amplifier.
+const PreTenantBudget = 5 * time.Second
+
 func (db *DB) resolvePreTenant(ctx context.Context, query string, arg any) (TenantID, error) {
+	ctx, cancel := context.WithTimeout(ctx, PreTenantBudget)
+	defer cancel()
+
 	var u *uuid.UUID
 	if err := db.pool.QueryRow(ctx, query, arg).Scan(&u); err != nil {
 		// The error is wrapped rather than flattened to the sentinel: a failure

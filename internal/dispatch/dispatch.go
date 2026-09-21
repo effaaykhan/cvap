@@ -482,6 +482,26 @@ func (s *Service) onHeartbeat(ctx context.Context, sess *session, hb *scanpointv
 
 // onLeaseRenewal is the fencing check, answered on the stream.
 func (s *Service) onLeaseRenewal(ctx context.Context, sess *session, r *scanpointv1.LeaseRenewal, out chan<- *scanpointv1.CoreMessage) {
+	// One budget for the WHOLE renewal, not one per statement group (ADR-102).
+	//
+	// This handler runs three bounded transactions in series —
+	// windowClosedForJob, scopeNarrowedForJob, Leases.Renew — each entitled to
+	// dispatchBudget. A scan-safety audit measured the sum: 60.037 s to answer
+	// one renewal, against a LeaseTTL of 60 s. The lease died while Core was
+	// composing the answer about whether to extend it.
+	//
+	// That is ADR-101's own finding recurring one level up. dispatchBudget
+	// bounds a statement group; nothing bounded the renewal, and the ADR's
+	// justification for the number — "a handover, an ack and a lease renewal are
+	// single-row statements" — is simply not true of a renewal.
+	//
+	// A quarter of the TTL, so a renewal answer cannot outlive the lease it is
+	// about even if every leg runs long. The deadline composes downward:
+	// context.WithTimeout keeps the earlier of the two, so each leg still gets
+	// at most dispatchBudget and the whole gets at most this.
+	ctx, cancel := context.WithTimeout(ctx, store.LeaseTTL/4)
+	defer cancel()
+
 	jobID, err := uuid.Parse(r.GetJobId())
 	if err != nil {
 		s.send(ctx, out, leaseGrant(r.GetJobId(), r.GetLeaseEpoch(), 0,
@@ -668,6 +688,38 @@ func (s *Service) scopeNarrowedForJob(ctx context.Context, sess *session, jobID 
 		}
 		return nil
 	}); err != nil {
+		// A BLIP fails open; a BUDGET fails closed. The two are not the same
+		// error, and treating them alike is a scope decision made by accident.
+		//
+		// This branch was written when a read error meant a transient: a
+		// connection reset, a deadlock victim, something that will be fine at
+		// the next renewal twenty seconds later. Failing open there is right —
+		// self-aborting every in-flight job over a blip would halt and zeroise
+		// the fleet for nothing.
+		//
+		// ADR-101 made ErrStatementTimeout a SYSTEMATIC member of that set, and
+		// a scan-safety audit measured the consequence: the same job, the same
+		// narrowed policy, one variable. Healthy, the re-check answered
+		// LEASE_STATE_LOST — "target 192.0.2.7 is no longer in scope" — in
+		// 6.5 ms. With the policy tables over budget it answered
+		// LEASE_STATE_GRANTED in 30.0085 s and extended the lease, and the job
+		// went on scanning a target the live policy excludes.
+		//
+		// A timeout is not evidence that the scope is unchanged. It is the
+		// database being unable to say, for a full budget, whether packets may
+		// still go to this target — and the trigger is a property of the TABLE,
+		// so one slow plan fails every in-flight job's re-check open at once,
+		// which is the mass event the fail-open was written to prevent, arriving
+		// from the other side. Non-negotiable #10 is not a thing to infer from
+		// a missing answer.
+		//
+		// So the budget sentinels halt the job. Everything else still fails
+		// open, and the next renewal asks again.
+		if errors.Is(err, store.ErrStatementTimeout) || errors.Is(err, store.ErrPoolExhausted) {
+			s.log.ErrorContext(ctx, "scope re-check exceeded its budget; halting the job rather than assuming its scope is unchanged",
+				slog.String("job_id", jobID.String()), slog.Any("error", err))
+			return true, "policy scope re-check: the scope could not be read within its time budget"
+		}
 		if !errors.Is(err, store.ErrNotFound) {
 			s.log.WarnContext(ctx, "could not read scope to re-check an in-flight job",
 				slog.String("job_id", jobID.String()), slog.Any("error", err))

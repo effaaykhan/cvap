@@ -159,7 +159,16 @@ func (Jobs) Claim(ctx context.Context, c *Conn, scanPointID uuid.UUID, engines [
 		       AND NOT EXISTS (
 		           SELECT 1 FROM scans s
 		            WHERE s.tenant_id = j.tenant_id AND s.scan_id = j.scan_id
-		              AND s.status IN ('cancelled', 'killed')
+		              -- 'failed' joined this list in S44, measured rather than
+		              -- reasoned about. A plan that COMMITTED while its caller
+		              -- was told the transaction timed out (ADR-102: the commit
+		              -- round trip is a real window) is failed by PlanPending's
+		              -- error branch — and the operator then cannot cancel it,
+		              -- because Scans.Cancel accepts only pending/planning/
+		              -- running. A scan-safety audit dispatched 8 targets from
+		              -- exactly that state. A job whose scan is failed has no
+		              -- business on a wire under any story.
+		              AND s.status IN ('cancelled', 'killed', 'failed')
 		       )
 		       AND NOT EXISTS (
 		           SELECT 1 FROM kill_switches k
@@ -638,7 +647,10 @@ func (Jobs) CancellableFor(ctx context.Context, c *Conn, scanPointID uuid.UUID) 
 		        ORDER BY epoch DESC LIMIT 1
 		  ) l ON true
 		 WHERE j.tenant_id = $1
-		   AND s.status IN ('cancelled', 'killed')
+		   -- 'failed' for the same reason as in Claim: the jobs of a failed
+		   -- scan must also be RECALLED, not merely withheld, or one already
+		   -- dispatched keeps running with nothing able to stop it but a kill.
+		   AND s.status IN ('cancelled', 'killed', 'failed')
 		 ORDER BY j.created_at`
 
 	rows, err := c.Query(ctx, q, c.Tenant().UUID(), scanPointID)
