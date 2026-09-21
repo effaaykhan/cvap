@@ -35,7 +35,19 @@ GRANT cvap_app TO cvap_app_login;
 
 -- Connecting needs CONNECT on the database and USAGE on the schema; the
 -- per-table grants come from cvap_app membership.
-GRANT CONNECT ON DATABASE cvap TO cvap_app_login;
+--
+-- The database is taken from the CONNECTION, not written here. This file is run
+-- against whatever `make app-role DATABASE_URL=...` points at -- a second
+-- database such as cvap_test is the documented way to get CI-like timings -- and
+-- a hardcoded name grants CONNECT on the wrong database while reporting success.
+-- That was harmless only for as long as PUBLIC retained CONNECT on the database
+-- actually being provisioned, which is a default nobody chose and any migration
+-- may revoke.
+DO $$
+BEGIN
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO cvap_app_login', current_database());
+END
+$$;
 GRANT USAGE ON SCHEMA public TO cvap_app_login;
 
 DO $$
@@ -77,7 +89,12 @@ END
 $$;
 
 GRANT cvap_knowledge_import TO cvap_knowledge_import_login;
-GRANT CONNECT ON DATABASE cvap TO cvap_knowledge_import_login;
+-- Same as above: the database comes from the connection.
+DO $$
+BEGIN
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO cvap_knowledge_import_login', current_database());
+END
+$$;
 GRANT USAGE ON SCHEMA public TO cvap_knowledge_import_login;
 
 DO $$
