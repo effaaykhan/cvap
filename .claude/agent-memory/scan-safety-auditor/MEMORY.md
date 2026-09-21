@@ -15,3 +15,4 @@
 - [Task status coverage claims](task_status_coverage_claims.md) — S42/ADR-093: status gates no scanning (full reader set listed); MarkRunning unreachable on the wire, `completed` overclaims, sweeper skips tasks
 - [First-chunk retry fix + heartbeat drift](retry_first_chunk_and_heartbeat_drift.md) — submit.go fix complete incl. multi-chunk; no retry const shadows config; HeartbeatTimeout=90s duplicated as SQL literal in kill.go
 - [ADR-099 kernel read findings](adr099_kernel_read_findings.md) — S43/B36: the credentialed remediation loop closes findings the read judged NOTHING about (2 triggers reproduced); read set itself clean
+- [ADR-101 bound findings](adr101_bound_findings.md) — S44: commit-in-doubt is real, in-flight scope re-check fails open at 30s, kill bound missed, ActiveTenantIDs unbounded. Measured 2026-09-21

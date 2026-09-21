@@ -2371,3 +2371,46 @@ invariant is broken (the wrapped value is what is enforced), but the direction o
 the dangerous one: the largest number an operator can type yields the SHORTEST window, which is
 what the cadence rule exists to prevent.
 **How to apply:** bound the integer in its own domain first, then convert.
+
+**126. A new status code added only to the phase one class of subject reaches — so the status IS
+the oracle the flat-500 existed to prevent.**
+`login` is three phases: a read, an argon2 verify, a write. Phase 3 is reachable ONLY for an
+existing, active, local-auth user; an unknown address returns at `refuse(readErr)` before it.
+ADR-101 added "504 on `ErrStatementTimeout`" to phase 3 only, arguing "a timeout carries no signal
+about the user". Measured (lock the `user_credentials` row `RecordFailure` updates, then two login
+attempts): existing account → **504 `{"error":"timeout"}`** in 30.3 s, unknown account → **401** in
+0.3 s. `failed_attempts` 1→1 and `auth.login_failed` 1→1 across both, because the timeout rolled the
+counter back — so the probe that reveals the account is also the probe that never counts toward
+lockout. The differential survived a parallel fix that added the same 504 to phase 1.
+**How to apply:** before adding a status to an anti-oracle handler, ask which phases each class of
+subject can REACH. A code emitted on a path only real subjects enter is an existence oracle however
+neutral its meaning. Assert by comparing two subjects' status codes, not by reading the branch.
+
+**127. A fault-vs-refusal classifier that enumerates sentinels and DEFAULTS to "refusal".**
+`isInfrastructureError` lists six store sentinels and returns false for everything else, with the
+comment "a genuine database fault must not present as bad credentials". `ErrStatementTimeout` was
+added to the store by ADR-101 and not to this list, so a phase-1 budget timeout answered **401
+"Those credentials are not valid."** — measured at 58.6 s under pool starvation, i.e. exactly the
+outage-behind-a-password-message the comment forbids.
+**How to apply:** a closed switch over a package's sentinels is a cross-package coupling. When a
+store sentinel is added, grep every `errors.Is` switch that defaults, not only the call sites.
+
+**128. Resource exhaustion mapped to the sentinel that means "profile this query".**
+`inTx` wraps `db.pool.Acquire(ctx)` in `mapError`, so pool exhaustion becomes `ErrStatementTimeout`
+→ 504 `timeout` → `timeouts.note(tenant)`. Measured with `MaxConns=1`: tenant B holds the pool,
+tenant A's `SELECT 1` fails at 30.0 s with `store: acquire: ... statement exceeded its time budget`.
+Tenant A's Health then reports a timeout whose doc string says "a statement that reached a plan
+nobody measured — profile it, do not retry it". The query was `SELECT 1`. ADR-101's own argument for
+splitting `timeout` from `internal` ("an alert that cannot tell them apart pages the wrong person")
+is the argument against this conflation.
+**How to apply:** a wait for a SHARED resource and a wait for YOUR OWN work are different faults;
+capacity is a 503. Check what `mapError` is applied to, not only what it maps.
+
+**129. A per-tenant in-memory health meter an unauthenticated caller can move.**
+`timeoutMeter` is correctly keyed by tenant (a second tenant read 0, and an unresolvable host
+creates no entry, so map growth is bounded by real tenants — both measured). But the tenant comes
+from the HOST via `resolveTenant`, which runs before authentication, so any public route that
+reaches `storeError` meters against that tenant. Measured: one unauthenticated
+`POST /v1/auth/login` moved `timed_out_requests` 0 → 1 and set `last_timeout_at`.
+**How to apply:** "per-tenant" answers who can READ a counter. Ask separately who can WRITE it —
+on a host-resolved tenancy that is anyone who can reach the hostname.
