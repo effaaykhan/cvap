@@ -108,6 +108,12 @@ type HealthResponse struct {
 
 	CredentialGrantsUnconfirmed int `json:"credential_grants_unconfirmed" doc:"Credential releases past their expiry with no zeroisation attestation from the scan point that received them (migration 0006)."`
 
+	TimedOutRequests int        `json:"timed_out_requests" doc:"Requests for this tenant that this Core refused with a 504 because they exceeded their time budget (ADR-101). Counted in memory since this process started, so 0 means none since the last restart, not none ever; a durable ledger is deliberately not built yet. Each one names a statement that reached a plan nobody measured — profile it, do not retry it."`
+	LastTimeoutAt    *time.Time `json:"last_timeout_at,omitempty" doc:"When the most recent budget timeout for this tenant happened, if any since this Core started."`
+
+	OperatorBudgetSeconds int `json:"operator_budget_seconds" doc:"The bound every read or write on behalf of a waiting operator runs under (ADR-101). Reported so the surface states the bound it is measuring against rather than leaving it in the source."`
+	BulkBudgetSeconds     int `json:"bulk_budget_seconds" doc:"The bound for work that legitimately reads more than a page -- exports, sweeps, the correlator and ingest."`
+
 	ScopeEnforcementSites int `json:"scope_enforcement_sites" doc:"Always 2 (Core at planning, the scan point on the send path — ADR-024). A property of the design asserted by the safety gate, reported so the surface says what is measured and what is not."`
 
 	ComputedAt time.Time `json:"computed_at"`
@@ -153,7 +159,7 @@ func (s *Server) findingSummaryStats(w http.ResponseWriter, r *http.Request) {
 		stats, err = (store.Findings{}).Stats(ctx, c, since, now, trendDays)
 		return err
 	}); err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 
@@ -191,9 +197,13 @@ func (s *Server) findingSummaryStats(w http.ResponseWriter, r *http.Request) {
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	tenant, _ := tenantFrom(r.Context())
+	timedOut, lastTimeout := s.timeouts.read(tenant)
 	out := HealthResponse{
 		BlockedScans: []BlockedScanResponse{}, ActiveKills: []ActiveKillResponse{},
 		KillSwitchState: "inactive", ScopeEnforcementSites: 2, ComputedAt: now,
+		TimedOutRequests: timedOut, LastTimeoutAt: lastTimeout,
+		OperatorBudgetSeconds: int(store.OperatorBudget / time.Second),
+		BulkBudgetSeconds:     int(store.BulkBudget / time.Second),
 	}
 	if err := s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		// Blocked for capacity: the same predicate scan creation refuses on,
@@ -265,7 +275,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		out.CredentialGrantsUnconfirmed = len(unconfirmed)
 		return nil
 	}); err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusOK, out)

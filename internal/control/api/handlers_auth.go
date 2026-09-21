@@ -265,6 +265,28 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
+		// This path does NOT go through storeError, and that is deliberate:
+		// storeError maps ErrNotFound to 404, which on a login endpoint is a
+		// user-existence oracle. Every fault here is one flat 500 instead.
+		//
+		// The budget is the one exception (ADR-101). A timeout is a property of
+		// how long a statement took, not of whether this account exists, so it
+		// carries no signal about the user — and reporting "the server is
+		// broken" when the server merely ran out of budget sends an operator
+		// looking for a bug instead of a plan. Checked explicitly rather than by
+		// delegating to storeError, so the anti-oracle default stays intact.
+		//
+		// Note what a timeout on THIS path costs: the transaction rolled back,
+		// so the failed-attempt counter and the auth.login_failed audit event
+		// this closure records are gone with it. The attempt happened and left
+		// nothing behind. That is the honest consequence of the bound, recorded
+		// in ADR-101 rather than papered over — and it is why `err` is checked
+		// before `denied`: a refusal that was not recorded must not be reported
+		// as though it was.
+		if errors.Is(err, store.ErrStatementTimeout) {
+			s.storeError(w, r, err)
+			return
+		}
 		writeError(w, r, s.log, http.StatusInternalServerError, CodeInternal,
 			"An unexpected error occurred.", err)
 		return
@@ -385,7 +407,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return (store.Sessions{}).Revoke(ctx, c, sess.ID, "logout")
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	http.SetCookie(w, s.expiredCookie(SessionCookie, true))
@@ -457,7 +479,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 				"Those credentials are not valid.", err)
 			return
 		}
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 
@@ -503,7 +525,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	if denied != nil {

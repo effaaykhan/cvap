@@ -180,10 +180,26 @@ type host struct {
 }
 
 // loadRules reads and validates the active core rules.
+// The correlator's own budget (ADR-101).
+//
+// BulkBudget rather than OperatorBudget: a sweep legitimately reads every
+// unresolved observation for a tenant, which is more than a page by design, and
+// nobody is waiting on it.
+//
+// A timeout here is SAFE by construction, which is the reason this number can be
+// a bound rather than a guess. Every write the sweep makes is one atomic
+// decision — resolveHost closes the old address interval, opens the new one,
+// records the identity keys and marks the observations resolved in a single
+// transaction precisely so a crash between any two of them is impossible. A
+// timeout rolls that whole decision back, the observations stay unresolved, and
+// the next sweep does it again. The failure mode of the bound is a sweep that
+// makes no progress and says so, not a half-resolved host.
+const correlateBudget = store.BulkBudget
+
 func (c *Correlator) loadRules(ctx context.Context, anyTenant store.TenantID) error {
 	var rows []store.RuleRow
 	var advisoryRuleID uuid.UUID
-	if err := c.db.Read(ctx, anyTenant, func(ctx context.Context, conn *store.Conn) error {
+	if err := c.db.ReadWithin(ctx, anyTenant, correlateBudget, func(ctx context.Context, conn *store.Conn) error {
 		var err error
 		if rows, err = (store.Rules{}).ActiveCoreRules(ctx, conn); err != nil {
 			return err
@@ -263,7 +279,7 @@ func (c *Correlator) unstampAge(tenant store.TenantID) {
 // ageTenant is the ageing pass: stale queue items expire, stale address
 // intervals close.
 func (c *Correlator) ageTenant(ctx context.Context, tenant store.TenantID, now time.Time) error {
-	return c.db.Write(ctx, tenant, func(ctx context.Context, conn *store.Conn) error {
+	return c.db.WriteWithin(ctx, tenant, correlateBudget, func(ctx context.Context, conn *store.Conn) error {
 		win, err := (store.IdentitySettings{}).Window(ctx, conn)
 		if err != nil {
 			return err
@@ -307,7 +323,7 @@ func (c *Correlator) correlateTenant(ctx context.Context, tenant store.TenantID)
 	now := c.now()
 
 	var pending []store.Observation
-	err := c.db.Read(ctx, tenant, func(ctx context.Context, conn *store.Conn) error {
+	err := c.db.ReadWithin(ctx, tenant, correlateBudget, func(ctx context.Context, conn *store.Conn) error {
 		var err error
 		pending, err = (store.Observations{}).ListUnresolved(ctx, conn,
 			now.Add(-observedWindow), now, Batch)
@@ -368,7 +384,7 @@ func (c *Correlator) correlateTenant(ctx context.Context, tenant store.TenantID)
 // prevent — or an observation marked resolved against an asset that was never
 // written.
 func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h host, zoneType func(uuid.UUID) string, now time.Time) error {
-	return c.db.Write(ctx, tenant, func(ctx context.Context, conn *store.Conn) error {
+	return c.db.WriteWithin(ctx, tenant, correlateBudget, func(ctx context.Context, conn *store.Conn) error {
 		win, err := (store.IdentitySettings{}).Window(ctx, conn)
 		if err != nil {
 			return err
@@ -928,7 +944,7 @@ func (c *Correlator) resolveHost(ctx context.Context, tenant store.TenantID, h h
 // exposure.
 func (c *Correlator) zoneTypes(ctx context.Context, tenant store.TenantID) (func(uuid.UUID) string, error) {
 	m := map[uuid.UUID]string{}
-	if err := c.db.Read(ctx, tenant, func(ctx context.Context, conn *store.Conn) error {
+	if err := c.db.ReadWithin(ctx, tenant, correlateBudget, func(ctx context.Context, conn *store.Conn) error {
 		zs, err := (store.Zones{}).List(ctx, conn)
 		if err != nil {
 			return err

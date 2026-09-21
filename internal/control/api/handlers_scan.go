@@ -208,7 +208,7 @@ func (s *Server) createScan(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	if noCapableScanPoint {
@@ -237,7 +237,7 @@ func (s *Server) getScan(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusOK, scanResponse(scan))
@@ -293,7 +293,7 @@ func (s *Server) listScans(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 
@@ -354,7 +354,7 @@ func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request) {
 				"That scan has already finished.", err)
 			return
 		}
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusOK, scanResponse(scan))
@@ -409,7 +409,7 @@ func (s *Server) setSafetyMode(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, s.log, http.StatusConflict, CodeConflict,
 				"That scan has already started. Safety mode is chosen before a scan runs; cancellation is the lever for one already running.", err)
 		default:
-			storeError(w, r, s.log, err)
+			s.storeError(w, r, err)
 		}
 		return
 	}

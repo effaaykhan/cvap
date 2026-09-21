@@ -209,7 +209,7 @@ func (s *Server) listFindings(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 
@@ -265,7 +265,7 @@ func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusOK, findingResponse(d))
@@ -280,7 +280,7 @@ func (s *Server) exposureByZone(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	out := ExposureByZoneResponse{Zones: make([]ZoneExposureResponse, 0, len(zones))}

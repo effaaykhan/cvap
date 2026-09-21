@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -325,27 +326,99 @@ func (c *Conn) SendBatch(ctx context.Context, b *Batch) BatchResults {
 	return batchResults{c.tx.SendBatch(ctx, &b.b)}
 }
 
-// Read runs fn inside a READ ONLY transaction scoped to tenant.
+// The budgets every transaction runs under (ADR-101).
+//
+// Before these existed, no operator read carried a bound of any kind: a fresh
+// tenant whose finding list reached the generic plan ran for 91 minutes, holding
+// a pooled connection, and nothing stopped it (B50). A bound is not a
+// performance fix — B48 is that — it is the difference between a slow page and
+// an unbounded one.
+//
+// The numbers come from the measured p95s, not from taste. ADR-058 sets the
+// load gate's coarse ceiling at 1000 ms for the finding list and 600 ms for the
+// asset list; ADR-098 measured that list at 1298 ms custom / ~500 ms generic
+// after the LEFT JOIN, and ADR-100 measured the identity queue's pages well
+// under a second. OperatorBudget is thirty times the slowest of those: large
+// enough that no measured page comes near it, small enough that a human still
+// has an answer. BulkBudget is four times OperatorBudget, for exports and
+// sweeps that legitimately read more than a page.
+const (
+	// OperatorBudget bounds a read or write made on behalf of a waiting human.
+	OperatorBudget = 30 * time.Second
+
+	// BulkBudget bounds work that legitimately reads more than one page —
+	// exports, sweeps, backfills. Not for anything an operator waits on.
+	BulkBudget = 120 * time.Second
+)
+
+// Read runs fn inside a READ ONLY transaction scoped to tenant, under
+// OperatorBudget.
 //
 // Read-only is not decoration: it means an INSERT that finds its way onto a read
 // path fails at the database rather than in review. Use Write when the operation
 // is meant to write.
 func (db *DB) Read(ctx context.Context, tenant TenantID, fn func(context.Context, *Conn) error) error {
-	return db.inTx(ctx, tenant, pgx.TxOptions{AccessMode: pgx.ReadOnly}, fn)
+	return db.inTx(ctx, tenant, pgx.TxOptions{AccessMode: pgx.ReadOnly}, OperatorBudget, fn)
 }
 
-// Write runs fn inside a read-write transaction scoped to tenant.
+// Write runs fn inside a read-write transaction scoped to tenant, under
+// OperatorBudget.
 func (db *DB) Write(ctx context.Context, tenant TenantID, fn func(context.Context, *Conn) error) error {
-	return db.inTx(ctx, tenant, pgx.TxOptions{}, fn)
+	return db.inTx(ctx, tenant, pgx.TxOptions{}, OperatorBudget, fn)
 }
 
-func (db *DB) inTx(ctx context.Context, tenant TenantID, opts pgx.TxOptions, fn func(context.Context, *Conn) error) error {
+// ReadWithin is Read under a caller-chosen budget.
+//
+// The budget is explicit at the call site rather than inferred from the caller,
+// because "this is a bulk path" is a claim about intent that only the caller can
+// make. A zero or negative budget is rejected rather than treated as unbounded:
+// unbounded is the state B50 records.
+func (db *DB) ReadWithin(ctx context.Context, tenant TenantID, budget time.Duration, fn func(context.Context, *Conn) error) error {
+	return db.inTx(ctx, tenant, pgx.TxOptions{AccessMode: pgx.ReadOnly}, budget, fn)
+}
+
+// WriteWithin is Write under a caller-chosen budget.
+func (db *DB) WriteWithin(ctx context.Context, tenant TenantID, budget time.Duration, fn func(context.Context, *Conn) error) error {
+	return db.inTx(ctx, tenant, pgx.TxOptions{}, budget, fn)
+}
+
+func (db *DB) inTx(ctx context.Context, tenant TenantID, opts pgx.TxOptions, budget time.Duration, fn func(context.Context, *Conn) error) error {
 	if tenant.IsZero() {
 		return ErrNoTenantContext
 	}
 	if fn == nil {
 		return errors.New("store: nil callback")
 	}
+	if budget <= 0 {
+		return fmt.Errorf("store: transaction budget must be positive, got %s", budget)
+	}
+
+	// TWO bounds, because statement_timeout alone does not bound a request.
+	//
+	// This was measured, not assumed: three pg_sleep(0.8) statements inside one
+	// transaction with statement_timeout = 1s all ran to completion, 2.4 s
+	// total, none cancelled. statement_timeout is reset for every statement, so
+	// a callback issuing N statements may legitimately run for N x budget while
+	// never tripping it. A bound stated over the request and enforced over the
+	// statement is the shape that holds in every hand-written fixture and fails
+	// on the path that matters.
+	//
+	// So the budget is applied twice:
+	//
+	//   - as a context deadline, which bounds the WHOLE transaction. pgx
+	//     cancels the in-flight query and the connection is torn down.
+	//   - as SET LOCAL statement_timeout, which bounds EACH statement, and is
+	//     enforced by the database rather than by us.
+	//
+	// Neither is redundant. The deadline is the one that actually bounds the
+	// request; the GUC is the one that survives a caller who detaches the
+	// context, and it is what turns a runaway single statement into a fast,
+	// attributable 57014 instead of a client-side cancel that leaves the server
+	// still working. The database doing the enforcing is the same argument the
+	// tenant GUC rests on: cleanup that must run is cleanup that eventually
+	// does not.
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
 
 	// Acquire explicitly rather than using db.pool.BeginTx, because the store
 	// has to decide whether this connection is fit to go back in the pool. The
@@ -355,7 +428,7 @@ func (db *DB) inTx(ctx context.Context, tenant TenantID, opts pgx.TxOptions, fn 
 	// never be recycled.
 	pconn, err := db.pool.Acquire(ctx)
 	if err != nil {
-		return fmt.Errorf("store: acquire: %w", err)
+		return fmt.Errorf("store: acquire: %w", mapError(err))
 	}
 
 	// destroy is armed whenever the connection's transaction state is not what
@@ -372,7 +445,7 @@ func (db *DB) inTx(ctx context.Context, tenant TenantID, opts pgx.TxOptions, fn 
 
 	tx, err := pconn.BeginTx(ctx, opts)
 	if err != nil {
-		return fmt.Errorf("store: begin: %w", err)
+		return fmt.Errorf("store: begin: %w", mapError(err))
 	}
 
 	// Rollback on every path that is not an explicit commit, including a panic.
@@ -402,10 +475,35 @@ func (db *DB) inTx(ctx context.Context, tenant TenantID, opts pgx.TxOptions, fn 
 	if err := tx.QueryRow(ctx,
 		`SELECT set_config('app.tenant_id', $1, true)`, tenant.String(),
 	).Scan(&applied); err != nil {
-		return fmt.Errorf("store: set tenant context: %w", err)
+		return fmt.Errorf("store: set tenant context: %w", mapError(err))
 	}
 	if applied != tenant.String() {
 		return fmt.Errorf("store: tenant context did not take: set %q, got %q", tenant, applied)
+	}
+
+	// The second bound, set the same way and verified the same way, for the
+	// same reason: a GUC that silently failed to take would leave the
+	// transaction unbounded, which is the state this exists to end, and an
+	// unbounded transaction that believes it is bounded is worse than one that
+	// knows it is not.
+	//
+	// The comparison is done by Postgres rather than in Go because set_config
+	// returns the NORMALISED value ('30s' for 30000), so a string compare
+	// against what we sent fails on a setting that took perfectly. Casting both
+	// sides to interval compares the quantity, which is the thing that matters.
+	ms := budget.Milliseconds()
+	if ms < 1 {
+		ms = 1
+	}
+	var timeoutTook bool
+	if err := tx.QueryRow(ctx,
+		`SELECT set_config('statement_timeout', $1, true)::interval = ($1 || 'ms')::interval`,
+		strconv.FormatInt(ms, 10),
+	).Scan(&timeoutTook); err != nil {
+		return fmt.Errorf("store: set statement timeout: %w", mapError(err))
+	}
+	if !timeoutTook {
+		return fmt.Errorf("store: statement timeout did not take: wanted %dms", ms)
 	}
 
 	c := &Conn{pc: pconn, tx: tx, tenant: tenant}
@@ -415,6 +513,20 @@ func (db *DB) inTx(ctx context.Context, tenant TenantID, opts pgx.TxOptions, fn 
 	defer func() { c.done.Store(true) }()
 
 	fnErr := fn(ctx, c)
+
+	// Whichever half of the budget fired, the caller gets the same sentinel.
+	//
+	// The two mechanisms surface differently and neither spelling is
+	// guaranteed: a server-side statement_timeout arrives as SQLSTATE 57014
+	// saying "statement timeout", while a deadline is pgx cancelling the query,
+	// which can arrive EITHER as context.DeadlineExceeded or as a 57014 saying
+	// "user request" — the same code a client cancel produces, which must not be
+	// a 504. Reading the deadline here settles it from our side instead of
+	// guessing from the message: if this transaction's own deadline has passed,
+	// the bound is what ended it.
+	if fnErr != nil && ctx.Err() == context.DeadlineExceeded && !errors.Is(fnErr, ErrStatementTimeout) {
+		fnErr = fmt.Errorf("%w: %w", ErrStatementTimeout, fnErr)
+	}
 
 	// Did the callback end the transaction we opened? 'T' is in-transaction and
 	// 'E' is an aborted transaction still awaiting rollback; both are ours to
@@ -435,7 +547,7 @@ func (db *DB) inTx(ctx context.Context, tenant TenantID, opts pgx.TxOptions, fn 
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("store: commit: %w", err)
+		return fmt.Errorf("store: commit: %w", mapError(err))
 	}
 	committed = true
 

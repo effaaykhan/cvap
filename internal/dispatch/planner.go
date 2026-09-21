@@ -81,7 +81,7 @@ var ErrTargetNotCanonical = errors.New("dispatch: target has no canonical form")
 func PlanScan(ctx context.Context, db *store.DB, tenant store.TenantID, scanID uuid.UUID, engine store.Engine, reassignSafe bool) (int, error) {
 	var planned int
 
-	err := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+	err := db.WriteWithin(ctx, tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		// pending -> planning first, in the UPDATE's own predicate. A scan
 		// cancelled between a read and this write must not be planned, and the
 		// predicate is what makes that impossible rather than unlikely.
@@ -312,7 +312,7 @@ func countString(p netip.Prefix) string {
 // scan behind the bad one.
 func PlanPending(ctx context.Context, db *store.DB, log *slog.Logger, tenant store.TenantID, limit int) {
 	var pending []uuid.UUID
-	if err := db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+	if err := db.ReadWithin(ctx, tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		var err error
 		pending, err = (store.Scans{}).PendingIDs(ctx, c, limit)
 		return err
@@ -346,7 +346,7 @@ func PlanPending(ctx context.Context, db *store.DB, log *slog.Logger, tenant sto
 		// an operator cannot tell from a working one.
 		log.ErrorContext(ctx, "scan planning failed",
 			"tenant_id", tenant.String(), "scan_id", scanID.String(), "error", err)
-		if ferr := db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		if ferr := db.WriteWithin(ctx, tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 			return (store.Scans{}).Fail(ctx, c, scanID, err.Error())
 		}); ferr != nil {
 			log.ErrorContext(ctx, "scan planning failure could not be recorded",
@@ -365,7 +365,7 @@ func PlanPending(ctx context.Context, db *store.DB, log *slog.Logger, tenant sto
 // dispatch problem.
 func engineFor(ctx context.Context, db *store.DB, tenant store.TenantID, scanID uuid.UUID) (store.Engine, bool, error) {
 	var scan *store.Scan
-	if err := db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+	if err := db.ReadWithin(ctx, tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		var err error
 		scan, err = (store.Scans{}).Get(ctx, c, scanID)
 		return err

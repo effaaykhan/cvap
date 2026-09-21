@@ -193,7 +193,7 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 
@@ -239,7 +239,7 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 
@@ -358,7 +358,7 @@ func (s *Server) listAssetEvents(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	out := AssetEventsResponse{AssetID: id.String(), Events: make([]AssetEventResponse, 0, len(events))}
@@ -430,7 +430,7 @@ func (s *Server) clearAttribution(w http.ResponseWriter, r *http.Request) {
 				"That asset holds no exact attribution to clear; what it has was inferred.", err)
 			return
 		}
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusOK, ClearAttributionResponse{AssetID: id.String(), Cleared: cleared})

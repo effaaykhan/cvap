@@ -75,7 +75,7 @@ func (s *Server) getIdentitySettings(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusOK, out)
@@ -146,7 +146,7 @@ func (s *Server) putIdentitySettings(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, store.ErrWindowOutOfBounds):
 			writeError(w, r, s.log, http.StatusUnprocessableEntity, CodeUnprocessable, err.Error(), err)
 		default:
-			storeError(w, r, s.log, err)
+			s.storeError(w, r, err)
 		}
 		return
 	}

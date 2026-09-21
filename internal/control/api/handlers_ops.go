@@ -117,7 +117,7 @@ func (s *Server) issueKill(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	s.log.Warn("kill switch issued",
@@ -151,7 +151,7 @@ func (s *Server) resolveKill(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	s.log.Warn("kill switch resolved",
@@ -206,7 +206,7 @@ func (s *Server) createZone(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusCreated, ZoneResponse{
@@ -224,7 +224,7 @@ func (s *Server) listZones(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	out := ZoneListResponse{Zones: make([]ZoneResponse, 0, len(zones))}
@@ -283,7 +283,7 @@ func (s *Server) addNetworkRange(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusCreated, NetworkRangeResponse{
@@ -412,7 +412,7 @@ func (s *Server) listScanPoints(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusOK, ScanPointListResponse{
@@ -440,7 +440,7 @@ func (s *Server) listAllScanPoints(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusOK, ScanPointListResponse{
@@ -485,7 +485,7 @@ func (s *Server) issueEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 	tenant, _ := tenantFrom(r.Context())
 	issued, err := enrollment.NewIssuer(s.db).Issue(r.Context(), tenant, zoneID, actor(r), ttl, req.Description)
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	// The token itself is never logged, here or anywhere. The id and the zone

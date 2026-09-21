@@ -66,7 +66,7 @@ func (s *Server) knowledgeFreshness(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	out := KnowledgeFreshnessResponse{

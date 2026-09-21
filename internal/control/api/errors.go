@@ -48,6 +48,13 @@ const (
 	CodeConflict      = "conflict"
 	CodeUnprocessable = "unprocessable"
 	CodeInternal      = "internal"
+
+	// CodeTimeout is the bound firing, not a fault (ADR-101). Separate from
+	// CodeInternal because they ask the operator for different things: an
+	// internal error is a bug report, a timeout is a query that needs
+	// profiling, and an alert that cannot tell them apart pages the wrong
+	// person.
+	CodeTimeout = "timeout"
 )
 
 // writeError sends an error response and logs the real one.
@@ -80,7 +87,8 @@ func writeError(w http.ResponseWriter, r *http.Request, log *slog.Logger, status
 // Anything unrecognised is a 500. Deliberately not a "best effort" guess: an
 // unmapped store error is a case nobody thought about, and reporting it as a
 // client error tells the caller to fix something that is not theirs.
-func storeError(w http.ResponseWriter, r *http.Request, log *slog.Logger, err error) {
+func (s *Server) storeError(w http.ResponseWriter, r *http.Request, err error) {
+	log := s.log
 	switch {
 	case errors.Is(err, store.ErrSessionInvalid), errors.Is(err, store.ErrCredentialLocked):
 		// Client conditions, not ours. Without this they fell to the default and
@@ -88,6 +96,21 @@ func storeError(w http.ResponseWriter, r *http.Request, log *slog.Logger, err er
 		// broken when their account is simply locked.
 		writeError(w, r, log, http.StatusUnauthorized, CodeUnauthorized,
 			"Those credentials are not valid.", err)
+	case errors.Is(err, store.ErrStatementTimeout):
+		// 504, not 500: the request was well formed and the server simply did
+		// not finish it inside the budget. writeError logs this at Error with
+		// the request id, which is the only handle an operator has to find the
+		// statement afterwards.
+		//
+		// Not retryable, and the message says so rather than inviting a retry
+		// that runs the same plan and spends the budget again.
+		// Metered before the response is written, so Health can say the bound
+		// fired without an operator having to find it in the log.
+		if tenant, ok := tenantFrom(r.Context()); ok {
+			s.timeouts.note(tenant)
+		}
+		writeError(w, r, log, http.StatusGatewayTimeout, CodeTimeout,
+			"The server did not finish this request within its time budget.", err)
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, r, log, http.StatusNotFound, CodeNotFound,
 			"No such resource.", err)

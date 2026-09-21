@@ -146,7 +146,7 @@ func (s *Server) listIdentityQueue(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	more := len(groups) > limit
@@ -369,7 +369,7 @@ func (s *Server) resolveIdentity(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, s.log, http.StatusUnprocessableEntity, CodeUnprocessable,
 				"More distinct keys are parked at that address than a decision can cover; a decision covers exactly what the listing shows. Discard the group, or wait for the contest to expire.", err)
 		default:
-			storeError(w, r, s.log, err)
+			s.storeError(w, r, err)
 		}
 		return
 	}
@@ -453,7 +453,7 @@ func (s *Server) confirmIdentity(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, s.log, http.StatusConflict, CodeConflict,
 				"A named key is not a rotated or lapsed key on the asset any more; reload the page and look again.", err)
 		default:
-			storeError(w, r, s.log, err)
+			s.storeError(w, r, err)
 		}
 		return
 	}

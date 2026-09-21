@@ -68,6 +68,23 @@ var (
 	// WITH CHECK half of the policy.
 	ErrTenantIsolation = errors.New("store: row-level security refused the operation")
 
+	// ErrStatementTimeout means the transaction exceeded its budget and the
+	// database (or the deadline) stopped it (ADR-101, B50).
+	//
+	// It is NOT a fault in the caller's request and it is NOT a bug: it is the
+	// bound doing its job. What it always means is that some statement reached a
+	// plan nobody measured, so a timeout is a signal to profile, not to retry —
+	// a retry runs the same plan and spends the budget again.
+	//
+	// Read what it does NOT promise. A transaction that hits this rolled back,
+	// and it took everything written before it in the same transaction with it.
+	// A refusal audit event recorded in the transaction that then times out is
+	// discarded, exactly as a refusal that returns an error from inside the
+	// closure is (see rollback-discards-the-control, three instances). If a
+	// write must leave a record of WHY it refused, that record does not belong
+	// in the transaction whose fate is in question.
+	ErrStatementTimeout = errors.New("store: statement exceeded its time budget")
+
 	// ErrTenantNotResolved means a scan point certificate fingerprint did not
 	// resolve to a tenant (ADR-031).
 	//
@@ -87,6 +104,7 @@ const (
 	pgInsufficientPriv    = "42501" // RLS refusal arrives as this
 	pgUndefinedObject     = "42704" // unset app.tenant_id, from one-arg current_setting
 	pgInvalidTextRepr     = "22P02" // app.tenant_id set to something that is not a uuid
+	pgQueryCanceled       = "57014" // statement_timeout, AND a client-side cancel
 )
 
 // mapError converts a pgx or pgconn error into this package's sentinels.
@@ -101,7 +119,15 @@ func mapError(err error) error {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		// The request-level half of the budget (ADR-101). The transaction ran
+		// past its deadline and pgx cancelled it. Wrapped rather than replaced,
+		// so a caller that cares which bound fired can still ask.
+		return fmt.Errorf("%w: %w", ErrStatementTimeout, err)
+	}
+	if errors.Is(err, context.Canceled) {
+		// The caller went away. Not our bound, and not a 504: nobody is waiting
+		// for the answer.
 		return err
 	}
 
@@ -133,6 +159,17 @@ func mapError(err error) error {
 		// be possible from this package.
 		return fmt.Errorf("%w: query ran without a usable app.tenant_id (%s)",
 			ErrNoTenantContext, pgErr.Message)
+	case pgQueryCanceled:
+		// 57014 is BOTH "canceling statement due to statement timeout" and
+		// "canceling statement due to user request" (a client-side cancel,
+		// which is what pgx issues when a context is cancelled). They mean
+		// opposite things: the first is our bound firing and belongs in a 504,
+		// the second is the caller having left. Discriminate on the message,
+		// the same way 42501 is split above.
+		if strings.Contains(pgErr.Message, "statement timeout") {
+			return fmt.Errorf("%w: %s", ErrStatementTimeout, pgErr.Message)
+		}
+		return err
 	case pgInvalidTextRepr:
 		// 22P02 is ANY bad text-to-type cast, not only a bad app.tenant_id. It
 		// was mapped to ErrNoTenantContext, so a scan point sending a malformed

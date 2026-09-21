@@ -105,7 +105,7 @@ func (s *Server) exportFindingsCSV(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 
@@ -186,7 +186,7 @@ func (s *Server) exportAssetsCSV(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	if s.overExportCap(w, r, len(rowsOut), rowCap, "assets", "a search or filter") {

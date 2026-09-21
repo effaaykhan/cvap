@@ -57,7 +57,7 @@ func (s *Server) listCredentialProfiles(w http.ResponseWriter, r *http.Request) 
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	out := CredentialProfileListResponse{Profiles: make([]CredentialProfileResponse, 0, len(profiles))}
@@ -102,7 +102,7 @@ func (s *Server) pinKnownHosts(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusOK, PinKnownHostsResponse{ProfileID: id.String(), Lines: len(fps), Fingerprints: fps})
@@ -158,7 +158,7 @@ func (s *Server) clearKnownHosts(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, s.log, http.StatusConflict, CodeConflict, "That profile carries no pin to clear.", err)
 			return
 		}
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusOK, CredentialProfileResponse{ID: id.String(), PinLines: 0, UpdatedAt: now})

@@ -120,7 +120,7 @@ func (s *IngestService) SubmitResults(stream scanpointv1.Ingest_SubmitResultsSer
 	}
 
 	var spID, enrolledZone uuid.UUID
-	if err := s.db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+	if err := s.db.ReadWithin(ctx, tenant, ingestBudget, func(ctx context.Context, c *store.Conn) error {
 		sp, err := (store.ScanPoints{}).GetByFingerprint(ctx, c, fingerprint)
 		if err != nil {
 			return err
@@ -232,7 +232,7 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 	// the gates at will and leave no trace. The record is rewritten in a fresh
 	// transaction on that path, the errConflictResume shape.
 	var quarantineRaised string
-	err = s.db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+	err = s.db.WriteWithin(ctx, tenant, ingestBudget, func(ctx context.Context, c *store.Conn) error {
 		// ====================================================================
 		// The epoch check. Every chunk, not just the first.
 		// ====================================================================
@@ -502,7 +502,7 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 	}
 	if errors.Is(err, errMalformed) {
 		if quarantineRaised != "" {
-			if qerr := s.db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+			if qerr := s.db.WriteWithin(ctx, tenant, ingestBudget, func(ctx context.Context, c *store.Conn) error {
 				return (store.Submissions{}).Quarantine(ctx, c, submissionID, quarantineRaised)
 			}); qerr != nil {
 				s.log.ErrorContext(ctx, "quarantine record lost with a malformed chunk", slog.Any("error", qerr))
@@ -542,7 +542,7 @@ func (s *IngestService) handleChunk(ctx context.Context, tenant store.TenantID, 
 // where the previous one stopped.
 func (s *IngestService) resume(ctx context.Context, tenant store.TenantID, spID, enrolledZone uuid.UUID, sub *submission, chunk *scanpointv1.ResultChunk) (*scanpointv1.SubmitAck, error) {
 	var existing *store.Submission
-	if err := s.db.Read(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+	if err := s.db.ReadWithin(ctx, tenant, ingestBudget, func(ctx context.Context, c *store.Conn) error {
 		var err error
 		existing, err = (store.Submissions{}).Get(ctx, c, sub.id)
 		return err

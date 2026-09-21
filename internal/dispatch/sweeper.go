@@ -124,7 +124,7 @@ func (s *Sweeper) Sweep(ctx context.Context) {
 		//
 		// Housekeeping genuinely is housekeeping — Consume already refuses an
 		// expired row — so its failure must not be able to stop a control.
-		if err := s.db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+		if err := s.db.WriteWithin(ctx, tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 			_, err := (store.OIDCAuthRequests{}).PurgeExpiredAuthRequests(ctx, c, s.BatchLimit)
 			return err
 		}); err != nil {
@@ -138,7 +138,7 @@ func (s *Sweeper) sweepTenant(ctx context.Context, tenant store.TenantID) {
 	var expired []store.ExpiredLease
 	var offline []uuid.UUID
 
-	err := s.db.Write(ctx, tenant, func(ctx context.Context, c *store.Conn) error {
+	err := s.db.WriteWithin(ctx, tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		var err error
 		// Leases first. A scan point marked offline is a display fact; a lease
 		// expired is a job that moves. Doing the lease pass first means a crash

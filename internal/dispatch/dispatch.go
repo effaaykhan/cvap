@@ -107,6 +107,28 @@ type Service struct {
 	secrets credsource.Resolver
 }
 
+// The dispatch path's budget, and the ingest path's (ADR-101).
+//
+// dispatchBudget is deliberately the operator number: a job handover, an ack and
+// a lease renewal are single-row statements, and none of them has any business
+// taking thirty seconds. Bounding them matters more than bounding a read,
+// because these are the transactions that decide what goes on a wire.
+//
+// The bound does NOT weaken lease fencing, and the direction is what makes that
+// true. Every fenced write carries its epoch in the WHERE clause, so the
+// database decides; a transaction that times out COMMITS NOTHING, which is
+// indistinguishable from a lease check that refused. Non-negotiable #7 says a
+// non-reassign_safe job fails on lease loss and does not retry — a timeout takes
+// that same path. The unsafe direction would be a timeout that let a write land
+// without its epoch check, and a rollback cannot produce one.
+//
+// ingestBudget is the bulk number: a submission arrives in chunks of thousands
+// of observation rows and is written with SendBatch.
+const (
+	dispatchBudget = store.OperatorBudget
+	ingestBudget   = store.BulkBudget
+)
+
 func New(db *store.DB, versions enrollment.VersionWindow, log *slog.Logger) *Service {
 	return &Service{db: db, versions: versions, log: log, now: time.Now}
 }
@@ -304,7 +326,7 @@ func (s *Service) handshake(ctx context.Context, stream scanpointv1.Dispatch_Con
 			s.versions.Accepted, s.versions.MinSupported)
 	}
 
-	err := s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	err := s.db.WriteWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		sp, err := (store.ScanPoints{}).GetByFingerprint(ctx, c, fingerprint)
 		if err != nil {
 			return err
@@ -444,7 +466,7 @@ func (s *Service) onHeartbeat(ctx context.Context, sess *session, hb *scanpointv
 	// field slows it down; ADR-024's bound is enforced at planning and on the
 	// send path. It is recorded so a rate limiter that is wrong becomes visible
 	// before a customer notices, and it is never read as the rate actually sent.
-	if err := s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	if err := s.db.WriteWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		return (store.ScanPoints{}).Heartbeat(ctx, c, sess.spID, s.now())
 	}); err != nil {
 		s.log.WarnContext(ctx, "heartbeat write failed", slog.Any("error", err))
@@ -503,7 +525,7 @@ func (s *Service) onLeaseRenewal(ctx context.Context, sess *session, r *scanpoin
 	}
 
 	var granted *store.Lease
-	err = s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	err = s.db.WriteWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		// holder_scan_point comes from the resolved session, never the message.
 		l, err := (store.Leases{}).Renew(ctx, c, jobID, r.GetLeaseEpoch(), sess.spID, store.LeaseTTL)
 		if err != nil {
@@ -526,7 +548,7 @@ func (s *Service) onLeaseRenewal(ctx context.Context, sess *session, r *scanpoin
 	// decision was already made by the conditional UPDATE matching nothing.
 	state := scanpointv1.LeaseState_LEASE_STATE_UNKNOWN_JOB
 	detail := "Core has no record of this job"
-	_ = s.db.Read(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	_ = s.db.ReadWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		cur, err := (store.Leases{}).Current(ctx, c, jobID)
 		if err != nil {
 			return nil
@@ -557,7 +579,7 @@ func (s *Service) onLeaseRenewal(ctx context.Context, sess *session, r *scanpoin
 // cannot be read here simply keeps its lease until the next renewal.
 func (s *Service) windowClosedForJob(ctx context.Context, sess *session, jobID uuid.UUID) (bool, string) {
 	var policy *store.JobPolicy
-	if err := s.db.Read(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	if err := s.db.ReadWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		p, err := (store.Policies{}).ForJob(ctx, c, jobID)
 		if err != nil {
 			return err
@@ -618,7 +640,7 @@ func (s *Service) scopeNarrowedForJob(ctx context.Context, sess *session, jobID 
 		targets             []string
 		unexpressible       bool
 	)
-	if err := s.db.Read(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	if err := s.db.ReadWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		policy, err := (store.Policies{}).ForJob(ctx, c, jobID)
 		if err != nil {
 			return err
@@ -675,7 +697,7 @@ func (s *Service) onProgress(ctx context.Context, sess *session, p *scanpointv1.
 	if err != nil {
 		return
 	}
-	if err := s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	if err := s.db.WriteWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		return (store.Jobs{}).MarkRunning(ctx, c, jobID, sess.spID)
 	}); err != nil && !errors.Is(err, store.ErrNotFound) {
 		s.log.WarnContext(ctx, "progress write failed", slog.Any("error", err))
@@ -690,7 +712,7 @@ func (s *Service) onTerminal(ctx context.Context, sess *session, t *scanpointv1.
 	}
 
 	reason := terminationReason(t.GetReason())
-	err = s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	err = s.db.WriteWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		if err := (store.Jobs{}).Terminate(ctx, c, jobID, sess.spID, reason, t.GetIncomplete()); err != nil &&
 			!errors.Is(err, store.ErrNotFound) {
 			return err
@@ -797,7 +819,7 @@ func (s *Service) onKillAck(ctx context.Context, sess *session, a *scanpointv1.K
 	if err != nil {
 		return
 	}
-	if err := s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	if err := s.db.WriteWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		return (store.KillSwitches{}).Ack(ctx, c, killID, sess.spID, clampCount(a.GetTasksHalted()))
 	}); err != nil {
 		s.log.ErrorContext(ctx, "kill ack write failed", slog.Any("error", err))
@@ -820,7 +842,7 @@ func (s *Service) onCancelAck(ctx context.Context, sess *session, a *scanpointv1
 	if err != nil {
 		return
 	}
-	if err := s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	if err := s.db.WriteWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		return (store.CancelAcks{}).Record(ctx, c, jobID, sess.spID,
 			a.GetLeaseEpoch(), clampCount(a.GetTasksHalted()))
 	}); err != nil {
@@ -887,7 +909,7 @@ func (s *Service) pump(ctx context.Context, sess *session, out, urgent chan<- *s
 
 func (s *Service) propagateKills(ctx context.Context, sess *session, urgent chan<- *scanpointv1.CoreMessage, sent map[uuid.UUID]bool) {
 	var kills []store.KillSwitch
-	if err := s.db.Read(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	if err := s.db.ReadWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		var err error
 		// LiveFor, not an unscoped Live: Core decides which scan points a kill
 		// covers. A scan point sits in a network whose compromise the threat
@@ -951,7 +973,7 @@ const cancelGraceMs = 5000
 // dropped by a full queue would never be re-offered on that stream.
 func (s *Service) propagateCancellations(ctx context.Context, sess *session, urgent chan<- *scanpointv1.CoreMessage, sent map[uuid.UUID]bool) {
 	var jobs []store.CancellableJob
-	if err := s.db.Read(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	if err := s.db.ReadWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		var err error
 		jobs, err = (store.Jobs{}).CancellableFor(ctx, c, sess.spID)
 		return err
@@ -1081,7 +1103,7 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 	// already in the past put on the wire.
 	now := s.now()
 
-	err := s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	err := s.db.WriteWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		caps, err := (store.ScanPoints{}).Capabilities(ctx, c, sess.spID)
 		if err != nil {
 			return err
@@ -1257,7 +1279,7 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 	if err != nil {
 		s.log.ErrorContext(ctx, "job assignment failed", slog.Any("error", err))
 		if len(refusals) > 0 {
-			if rerr := s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+			if rerr := s.db.WriteWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 				for _, ev := range refusals {
 					if err := (store.AuditEvents{}).Record(ctx, c, ev); err != nil {
 						return err
@@ -1313,7 +1335,7 @@ func (s *Service) markOffline(ctx context.Context, sess *session) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := s.db.Write(ctx, sess.tenant, func(ctx context.Context, c *store.Conn) error {
+	if err := s.db.WriteWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
 		return (store.ScanPoints{}).SetStatus(ctx, c, sess.spID, store.ScanPointOffline)
 	}); err != nil {
 		s.log.WarnContext(ctx, "could not mark scan point offline", slog.Any("error", err))

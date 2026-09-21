@@ -127,7 +127,7 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusCreated, policyResponse(p))
@@ -169,7 +169,7 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusOK, policyResponse(p))
@@ -189,7 +189,7 @@ func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusOK, policyResponse(p))
@@ -204,7 +204,7 @@ func (s *Server) listPolicies(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	out := PolicyListResponse{Policies: make([]PolicyResponse, 0, len(ps))}
@@ -332,7 +332,7 @@ func (s *Server) addScopeRule(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusCreated, ScopeRuleResponse{
@@ -355,7 +355,7 @@ func (s *Server) listScopeRules(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	out := ScopeRuleListResponse{Rules: make([]ScopeRuleResponse, 0, len(rules))}
@@ -418,7 +418,7 @@ func (s *Server) deleteScopeRule(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
-		storeError(w, r, s.log, err)
+		s.storeError(w, r, err)
 		return
 	}
 	writeJSON(w, r, s.log, http.StatusNoContent, nil)

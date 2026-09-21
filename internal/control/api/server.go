@@ -113,6 +113,11 @@ type Server struct {
 	reg *Registry
 	mux *http.ServeMux
 
+	// timeouts counts budget timeouts per tenant for the Health surface
+	// (ADR-101). In memory and per-process; see timeouts.go for what that
+	// does and does not claim.
+	timeouts *timeoutMeter
+
 	// hashSem bounds concurrent argon2id verifications.
 	//
 	// Each one asks for 64 MiB. Without a bound, the memory cost of an
@@ -202,6 +207,7 @@ func New(db *store.DB, log *slog.Logger, cfg Config) (*Server, error) {
 	s := &Server{
 		db: db, log: log, cfg: cfg,
 		reg: NewRegistry(), mux: http.NewServeMux(),
+		timeouts:   newTimeoutMeter(),
 		hashSem:    make(chan struct{}, maxConcurrentHashes),
 		decoyHash:  decoy,
 		oidcClient: newOIDCClient(cfg.AllowPrivateIssuers, cfg.OIDCRootCAs),
