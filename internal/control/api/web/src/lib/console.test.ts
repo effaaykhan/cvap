@@ -84,6 +84,12 @@ describe("attention with the health read", () => {
       resolution_queue_pending: 0, contested_addresses: 0,
       active_kills: [{ id: "k", scope: "tenant", issued_at: "2026-09-11T00:00:00Z", reason: "runaway", unacknowledged: 2 }],
       credential_grants_unconfirmed: 0, scope_enforcement_sites: 2, computed_at: "2026-09-11T00:00:00Z",
+      // The budget surface (ADR-101/102). Present because Health carries it,
+      // not because this test reads it: the fixture is typed as Health, so a
+      // field added to the API and not here fails the typecheck — which is how
+      // this one was found, two commits late.
+      timed_out_requests: 0, timed_out_anonymous_requests: 0,
+      operator_budget_seconds: 30, bulk_budget_seconds: 120,
     };
     const out = attention([], [], [], health);
     expect(out.map((a) => a.text)).toEqual(["kill switch active (tenant)", "scan 9c2d41aa blocked"]);

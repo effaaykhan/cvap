@@ -73,7 +73,7 @@ type AssetServiceResponse struct {
 	Product    string    `json:"product,omitempty"`
 	Version    string    `json:"version,omitempty"`
 	Confidence *float64  `json:"version_confidence,omitempty" doc:"Confidence in the version, when it was inferred rather than read authoritatively. Absent means no version or no confidence recorded."`
-	Method     string    `json:"method,omitempty" doc:"How the identification was learned: banner (volunteered on connect), probe (solicited), tls, none. The provenance behind 'Apache 2.2.8 (banner)'."`
+	Method     string    `json:"method,omitempty" doc:"How the identification was learned: banner (volunteered on connect), probe (solicited), tls-probe, ssh-kex, tls, none (a probe ran and identified nothing), or discovery (NOTHING probed it -- the port merely answered, so this endpoint is open and UNIDENTIFIED; ADR-103/104). The provenance behind 'Apache 2.2.8 (banner)'. A console must not render a discovery row as an identification."`
 	LastSeen   time.Time `json:"last_seen"`
 }
 

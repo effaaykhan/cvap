@@ -945,7 +945,7 @@ export interface components {
         AssetServiceResponse: {
             /** Format: date-time */
             last_seen: string;
-            /** @description How the identification was learned: banner (volunteered on connect), probe (solicited), tls, none. The provenance behind 'Apache 2.2.8 (banner)'. */
+            /** @description How the identification was learned: banner (volunteered on connect), probe (solicited), tls-probe, ssh-kex, tls, none (a probe ran and identified nothing), or discovery (NOTHING probed it -- the port merely answered, so this endpoint is open and UNIDENTIFIED; ADR-103/104). The provenance behind 'Apache 2.2.8 (banner)'. A console must not render a discovery row as an identification. */
             method?: string;
             port: number;
             product?: string;
@@ -1231,6 +1231,8 @@ export interface components {
             active_kills: components["schemas"]["ActiveKillResponse"][];
             /** @description Scans still meant to run with queued jobs no online, capable scan point in a permitted zone can claim. */
             blocked_scans: components["schemas"]["BlockedScanResponse"][];
+            /** @description The bound for work that legitimately reads more than a page: the CSV exports, the correlator and ingest. NOT the dispatch sweeper, whose statements are single-row and which takes the operator bound. */
+            bulk_budget_seconds: number;
             /** Format: date-time */
             computed_at: string;
             /** @description Distinct addresses with a pending resolution item — the number of hosts an operator would act on; each is a host whose inventory has stopped moving. */
@@ -1241,10 +1243,21 @@ export interface components {
             ingest_backlog: number;
             /** @description active when any kill is unresolved; inactive otherwise. The control is always armed; this is whether it is pressed. */
             kill_switch_state: string;
+            /**
+             * Format: date-time
+             * @description When the most recent budget timeout for this tenant happened, if any since this Core started.
+             */
+            last_timeout_at?: string | null;
+            /** @description The bound every read or write on behalf of a waiting operator runs under (ADR-101). Reported so the surface states the bound it is measuring against rather than leaving it in the source. */
+            operator_budget_seconds: number;
             /** @description Items in the identity resolution queue awaiting an operator (ADR-007/094): one per (observation, key) parked because the evidence at an address contradicts what the asset holds — several per host per scan. An item leaves when an operator adjudicates the address on the Identity screen (ADR-097), when a later scan classifies the contradiction as a key rotation, or when the contest goes stale (ADR-096). See contested_addresses for the host count. */
             resolution_queue_pending: number;
             /** @description Always 2 (Core at planning, the scan point on the send path — ADR-024). A property of the design asserted by the safety gate, reported so the surface says what is measured and what is not. */
             scope_enforcement_sites: number;
+            /** @description Budget timeouts on requests for this tenant that never reached a session -- a failed login, an OIDC callback. Held apart from timed_out_requests because an anonymous caller can drive this number at will, so it is a load signal and NOT a list of queries to profile. */
+            timed_out_anonymous_requests: number;
+            /** @description Requests for this tenant that this Core refused with a 504 because they exceeded their time budget (ADR-101). Counted in memory since this process started, so 0 means none since the last restart, not none ever; a durable ledger is deliberately not built yet. Each one names a statement that reached a plan nobody measured — profile it, do not retry it. */
+            timed_out_requests: number;
             /** @description Accepted observations in the last 7 days that correlation has not attached to an asset yet. */
             unresolved_observations: number;
         };
