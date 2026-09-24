@@ -35,6 +35,38 @@ type Service struct {
 	// join across the largest tables in the system.
 	TLS []byte
 	SSH []byte
+
+	// SeenOnly marks a port that ANSWERED but was never identified — the
+	// discovery engine's `port` observation, promoted because an open port is
+	// the asset's attack surface and observations are ephemeral (ADR-103,
+	// ADR-016).
+	//
+	// It changes the merge, not just the row. An identified service carries
+	// claims about softmatch and solicited; a bare port makes neither claim, so
+	// a seen-only write must not assign them. Without that, a discovery pass
+	// running AFTER a fingerprint pass resets both — the one clobber path the
+	// coalesce in Upsert does not already close, named in ADR-103 so it got a
+	// test rather than a later surprise.
+	SeenOnly bool
+}
+
+// IdentificationDiscovery is the identification_method of a port that answered
+// and was never identified (ADR-103).
+//
+// It is deliberately a value of the EXISTING column rather than a new one: on
+// `services` only port and protocol are NOT NULL, so a seen-only row needs no
+// migration, and a later fingerprint pass upgrades this row in place instead of
+// creating a second one for the same endpoint.
+const IdentificationDiscovery = "discovery"
+
+// Identified reports whether anything is actually known about this endpoint
+// beyond the fact that it answered.
+//
+// Readers that present a service to an operator, or feed one to the rules, must
+// ask this rather than assuming a row means an identification: ADR-103 decision
+// 2 keeps seen-only rows out of the rule engine.
+func (s Service) Identified() bool {
+	return !s.SeenOnly && s.IdentificationMethod != IdentificationDiscovery
 }
 
 type Services struct{}
@@ -75,8 +107,16 @@ func (Services) Upsert(ctx context.Context, c *Conn, s Service, seenAt time.Time
 		                                     THEN coalesce(excluded.identification_method, services.identification_method) ELSE services.identification_method END,
 		    identification_confidence = CASE WHEN excluded.last_seen >= services.last_seen
 		                                     THEN coalesce(excluded.identification_confidence, services.identification_confidence) ELSE services.identification_confidence END,
-		    softmatch                 = CASE WHEN excluded.last_seen >= services.last_seen THEN excluded.softmatch ELSE services.softmatch END,
-		    solicited                 = CASE WHEN excluded.last_seen >= services.last_seen THEN excluded.solicited ELSE services.solicited END,
+		    -- $18 is "this write identified nothing". These two columns are
+		    -- assignments rather than coalesces -- false is a real value, so
+		    -- there is no empty to merge away -- which means a seen-only write
+		    -- would otherwise RESET what a fingerprint pass established, purely
+		    -- by being newer. A bare port makes no claim about either, so it
+		    -- leaves both alone (ADR-103).
+		    softmatch                 = CASE WHEN excluded.last_seen >= services.last_seen AND NOT $18
+		                                     THEN excluded.softmatch ELSE services.softmatch END,
+		    solicited                 = CASE WHEN excluded.last_seen >= services.last_seen AND NOT $18
+		                                     THEN excluded.solicited ELSE services.solicited END,
 		    safety_mode               = CASE WHEN excluded.last_seen >= services.last_seen
 		                                     THEN coalesce(excluded.safety_mode, services.safety_mode) ELSE services.safety_mode END,
 		    identification_probe      = CASE WHEN excluded.last_seen >= services.last_seen
@@ -96,7 +136,7 @@ func (Services) Upsert(ctx context.Context, c *Conn, s Service, seenAt time.Time
 		s.Name, s.Product, s.Version, s.VersionConfidence,
 		s.IdentificationMethod, s.IdentificationConfidence,
 		s.Softmatch, s.Solicited, s.SafetyMode, s.IdentificationProbe,
-		nullBytes(s.TLS), nullBytes(s.SSH), seenAt)
+		nullBytes(s.TLS), nullBytes(s.SSH), seenAt, s.SeenOnly)
 	return mapError(err)
 }
 

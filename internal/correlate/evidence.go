@@ -29,6 +29,22 @@ import (
 // field added by the engine and not read here is not lost — the raw payload is
 // on the observation, which is immutable and the record of what was actually
 // seen.
+// portPayload is the discovery engine's `port` observation.
+//
+// It is NOT a service: it says a port answered, and nothing about what is
+// listening there. ADR-103 promotes the open ones to seen-only service rows so
+// the asset keeps its attack surface after the observation is pruned (ADR-016).
+type portPayload struct {
+	Address  string `json:"address"`
+	Port     uint16 `json:"port"`
+	Protocol string `json:"protocol"`
+
+	// State is "open", "closed" or "filtered". Only open is evidence of
+	// anything; the other two are promoted by nothing.
+	State      string `json:"state"`
+	SafetyMode string `json:"safety_mode"`
+}
+
 type servicePayload struct {
 	Address   string `json:"address"`
 	Port      uint16 `json:"port"`

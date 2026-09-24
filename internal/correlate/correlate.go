@@ -1040,9 +1040,52 @@ func (c *Correlator) candidatesFor(ctx context.Context, conn *store.Conn, h host
 	return out, nil
 }
 
+// upsertSeenPort promotes a discovery `port` observation to a seen-only service
+// row (ADR-103 decision 1).
+//
+// An open port is the asset's attack surface, and the observation carrying it is
+// ephemeral (ADR-016), so it is copied here — the moment it becomes
+// load-bearing. What is written claims nothing beyond "this answered": every
+// identification column stays empty, and Service.SeenOnly keeps the merge from
+// resetting softmatch and solicited on a row a fingerprint pass already filled.
+//
+// These rows are deliberately NOT visible to the rule engine (ADR-103 decision
+// 2). The measurement behind that: ports 2000 and 5060 came back open on 19 of
+// 19 hosts of a real /24 pair, which is a middlebox answering for the range
+// rather than nineteen SIP servers.
+func upsertSeenPort(ctx context.Context, conn *store.Conn, assetID uuid.UUID, o store.Observation) error {
+	var p portPayload
+	if err := json.Unmarshal(o.Payload, &p); err != nil {
+		return nil // a payload Core cannot read is not a port
+	}
+	if p.Port == 0 {
+		return nil
+	}
+	// Only OPEN is evidence. A closed or filtered port is the scan reporting
+	// that nothing is there, and writing it would put an endpoint on the asset
+	// that does not exist.
+	if !strings.EqualFold(strings.TrimSpace(p.State), "open") {
+		return nil
+	}
+	return (store.Services{}).Upsert(ctx, conn, store.Service{
+		AssetID:              assetID,
+		Port:                 int(p.Port),
+		Protocol:             orDefault(strings.ToLower(strings.TrimSpace(p.Protocol)), "tcp"),
+		IdentificationMethod: store.IdentificationDiscovery,
+		SafetyMode:           p.SafetyMode,
+		SeenOnly:             true,
+	}, o.ObservedAt)
+}
+
 // deriveServices writes the service rows for this host.
 func (c *Correlator) deriveServices(ctx context.Context, conn *store.Conn, assetID uuid.UUID, h host) error {
 	for _, o := range h.obs {
+		if o.Type == "port" {
+			if err := upsertSeenPort(ctx, conn, assetID, o); err != nil {
+				return err
+			}
+			continue
+		}
 		if o.Type != "service" {
 			continue
 		}
