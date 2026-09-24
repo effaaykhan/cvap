@@ -244,3 +244,34 @@ export function provenanceAge(iso: string, now: number = Date.now()): string {
   const h = Math.floor(ms / 3_600_000);
   return h >= 1 ? `${h} hour${h === 1 ? "" : "s"} ago` : "less than an hour ago";
 }
+
+// ---------------------------------------------------------------- open ports
+
+/** A service row a discovery scan merely SAW: the port answered and nothing
+ *  identified what is listening (ADR-103). The server sets identification_method
+ *  to 'discovery' for these, and its own API description says a console must not
+ *  render them as an identification. One function so the asset page and the
+ *  overview cannot disagree about what counts. */
+export function isSeenOnly(method?: string | null): boolean {
+  return method === "discovery";
+}
+
+/** groupPorts collapses flat port rows into one entry per key, ports ascending.
+ *
+ *  The server orders its rows by recency for the page cap, so the grouping must
+ *  NOT assume ports arrive sorted — a host whose ports were seen in two
+ *  different scans comes back interleaved. */
+export function groupPorts<T extends { port: number }>(
+  rows: T[],
+  key: (row: T) => string,
+): [string, T[]][] {
+  const m = new Map<string, T[]>();
+  for (const r of rows) {
+    const k = key(r);
+    const at = m.get(k);
+    if (at) at.push(r);
+    else m.set(k, [r]);
+  }
+  for (const list of m.values()) list.sort((a, b) => a.port - b.port);
+  return [...m.entries()];
+}

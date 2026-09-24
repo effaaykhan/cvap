@@ -5,7 +5,7 @@ import { useAuth } from "../lib/auth";
 import { PageHead } from "../components/PageHead";
 import { Trend } from "../components/Trend";
 import { HBars, SegmentBar, Sparkline, type SegmentSpec } from "../components/Charts";
-import { ago, attention, kevInversion, score } from "../lib/console";
+import { ago, attention, groupPorts, kevInversion, score } from "../lib/console";
 
 // The operator landing (console rung 2): what is worst right now, what changed,
 // what is not working, and the trend (rung 5). Every number is served by Core
@@ -20,6 +20,7 @@ export function Overview() {
   const { session } = useAuth();
   const canFindings = has(session, "finding.read");
   const canScans = has(session, "scan.read");
+  const canAssets = has(session, "asset.read");
 
   const stats = useQuery({
     queryKey: ["finding-summary", WINDOW, TREND],
@@ -31,6 +32,10 @@ export function Overview() {
   const points = useQuery({ queryKey: ["scan-points"], queryFn: () => api.listScanPoints(), enabled: canScans });
   const health = useQuery({ queryKey: ["health"], queryFn: () => api.health(), enabled: canScans });
   const feeds = useQuery({ queryKey: ["knowledge-freshness"], queryFn: () => api.knowledgeFreshness(), enabled: canFindings });
+  // Attack surface, which the overview could not show at all before ADR-103:
+  // discovery's open ports were in observations, which are ephemeral, and no
+  // route reached them.
+  const ports = useQuery({ queryKey: ["open-ports"], queryFn: () => api.openPorts(), enabled: canAssets });
   const scans = useQuery({ queryKey: ["scans", "?limit=50"], queryFn: () => api.listScans("?limit=50"), enabled: canScans });
 
   const s = stats.data;
@@ -254,6 +259,53 @@ export function Overview() {
               </div>
             )}
           </div>
+
+          {canAssets && (
+            <div className="card section">
+              <div className="card-head">
+                <span className="lbl">Open ports</span>
+                <span className="aside"><Link to="/assets">assets →</Link></span>
+              </div>
+              {ports.error && <p className="error">Could not load open ports.</p>}
+              {ports.data && ports.data.ports.length === 0 && (
+                <p className="muted">
+                  No open ports recorded. A discovery scan fills this in; until one has run,
+                  the platform knows hosts exist and nothing about their surface.
+                </p>
+              )}
+              {ports.data && ports.data.ports.length > 0 && (
+                <>
+                  <table>
+                    <thead><tr><th>Host</th><th>Open ports</th></tr></thead>
+                    <tbody>
+                      {groupPorts(ports.data.ports, (p) => p.asset_id).map(([key, rows]) => (
+                        <tr key={key}>
+                          <td className="data">
+                            <Link to={`/assets/${rows[0].asset_id}`}>{rows[0].hostname || rows[0].address || key}</Link>
+                          </td>
+                          <td className="data">
+                            {rows.map((p, i) => (
+                              <span key={i} className={p.identified ? "" : "unknown"}>
+                                {i > 0 && ", "}
+                                {p.port}/{p.protocol}
+                                {p.identified && p.product ? ` (${p.product})` : ""}
+                              </span>
+                            ))}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div className="foot-note">
+                    Greyed ports are open and UNIDENTIFIED — a discovery scan saw them answer and
+                    nothing has probed them since, so they are attack surface rather than a
+                    recognised service. Run a fingerprint scan to identify them.
+                    {ports.data.truncated && <> Showing the {ports.data.limit} most recently seen.</>}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </section>

@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, has, type IdentityKey } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { advisory, score, exactRead, provenanceAge, ago, fmtTime } from "../lib/console";
+import { advisory, score, exactRead, provenanceAge, ago, fmtTime, isSeenOnly } from "../lib/console";
 
 // AttributionSource mirrors the provenance rows the API embeds (ADR-061). The
 // API types it as opaque JSON, so it is narrowed here at the one place it is read.
@@ -197,16 +197,24 @@ export function AssetDetail() {
 
       <Timeline assetID={a.id} />
 
-      <h2>Services</h2>
+      <h2>Open ports and services</h2>
       {a.services?.length ? (
         <>
           <table><thead><tr><th>Port</th><th>Service</th><th>Identification</th><th>Evidence</th></tr></thead>
             <tbody>{a.services.map((s, i) => (
               <tr key={i}>
                 <td className="data">{s.port}/{s.protocol}</td>
-                <td className="data">{s.service || <span className="unknown">unknown</span>}</td>
-                <td className="data">{identification(s.product, s.version)}</td>
-                <td className="data">{evidence(s.method, s.version_confidence ?? undefined)}</td>
+                <td className="data">
+                  {isSeenOnly(s.method)
+                    ? <span className="unknown">open, unidentified</span>
+                    : s.service || <span className="unknown">unknown</span>}
+                </td>
+                <td className="data">{isSeenOnly(s.method) ? "—" : identification(s.product, s.version)}</td>
+                <td className="data">
+                  {isSeenOnly(s.method)
+                    ? <span className="unknown">port scan only</span>
+                    : evidence(s.method, s.version_confidence ?? undefined)}
+                </td>
               </tr>
             ))}</tbody></table>
           <p className="note">
@@ -214,8 +222,13 @@ export function AssetDetail() {
             was read from the service’s own banner; “unknown” means it answered but named no
             product, which is a service seen, not a version confirmed.
           </p>
+          <p className="note">
+            “open, unidentified” means a discovery scan saw the port answer and nothing has
+            probed it since — attack surface, not an identification. A fingerprint scan over
+            this host upgrades those rows in place.
+          </p>
         </>
-      ) : <p className="muted">No services observed.</p>}
+      ) : <p className="muted">No open ports or services observed.</p>}
     </section>
   );
 }

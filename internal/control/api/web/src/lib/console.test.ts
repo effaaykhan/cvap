@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { advisory, ageRatio, applyTriageFilter, attention, confidenceBand, kevInversion, scanReadiness, score, sparkPath, stackSegments, tally, trendGeometry, worstFirst, yTicks, exactRead, provenanceAge } from "./console";
+import { advisory, ageRatio, applyTriageFilter, attention, confidenceBand, exactRead, groupPorts, isSeenOnly, kevInversion, provenanceAge, scanReadiness, score, sparkPath, stackSegments, tally, trendGeometry, worstFirst, yTicks } from "./console";
 import type { FindingSummary, Health, KnowledgeFeed, ScanPoint } from "./api";
 
 const f = (over: Partial<FindingSummary>): FindingSummary => ({
@@ -177,5 +177,43 @@ describe("provenanceAge", () => {
     expect(provenanceAge("2026-09-12T11:50:00Z", now)).toBe("less than an hour ago");
     expect(provenanceAge("2026-09-13T00:00:00Z", now)).toBe("just now");
     expect(provenanceAge("not a date", now)).toBe("");
+  });
+});
+
+describe("open ports (ADR-103)", () => {
+  it("classifies a discovery row as seen-only and everything else as identified", () => {
+    expect(isSeenOnly("discovery")).toBe(true);
+    // The control: every other method the API documents is an identification,
+    // and 'none' in particular is NOT the same thing — it means a probe ran and
+    // recognised nothing, which is a stronger statement than never probing.
+    for (const m of ["banner", "probe", "tls-probe", "ssh-kex", "tls", "none"]) {
+      expect(isSeenOnly(m)).toBe(false);
+    }
+    expect(isSeenOnly(undefined)).toBe(false);
+    expect(isSeenOnly(null)).toBe(false);
+  });
+
+  it("groups ports per host and sorts them, whatever order the server sent", () => {
+    // The server orders its page by RECENCY, so a host whose ports were seen in
+    // two scans arrives interleaved. Grouping must not assume sorted input.
+    const rows = [
+      { asset_id: "a", port: 443 },
+      { asset_id: "b", port: 22 },
+      { asset_id: "a", port: 22 },
+      { asset_id: "b", port: 8080 },
+      { asset_id: "a", port: 80 },
+    ];
+    const out = groupPorts(rows, (r) => r.asset_id);
+    expect(out.map(([k]) => k)).toEqual(["a", "b"]);
+    expect(out[0][1].map((r) => r.port)).toEqual([22, 80, 443]);
+    expect(out[1][1].map((r) => r.port)).toEqual([22, 8080]);
+  });
+
+  it("keeps first-seen host order, which is the server's ranking", () => {
+    const out = groupPorts(
+      [{ asset_id: "z", port: 1 }, { asset_id: "a", port: 2 }],
+      (r) => r.asset_id,
+    );
+    expect(out.map(([k]) => k)).toEqual(["z", "a"]);
   });
 });
