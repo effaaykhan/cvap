@@ -23,8 +23,9 @@ Rules:
   (ADR-030's "separate identity", migration-seeded today), not by `cvap_knowledge_import`.
 - Observations are ephemeral. **Anything that must outlive them is copied at the moment it
   becomes load-bearing** (ADR-016): merge evidence into `asset_identity_keys`, finding and
-  verdict payloads into `evidence`. `evidence.observation_id` is a nullable soft reference,
-  never a hard FK.
+  verdict payloads into `evidence`, and — the fourth instance, added by ADR-103 — an OPEN PORT
+  into `services`. ADR-016's own text still enumerates three; it is frozen, so this is the copy
+  that gets to be current. `evidence.observation_id` is a nullable soft reference, never a hard FK.
 - `observations` is partitioned monthly; `evidence` is not partitioned — it is pruned by
   finding status, not by time.
 - Large evidence goes to the object store; the row holds a summary and a pointer (ADR-015).
@@ -213,6 +214,36 @@ branch ADR-017 exists to prevent.
 Resolution is **not** redemption. `ResolveEnrollmentTokenTenant` says which tenant to open a
 transaction as; single-use is enforced inside it by `EnrollmentTokens.Redeem`, a conditional
 UPDATE whose atomicity comes from the database re-evaluating its predicate after a lock wait.
+
+## `services` means "a port we have seen", not "a service we identified"
+
+Since ADR-103, a row in `services` may be either. A discovery scan's open port is promoted to a
+row carrying `port`, `protocol` and `identification_method = 'discovery'` with every
+identification column empty; a fingerprint pass later upgrades that same row in place.
+`Service.Identified()` is the predicate — ask it rather than assuming a row means an
+identification.
+
+**Seen-only rows are deliberately invisible to the rule engine** (ADR-103 decision 2), and the
+enforcement is one line: `serviceObservations` in `internal/correlate/findings.go` filters
+`o.Type != "service"`. Two things feed off that line, not one — the rules AND advisory matching
+(`internal/correlate/advisories.go`). Anything that relaxes it opens both.
+
+The measurement behind the decision: ports 2000 and 5060 answered on 19 of 19 hosts of a real
+/24 pair — one middlebox replying for the range. Those rows are durable now; the filter is what
+keeps them from becoming nineteen findings.
+
+## A failed service write loses the HOST, not just the service
+
+`deriveServices` runs inside `resolveHost`'s transaction, which is ADR-006 working as designed —
+resolveHost is one decision and a half-resolved host is the state it exists to prevent. The
+consequence is not obvious from reading `deriveServices`: a row the database refuses rolls the
+whole resolution back, so the asset is never written, its observations stay unresolved, and they
+fail again on every later sweep. A poison pill visible only as a log line.
+
+Measured twice: an `identification_method` outside the CHECK gave `assets=0` (ADR-104), and so
+did one port observation carrying `"safety_mode":"bogus"`. **Anything written into `services`
+from a wire payload must be narrowed against the column's constraint first**, and any future
+CHECK added to `services` is a change to the failure mode of host resolution.
 
 ## A refusal must not roll back its own record
 
