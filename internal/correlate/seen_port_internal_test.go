@@ -19,6 +19,12 @@ import (
 // The measurement behind decision 2: ports 2000 and 5060 answered on 19 of 19
 // hosts of a real /24 pair — one middlebox replying for the range. Those rows
 // are now durable. This is the line that keeps them out of the rules.
+// mutate:subject internal/correlate/findings.go
+// mutate:test    ./internal/correlate/ -run TestPortObservationsNeverReachTheRuleEngine
+//
+// mutate:case    a port observation is handed to the rule engine as if it were a service
+// mutate:old     if o.Type != "service" {
+// mutate:new     if o.Type != "service" && o.Type != "port" {
 func TestPortObservationsNeverReachTheRuleEngine(t *testing.T) {
 	// A port observation carrying a payload that WOULD satisfy a rule if the
 	// filter let it through. The fields are a service payload's; only the

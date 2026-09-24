@@ -104,6 +104,26 @@ func findingCount(t *testing.T, db *store.DB, tenant store.TenantID) int {
 	return n
 }
 
+// ADR-103's two write-side guards, declared so the suite asserts them rather
+// than a person remembering to. Both were verified by hand first and one of
+// them still shipped broken: the identification_method clobber below was found
+// by a schema audit AFTER the hand sabotage passed, because the assertion it
+// needed had never been written. A mutation that no case kills is the same
+// failure with the paperwork done.
+//
+// mutate:subject internal/correlate/correlate.go
+// mutate:test    ./internal/correlate/ -run TestAnOpenPortBecomesAServiceAndAClosedOneDoesNot|TestFingerprintUpgradesASeenPortAndLaterDiscoveryDoesNotUndoIt
+//
+// mutate:case    a closed or filtered port is promoted to a service row
+// mutate:old     if !strings.EqualFold(strings.TrimSpace(p.State), "open") {
+// mutate:new     if false {
+//
+// mutate:subject internal/store/services.go
+//
+// mutate:case    a seen-only write relabels an identified service as never-probed
+// mutate:old     identification_method     = CASE WHEN excluded.last_seen >= services.last_seen AND NOT $18
+// mutate:new     identification_method     = CASE WHEN excluded.last_seen >= services.last_seen
+//
 // Decision 1: an open port becomes a service row; closed and filtered do not.
 func TestAnOpenPortBecomesAServiceAndAClosedOneDoesNot(t *testing.T) {
 	db := testDB(t)
@@ -255,6 +275,18 @@ func TestFingerprintUpgradesASeenPortAndLaterDiscoveryDoesNotUndoIt(t *testing.T
 		t.Errorf("softmatch reset by a seen-only write: %v -> %v",
 			upgraded.softmatch, after.softmatch)
 	}
+	// The provenance column itself, which the first cut of this test did not
+	// check and a schema audit did. A seen-only write must not relabel an
+	// identified service as "nothing probed it" — that inverts the very
+	// distinction migration 0048 exists to record, and it is the STEADY state,
+	// not a corner case, because discovery scans run more often than
+	// fingerprint scans and so usually carry the newer observed_at.
+	if after.method == nil || *after.method != "banner" {
+		t.Errorf("identification_method downgraded by a seen-only write: %v -> %v; "+
+			"the row now says nothing probed it while carrying a product, a "+
+			"confidence and the probe that produced them",
+			derefOr(upgraded.method), derefOr(after.method))
+	}
 }
 
 func keysOf(m map[int]svcRow) []int {
@@ -263,4 +295,72 @@ func keysOf(m map[int]svcRow) []int {
 		out = append(out, k)
 	}
 	return out
+}
+
+func derefOr(p *string) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return *p
+}
+
+// A malformed wire field must cost at most its own row — never the host.
+//
+// deriveServices runs inside resolveHost's transaction, so a value the database
+// refuses rolls the whole resolution back: the asset is never written, the
+// observations stay unresolved, and they fail again on every later sweep. That
+// is ADR-104's recorded hazard, and an ADR-compliance audit measured this path
+// walking straight into it — one port observation carrying
+// "safety_mode":"bogus" produced assets=0, services=[].
+//
+// Both fields a port payload contributes to a CHECKed column are narrowed
+// before the write, so this test drives each of them with a value the database
+// would refuse.
+func TestAMalformedPortPayloadDoesNotCostTheHost(t *testing.T) {
+	db := testDB(t)
+	s := seed(t, db, "seen-port-poison")
+	c := correlate.New(db, quietLogger())
+	at := time.Now().UTC().Add(-time.Hour)
+
+	s.observe(t, db, at, sshService("10.10.0.24", 22, "SHA256:eeNzHqIMHK7YlUATGiTfBWUazP2nP6HemtSTyyviQS8"))
+	s.observe(t, db, at, tlsService("10.10.0.24", 443, "SHA256:ffStyOAlmZaZfSDF0eL0z8BAMYcnp0dmJVIcAiEZK1M"))
+
+	// safety_mode the enum does not contain.
+	poison := portObs("10.10.0.24", 8080, "open")
+	poison["safety_mode"] = "bogus"
+	s.observePort(t, db, at, poison)
+
+	// protocol outside the package's one grammar (B45).
+	weird := portObs("10.10.0.24", 8081, "open")
+	weird["protocol"] = "not-a-protocol/../;drop"
+	s.observePort(t, db, at, weird)
+
+	// and a good one, so the sweep is not vacuously clean.
+	s.observePort(t, db, at, portObs("10.10.0.24", 3389, "open"))
+
+	if err := c.SweepOnce(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+
+	if got := assetCount(t, db, s.tenant); got != 1 {
+		t.Fatalf("%d assets, want 1 — a malformed port payload took the whole host "+
+			"down with it (ADR-104's hazard, reached from the seen-only path)", got)
+	}
+	svcs := servicesOf(t, db, s.tenant)
+	if _, ok := svcs[3389]; !ok {
+		t.Errorf("the well-formed port did not land; the others must not stop it")
+	}
+	if _, ok := svcs[8081]; ok {
+		t.Errorf("a protocol outside normProtocol's grammar became a durable row; " +
+			"two spellings mint two rows for one endpoint under services_endpoint_key")
+	}
+	// The poisoned safety_mode row is still a real sighting: the mode is
+	// provenance, the open port is the fact, so the row lands with the mode
+	// dropped rather than being refused.
+	if row, ok := svcs[8080]; !ok {
+		t.Errorf("the port with an unrecognised safety_mode was discarded entirely; " +
+			"the mode is provenance, not the fact")
+	} else if row.method == nil || *row.method != store.IdentificationDiscovery {
+		t.Errorf("identification_method = %v on the recovered row", row.method)
+	}
 }

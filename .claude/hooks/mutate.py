@@ -74,6 +74,12 @@ SUITES = [
 # for Python — a suite that quietly opts out is how this stops covering
 # anything.
 GO_SUITES = [
+    # The seen-only port path (ADR-103/104). Two files: the integration half
+    # needs a database and covers the state filter and the merge guard, the
+    # internal half is DB-free and covers the rule-engine boundary decision 2
+    # rests on. internal/correlate had no mutation coverage at all before this.
+    "internal/correlate/seen_port_integration_test.go",
+    "internal/correlate/seen_port_internal_test.go",
     "internal/control/credential/phc_test.go",
     # bootstrap verifies its own login path; the mutation inverts the credential
     # check so a wrong password would pass — "a bootstrap that cannot log in has

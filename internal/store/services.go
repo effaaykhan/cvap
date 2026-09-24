@@ -53,20 +53,26 @@ type Service struct {
 // IdentificationDiscovery is the identification_method of a port that answered
 // and was never identified (ADR-103).
 //
-// It is deliberately a value of the EXISTING column rather than a new one: on
-// `services` only port and protocol are NOT NULL, so a seen-only row needs no
-// migration, and a later fingerprint pass upgrades this row in place instead of
-// creating a second one for the same endpoint.
+// It is deliberately a value of the EXISTING column rather than a new one, so a
+// later fingerprint pass upgrades this row in place instead of creating a second
+// one for the same endpoint.
+//
+// It DID need a migration, and this comment used to say otherwise: `services`
+// carries a CHECK whitelisting identification_method, which ADR-103 missed by
+// reading only column nullability. Migration 0048 admits the value (ADR-104).
 const IdentificationDiscovery = "discovery"
 
 // Identified reports whether anything is actually known about this endpoint
 // beyond the fact that it answered.
 //
-// Readers that present a service to an operator, or feed one to the rules, must
-// ask this rather than assuming a row means an identification: ADR-103 decision
-// 2 keeps seen-only rows out of the rule engine.
+// It reads identification_method and NOT SeenOnly, which is deliberate and was
+// wrong in the first cut: SeenOnly describes one WRITE, has no column, and is
+// therefore always false on anything read back from the database. A predicate
+// that consulted it would have answered "not identified" for every row in the
+// table. The durable marker is the method (ADR-104's migration exists to make
+// 'discovery' storable), so that is what a reader must ask.
 func (s Service) Identified() bool {
-	return !s.SeenOnly && s.IdentificationMethod != IdentificationDiscovery
+	return s.IdentificationMethod != IdentificationDiscovery
 }
 
 type Services struct{}
@@ -103,7 +109,17 @@ func (Services) Upsert(ctx context.Context, c *Conn, s Service, seenAt time.Time
 		                                     THEN coalesce(nullif(excluded.version,''), services.version) ELSE services.version END,
 		    version_confidence        = CASE WHEN excluded.last_seen >= services.last_seen
 		                                     THEN coalesce(excluded.version_confidence, services.version_confidence) ELSE services.version_confidence END,
-		    identification_method     = CASE WHEN excluded.last_seen >= services.last_seen
+		    -- $18 guards this for the same reason it guards softmatch and
+		    -- solicited below, and missing it here was the more damaging of the
+		    -- two: 'discovery' is NON-NULL, so it beat the coalesce and
+		    -- RELABELLED an identified service as "nothing probed it" while the
+		    -- row kept its product, its confidence and the probe that produced
+		    -- them. Not a corner case — discovery scans run more often than
+		    -- fingerprint scans, so their observed_at is usually the newer one
+		    -- and this was the steady state. Found by a schema audit; ADR-103's
+		    -- claim that softmatch/solicited were "the one clobber path" was
+		    -- wrong by exactly this column.
+		    identification_method     = CASE WHEN excluded.last_seen >= services.last_seen AND NOT $18
 		                                     THEN coalesce(excluded.identification_method, services.identification_method) ELSE services.identification_method END,
 		    identification_confidence = CASE WHEN excluded.last_seen >= services.last_seen
 		                                     THEN coalesce(excluded.identification_confidence, services.identification_confidence) ELSE services.identification_confidence END,

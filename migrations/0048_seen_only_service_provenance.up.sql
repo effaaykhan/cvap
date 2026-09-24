@@ -39,9 +39,21 @@ DECLARE
 BEGIN
     SELECT relrowsecurity, relforcerowsecurity INTO rls, force
       FROM pg_class WHERE oid = 'services'::regclass;
+    -- schemaname is pinned, and the predicate text is inspected rather than
+    -- merely counted. A schema audit walked three false passes through the
+    -- first version of this block: a same-named table in another schema, a
+    -- policy restricted to another role, and -- the one that matters -- a
+    -- policy rewritten with the TWO-argument current_setting, which returns
+    -- NULL when unset so the predicate goes NULL and reads silently return
+    -- nothing instead of raising (ADR-002, and CLAUDE.md says it twice).
     SELECT count(*) INTO pols
       FROM pg_policies
-     WHERE tablename = 'services' AND qual IS NOT NULL AND with_check IS NOT NULL;
+     WHERE schemaname = 'public' AND tablename = 'services'
+       AND qual IS NOT NULL AND with_check IS NOT NULL
+       AND qual       LIKE '%current_setting(''app.tenant_id''::text)%'
+       AND with_check LIKE '%current_setting(''app.tenant_id''::text)%'
+       AND qual       NOT LIKE '%app.tenant_id''::text, %'
+       AND with_check NOT LIKE '%app.tenant_id''::text, %';
 
     IF NOT rls OR NOT force THEN
         RAISE EXCEPTION
@@ -50,7 +62,7 @@ BEGIN
     END IF;
     IF pols = 0 THEN
         RAISE EXCEPTION
-            'services has no policy carrying BOTH USING and WITH CHECK; a USING-only policy lets a tenant write into another tenant''s scope (ADR-002).';
+            'services has no public-schema policy carrying BOTH USING and WITH CHECK over the ONE-argument current_setting(''app.tenant_id''). A USING-only policy lets a tenant write into another tenant''s scope, and the two-argument form makes an unset context read as empty instead of raising (ADR-002).';
     END IF;
     RAISE NOTICE 'services: RLS forced, % policy(ies) with USING + WITH CHECK', pols;
 END

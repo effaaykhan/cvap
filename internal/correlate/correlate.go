@@ -1067,12 +1067,39 @@ func upsertSeenPort(ctx context.Context, conn *store.Conn, assetID uuid.UUID, o 
 	if !strings.EqualFold(strings.TrimSpace(p.State), "open") {
 		return nil
 	}
+	// Both remaining wire fields are NARROWED before they reach a checked
+	// column, because a value the database refuses does not cost a row here --
+	// it costs the whole host. deriveServices runs inside resolveHost's
+	// transaction, so the constraint violation rolls the resolution back and the
+	// asset is never written; the observations stay unresolved and fail again on
+	// every later sweep. ADR-104 records that hazard, and an ADR-compliance
+	// audit measured this path arriving at it: one port observation carrying
+	// "safety_mode":"bogus" gave assets=0, services=[].
+	//
+	// normProtocol is the package's one grammar for a service protocol (B45):
+	// tcp only, deliberately, because the identity unit is narrower than the
+	// trust unit and no engine emits anything else. A protocol it rejects is not
+	// silently coerced to tcp -- the row is skipped, since inventing a protocol
+	// for an endpoint is how two spellings mint two rows for one endpoint under
+	// services_endpoint_key.
+	proto, ok := normProtocol(p.Protocol)
+	if !ok {
+		return nil
+	}
+	// safety_mode carries its own CHECK. ADR-103 decision 1 does not list it
+	// among what a seen-only row records, so an unrecognised value is dropped
+	// rather than refused: the port was still seen, and the mode is provenance,
+	// not the fact.
+	mode := strings.ToLower(strings.TrimSpace(p.SafetyMode))
+	if mode != string(store.SafetySafe) && mode != string(store.SafetyIntrusive) {
+		mode = ""
+	}
 	return (store.Services{}).Upsert(ctx, conn, store.Service{
 		AssetID:              assetID,
 		Port:                 int(p.Port),
-		Protocol:             orDefault(strings.ToLower(strings.TrimSpace(p.Protocol)), "tcp"),
+		Protocol:             proto,
 		IdentificationMethod: store.IdentificationDiscovery,
-		SafetyMode:           p.SafetyMode,
+		SafetyMode:           mode,
 		SeenOnly:             true,
 	}, o.ObservedAt)
 }
