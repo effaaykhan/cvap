@@ -364,3 +364,62 @@ func TestAMalformedPortPayloadDoesNotCostTheHost(t *testing.T) {
 		t.Errorf("identification_method = %v on the recovered row", row.method)
 	}
 }
+
+// The overview's port table, and the flag the console renders on (ADR-103).
+//
+// `identified` is the whole contract of that screen: false means the port
+// answered and nothing recognised what is listening, so the row is attack
+// surface rather than a service. A query that got this backwards would render
+// nineteen middlebox artefacts as identified services.
+func TestOpenPortsMarksSeenOnlyRowsUnidentified(t *testing.T) {
+	db := testDB(t)
+	s := seed(t, db, "open-ports-api")
+	c := correlate.New(db, quietLogger())
+	ctx := context.Background()
+	at := time.Now().UTC().Add(-time.Hour)
+
+	// 22 is identified by the fingerprint pass; 3389 is only ever seen.
+	s.observe(t, db, at, sshService("10.10.0.25", 22, "SHA256:ggNzHqIMHK7YlUATGiTfBWUazP2nP6HemtSTyyviQS8"))
+	s.observe(t, db, at, tlsService("10.10.0.25", 443, "SHA256:hhStyOAlmZaZfSDF0eL0z8BAMYcnp0dmJVIcAiEZK1M"))
+	s.observePort(t, db, at, portObs("10.10.0.25", 3389, "open"))
+	if err := c.SweepOnce(ctx); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+
+	var rows []store.OpenPort
+	if err := db.Read(ctx, s.tenant, func(ctx context.Context, conn *store.Conn) error {
+		var err error
+		rows, err = (store.Services{}).OpenPorts(ctx, conn, 100)
+		return err
+	}); err != nil {
+		t.Fatalf("open ports: %v", err)
+	}
+
+	byPort := map[int]store.OpenPort{}
+	for _, r := range rows {
+		byPort[r.Port] = r
+	}
+	seen, ok := byPort[3389]
+	if !ok {
+		t.Fatalf("the seen-only port is absent from the overview read; ports: %v", rows)
+	}
+	if seen.Identified {
+		t.Errorf("port 3389 reads as identified; nothing probed it, and the console would " +
+			"render a middlebox's answer as a recognised service")
+	}
+	ident, ok := byPort[22]
+	if !ok {
+		t.Fatalf("the identified service is absent from the overview read")
+	}
+	if !ident.Identified {
+		t.Errorf("port 22 reads as unidentified despite carrying product %q — the flag is "+
+			"inverted or the method comparison is wrong", ident.Product)
+	}
+	if ident.Product == "" {
+		t.Errorf("the identified row carries no product, so this test cannot tell the two apart")
+	}
+	// The address the operator reaches it at, not an empty cell.
+	if seen.Address == "" {
+		t.Errorf("the overview row has no address; the table is keyed on it")
+	}
+}

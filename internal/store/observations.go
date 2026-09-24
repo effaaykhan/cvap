@@ -437,3 +437,63 @@ func (Observations) LatestPackageForAsset(ctx context.Context, c *Conn, assetID 
 	}
 	return &out[0], nil
 }
+
+// ScanPort is one open port a particular SCAN saw (ADR-103 decision 3).
+type ScanPort struct {
+	Address    string
+	Port       int
+	Protocol   string
+	SafetyMode string
+	ObservedAt time.Time
+}
+
+// OpenPortsForScan answers "what did this scan find", from the observations of
+// its own tasks.
+//
+// Scan-scoped, and therefore read from OBSERVATIONS rather than from services:
+// an asset is not scan-scoped — it accumulates across every scan that ever saw
+// it — so an asset-shaped read could not answer the question without lying
+// about which run produced what.
+//
+// The consequence is that this view EMPTIES as observations age out (ADR-016),
+// while the asset's services persist. That is not a defect to be hidden: the
+// screen says so, because a scan result page that silently goes blank reads as
+// data loss rather than as retention working.
+//
+// The window is required, not defensive: `observations` is partitioned by
+// observed_at, so a query without one scans every live partition.
+func (Observations) OpenPortsForScan(ctx context.Context, c *Conn, scanID uuid.UUID, since, until time.Time, limit int) ([]ScanPort, error) {
+	const q = `
+		SELECT o.payload->>'address', (o.payload->>'port')::int,
+		       coalesce(o.payload->>'protocol', 'tcp'),
+		       coalesce(o.payload->>'safety_mode', ''),
+		       o.observed_at
+		  FROM observations o
+		  JOIN scan_tasks t ON t.tenant_id = o.tenant_id AND t.task_id = o.task_id
+		  JOIN scan_jobs j  ON j.tenant_id = t.tenant_id AND j.job_id  = t.job_id
+		 WHERE o.tenant_id = $1
+		   AND j.scan_id = $2
+		   AND o.observed_at >= $3 AND o.observed_at < $4
+		   AND o.ingest_state = 'accepted'
+		   AND o.observation_type = 'port'
+		   AND o.payload->>'state' = 'open'
+		   AND o.payload ? 'address' AND o.payload ? 'port'
+		 ORDER BY o.payload->>'address', (o.payload->>'port')::int
+		 LIMIT $5`
+
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), scanID, since, until, limit)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+
+	var out []ScanPort
+	for rows.Next() {
+		var p ScanPort
+		if err := rows.Scan(&p.Address, &p.Port, &p.Protocol, &p.SafetyMode, &p.ObservedAt); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, p)
+	}
+	return out, mapError(rows.Err())
+}

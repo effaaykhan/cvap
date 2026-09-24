@@ -528,6 +528,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/open-ports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Open ports across the estate
+         * @description Every listening endpoint the platform holds, most recently seen first, as one row per host and port. `identified` is the field that matters: false means a discovery scan SAW the port answer and nothing identified what is listening (ADR-103), so the row is evidence of attack surface and not a claim about a service. Bounded at 500 rows and it says so with `truncated` -- this feeds a screen, not an export; /v1/assets.csv is the path for the whole set.
+         */
+        get: operations["getV1Open-ports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/openapi.json": {
         parameters: {
             query?: never;
@@ -703,6 +723,26 @@ export interface paths {
          * @description Queued jobs stop being claimable immediately; in-flight jobs are told to stop on the next dispatch pass, naming the lease epoch. A scan that has already finished is refused rather than silently accepted.
          */
         post: operations["postV1ScansByScan_idCancel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/scans/{scan_id}/results": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What this scan found
+         * @description The open ports THIS scan observed, read from its own tasks' observations rather than from assets, because an asset is not scan-scoped -- it accumulates across every scan that ever saw it (ADR-103 decision 3). Observations are ephemeral (ADR-016), so `ephemeral` is always true here and an older scan returns fewer rows and eventually none. What the scan taught the asset stays on the asset; this is the record of one run, and it is the run that expires, not the knowledge.
+         */
+        get: operations["getV1ScansByScan_idResults"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1415,6 +1455,24 @@ export interface components {
             id: string;
             prefix: string;
         };
+        OpenPortResponse: {
+            address?: string;
+            asset_id: string;
+            hostname?: string;
+            /** @description False when discovery merely SAW the port answer and nothing identified what is listening (identification_method 'discovery', ADR-103). A console must render these as 'open, unidentified' rather than implying a service was recognised. */
+            identified: boolean;
+            /** Format: date-time */
+            last_seen: string;
+            port: number;
+            product?: string;
+            protocol: string;
+            service?: string;
+        };
+        OpenPortsResponse: {
+            limit: number;
+            ports: components["schemas"]["OpenPortResponse"][];
+            truncated: boolean;
+        };
         ParkedKeyResponse: {
             first_seen: string;
             items: number;
@@ -1524,6 +1582,14 @@ export interface components {
             status: string;
             zone_id: string;
         };
+        ScanPortResponse: {
+            address: string;
+            /** Format: date-time */
+            observed_at: string;
+            port: number;
+            protocol: string;
+            safety_mode?: string;
+        };
         ScanResponse: {
             /** Format: date-time */
             completed_at?: string | null;
@@ -1538,6 +1604,16 @@ export interface components {
             /** Format: date-time */
             started_at?: string | null;
             status: string;
+        };
+        ScanResultsResponse: {
+            /** @description These results are read from observations, which age out (ADR-016). An older scan shows fewer, and eventually none, while what it taught the asset remains on the asset. */
+            ephemeral: boolean;
+            /** @description Distinct addresses with at least one open port in this scan's results. */
+            hosts: number;
+            limit: number;
+            ports: components["schemas"]["ScanPortResponse"][];
+            scan_id: string;
+            truncated: boolean;
         };
         ScanTargetInput: {
             /** @description Attestation that this target is authorised for scanning. A scan whose targets are not all attested is refused at planning. */
@@ -3126,6 +3202,62 @@ export interface operations {
             };
         };
     };
+    "getV1Open-ports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenPortsResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold asset.read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     "getV1Openapi.json": {
         parameters: {
             query?: never;
@@ -3848,6 +3980,64 @@ export interface operations {
                 };
             };
             /** @description Refused because the session's role does not hold scan.cancel, or the X-CVAP-CSRF header is missing or does not match the session, or the request did not come from this site. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An unexpected error. The response body never describes the schema or the failing query; the detail is in Core's log against the request id. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getV1ScansByScan_idResults: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scan_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScanResultsResponse"];
+                };
+            };
+            /** @description The request body or a path parameter was malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No valid session. Indistinguishable from an expired or revoked one, deliberately. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused because the session's role does not hold scan.read. */
             403: {
                 headers: {
                     [name: string]: unknown;

@@ -501,6 +501,34 @@ func (s *Server) routes() {
 	})
 
 	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/open-ports",
+		Summary: "Open ports across the estate",
+		Description: "Every listening endpoint the platform holds, most recently seen first, as " +
+			"one row per host and port. `identified` is the field that matters: false means a " +
+			"discovery scan SAW the port answer and nothing identified what is listening " +
+			"(ADR-103), so the row is evidence of attack surface and not a claim about a " +
+			"service. Bounded at 500 rows and it says so with `truncated` -- this feeds a " +
+			"screen, not an export; /v1/assets.csv is the path for the whole set.",
+		Access: AccessPermission, Permission: PermAssetRead,
+		Response: OpenPortsResponse{},
+		Handler:  s.openPorts,
+	})
+
+	r.Register(Route{
+		Method: http.MethodGet, Path: "/v1/scans/{scan_id}/results",
+		Summary: "What this scan found",
+		Description: "The open ports THIS scan observed, read from its own tasks' observations " +
+			"rather than from assets, because an asset is not scan-scoped -- it accumulates " +
+			"across every scan that ever saw it (ADR-103 decision 3). Observations are " +
+			"ephemeral (ADR-016), so `ephemeral` is always true here and an older scan returns " +
+			"fewer rows and eventually none. What the scan taught the asset stays on the asset; " +
+			"this is the record of one run, and it is the run that expires, not the knowledge.",
+		Access: AccessPermission, Permission: PermScanRead,
+		Response: ScanResultsResponse{},
+		Handler:  s.scanResults,
+	})
+
+	r.Register(Route{
 		Method: http.MethodGet, Path: "/v1/findings.csv",
 		Summary: "Export findings as CSV",
 		Description: "The findings list (same filters) as CSV, for the reporting §2 permits. " +

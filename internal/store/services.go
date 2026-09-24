@@ -208,3 +208,68 @@ func (Services) ProductsSince(ctx context.Context, c *Conn, assetID uuid.UUID, s
 	}
 	return out, mapError(rows.Err())
 }
+
+// OpenPort is one listening endpoint with the address an operator reaches it
+// at, for the overview's port table (ADR-103).
+type OpenPort struct {
+	AssetID  uuid.UUID
+	Address  string
+	Hostname string
+	Port     int
+	Protocol string
+	Service  string
+	Product  string
+
+	// Identified is false for a port discovery merely SAW. The console must
+	// render those differently: a row here is not a claim that anything was
+	// recognised on the port (ADR-103 decision 1).
+	Identified bool
+	LastSeen   time.Time
+}
+
+// OpenPorts lists endpoints across the tenant, newest sighting first.
+//
+// Bounded by limit and ordered deterministically, because this feeds a screen
+// rather than an export: an unbounded read of every service on a large estate
+// is the shape ADR-052 refuses for the CSV paths, and the operator budget
+// (ADR-101) is 30 seconds.
+//
+// The address is the asset's CURRENT one — `valid_to IS NULL` — which is the
+// same subquery the asset list uses. A service row carries no address of its
+// own: a dual-homed host's port 22 is one row whichever interface answered, so
+// what is shown is the asset's address, not the vantage the port was seen from.
+func (Services) OpenPorts(ctx context.Context, c *Conn, limit int) ([]OpenPort, error) {
+	const q = `
+		SELECT s.asset_id,
+		       coalesce((SELECT host(ad.ip_address) FROM asset_addresses ad
+		                  WHERE ad.tenant_id = s.tenant_id AND ad.asset_id = s.asset_id
+		                    AND ad.valid_to IS NULL
+		                  ORDER BY ad.valid_from LIMIT 1), ''),
+		       coalesce(a.primary_hostname, ''),
+		       s.port, s.protocol,
+		       coalesce(s.service_name, ''), coalesce(s.product, ''),
+		       coalesce(s.identification_method, '') <> $2 AS identified,
+		       s.last_seen
+		  FROM services s
+		  JOIN assets a ON a.tenant_id = s.tenant_id AND a.asset_id = s.asset_id
+		 WHERE s.tenant_id = $1
+		 ORDER BY s.last_seen DESC, s.asset_id, s.port
+		 LIMIT $3`
+
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), IdentificationDiscovery, limit)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+
+	var out []OpenPort
+	for rows.Next() {
+		var p OpenPort
+		if err := rows.Scan(&p.AssetID, &p.Address, &p.Hostname, &p.Port, &p.Protocol,
+			&p.Service, &p.Product, &p.Identified, &p.LastSeen); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, p)
+	}
+	return out, mapError(rows.Err())
+}
