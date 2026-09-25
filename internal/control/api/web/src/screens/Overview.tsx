@@ -297,6 +297,16 @@ export function Overview() {
                     </tbody>
                   </table>
                   <div className="foot-note">
+                    {(() => {
+                      const n = ports.data.ports.filter((p) => !p.identified).length;
+                      const t = ports.data.ports.length;
+                      // The RATIO is the number worth reading, not either count
+                      // alone. A wall of unidentified ports means a fingerprint
+                      // scan has not run -- or that something is answering for
+                      // addresses that do not exist, which is what a range
+                      // replying identically on the same ports looks like.
+                      return <><strong>{n} of {t}</strong> shown are unidentified. </>;
+                    })()}
                     Greyed ports are open and UNIDENTIFIED — a discovery scan saw them answer and
                     nothing has probed them since, so they are attack surface rather than a
                     recognised service. Run a fingerprint scan to identify them.
