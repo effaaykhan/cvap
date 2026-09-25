@@ -1,0 +1,22 @@
+# Who reviews what (see CONTRIBUTING.md for the working model).
+#
+# Two people, one clone, one OS account, two git worktrees. These lines route
+# review; they do not stop anyone editing a file. The rule that actually
+# prevents conflicts is the contract rule in CONTRIBUTING.md, and CI enforces
+# that one whether or not anybody reads this file.
+
+*                                               @effaaykhan
+
+# The operator console. Hers.
+/internal/control/api/web/                      @REPLACE-WITH-HER-GITHUB-USERNAME
+
+# ...except the generated client, which is NOT hers to edit. It is produced from
+# the Go route registry by `make ui-types`, and the `web` CI job regenerates it
+# and fails on any diff. Whoever changes a route or a response struct owns the
+# regeneration, in the same pull request.
+/internal/control/api/web/src/api/schema.ts     @effaaykhan
+
+# The contract surface itself: the route registry and the response structs the
+# OpenAPI document is emitted from. A change here reshapes her types.
+/internal/control/api/routes.go                 @effaaykhan
+/internal/control/api/handlers_*.go             @effaaykhan

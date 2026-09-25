@@ -50,3 +50,10 @@ deploy/secrets/
 .go.mod.tidycheck
 .go.sum.tidycheck
 .safety-scope.sabotage
+
+# Parallel-development worktrees (see CONTRIBUTING.md). One clone, one OS user,
+# one branch checked out per directory -- so two people can work at once without
+# fighting over the working tree. Leading dot is load-bearing: Go's `./...`
+# skips directories beginning with `.`, so a second checkout here is invisible
+# to `go build`, `go list` and `gofmt` rather than being compiled twice.
+.worktrees/
