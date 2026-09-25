@@ -158,3 +158,127 @@ docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e npm_config_cache=/tmp/.np
 
 `docker` needs `sg docker -c '…'` in a shell whose groups predate the docker
 group membership.
+
+---
+
+# Merging the UI worktree into the main checkout
+
+Changes made in `.worktrees/ui` do **not** appear in `/home/soc/cvap` on their
+own. They are two checkouts on two branches; you bring the work across
+deliberately.
+
+## 0. See where you stand
+
+```bash
+cd /home/soc/cvap
+git worktree list
+git rev-list --left-right --count main...feat/ui   # "X Y" = main ahead X, ui ahead Y
+```
+
+Second number `0` means there is nothing to merge.
+
+## 1. Commit, in the worktree
+
+Uncommitted work does not merge.
+
+```bash
+cd /home/soc/cvap/.worktrees/ui
+git status --short
+git add <files> && git commit -m "UI: ..."
+```
+
+## 2. Gate it, in the worktree
+
+```bash
+make ui     # ui-verify + typecheck + test + embedui-build
+```
+
+Node is not installed on this host. If `npx` is missing, run the gate in the
+container:
+
+```bash
+sg docker -c 'docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e npm_config_cache=/tmp/.npm \
+  -v /home/soc/cvap/.worktrees/ui/internal/control/api/web:/w -w /w node:20-alpine \
+  sh -c "npx --no-install tsc -b --noEmit && npx --no-install vitest run"'
+```
+
+Fix failures here, not after merging.
+
+## 3. Rebase onto main — the step people skip
+
+```bash
+git rebase main
+```
+
+This pulls backend changes in and surfaces conflicts in HER tree, where they are
+hers to resolve. Skip it and her conflicts land in your directory instead.
+
+**If `src/api/schema.ts` conflicts, do not resolve it by hand.** It is
+generated. Take either side, then regenerate and re-run the gate:
+
+```bash
+git checkout --theirs internal/control/api/web/src/api/schema.ts
+cd /home/soc/cvap && make ui-types
+```
+
+## 4. Merge into the main checkout
+
+`-C` targets the other directory without leaving this one:
+
+```bash
+git -C /home/soc/cvap merge feat/ui --no-edit
+git -C /home/soc/cvap log --oneline -2
+```
+
+After step 3 this is always a fast-forward. The files are now in
+`/home/soc/cvap` — **and the running dashboard has not changed.**
+
+## 5. Rebuild — the other step people skip
+
+The console is compiled INTO `cvap-core` under the `embedui` tag, so a merge
+alone changes nothing that is served.
+
+```bash
+cd /home/soc/cvap
+
+# bundle
+sg docker -c 'docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e npm_config_cache=/tmp/.npm \
+  -v /home/soc/cvap/internal/control/api/web:/w -w /w node:20-alpine npx --no-install vite build'
+
+# relink
+go build -tags embedui -o <bin-dir>/cvap-core ./cmd/cvap-core
+
+# restart: stop the old process, start the new binary with the same environment
+ps -eo pid,comm | grep cvap-core        # find the pid
+kill <old-pid>
+<same env vars as before> setsid nohup <bin-dir>/cvap-core > <log> 2>&1 &
+```
+
+## 6. Verify it took
+
+Do not trust the restart — check the bytes the server hands out. The bundle
+filename carries a content hash, so a changed hash proves new code is being
+served:
+
+```bash
+curl -sk https://<host>:8445/ | grep -oE 'index-[A-Za-z0-9_-]+\.js'
+curl -sk https://<host>:8445/assets/index-<hash>.js | grep -c '<a string from your change>'
+```
+
+The hash must differ from before, and the count must be `1`.
+
+## 7. Push
+
+```bash
+git -C /home/soc/cvap push origin main     # or open a PR from feat/ui
+```
+
+Nothing is pushed without the operator's approval.
+
+---
+
+**Short version:** commit → `make ui` → `git rebase main` →
+`git -C /home/soc/cvap merge feat/ui` → rebuild → restart → check the hash.
+Steps 3 and 5 are the ones that get skipped: skipping 3 moves her conflicts into
+your directory, skipping 5 leaves you looking at the old dashboard wondering why
+nothing changed.
