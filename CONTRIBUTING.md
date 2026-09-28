@@ -58,6 +58,23 @@ git log -1 --format='%an <%ae>'
 
 The main checkout is unaffected; verified — it still reports `effaaykhan`.
 
+### The directory decides the author, and a hook enforces it
+
+A commit made in the UI worktree carrying the backend identity is silently
+mis-credited, and it is only visible once it reaches GitHub. `.git/hooks/pre-commit`
+refuses it instead: it reads `git rev-parse --show-toplevel` and checks the
+author against that directory's owner, printing the one-line fix. Tested three
+ways — worktree with her identity allowed, worktree with his REFUSED, main with
+his allowed.
+
+So: **backend work is committed in `/home/soc/cvap`, console work in
+`.worktrees/ui`, and neither crosses over.** If you need to move a file between
+the two, move it with a merge, not by editing it in the other directory.
+
+`.git/hooks` is outside the tree, so the hook does not survive a fresh clone or
+a worktree recreated elsewhere. Reinstall it if either happens, or
+mis-attribution goes back to being silent.
+
 ## Who owns what
 
 | Area | Owner |
