@@ -8,7 +8,7 @@
 *                                               @effaaykhan
 
 # The operator console. Hers.
-/internal/control/api/web/                      @REPLACE-WITH-HER-GITHUB-USERNAME
+/internal/control/api/web/                      @nidhichoudhari
 
 # ...except the generated client, which is NOT hers to edit. It is produced from
 # the Go route registry by `make ui-types`, and the `web` CI job regenerates it
