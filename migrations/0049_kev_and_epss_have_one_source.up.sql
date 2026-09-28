@@ -21,9 +21,7 @@
 -- off is thin. Measured against `kev`, the real intersection is 4 of 6,021 —
 -- still thin, but the stated figure came from a column no feed maintains, and a
 -- reader could not have told the difference. ADR-105's DECISION is unaffected —
--- 4 of 6,021 is as partial as 0 of 6,021 — but its evidence line needs a
--- superseding ADR, which is the operator's to write (/new-adr); this migration
--- does not edit a committed one.
+-- 4 of 6,021 is as partial as 0 of 6,021 — and ADR-106 supersedes the figure.
 --
 -- Dropping rather than populating. Populating means the same fact maintained in
 -- two places by two importers that must both run and must agree forever, for a

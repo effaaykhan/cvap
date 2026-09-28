@@ -12,8 +12,98 @@ import (
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
-// seedKernelKeyspace adds one resolute kernel USN to the keyspace: `linux` fixed
-// at 7.0.0-31.31, one CVE. Through the knowledge role like seedJammyOpenSSH.
+// The releases these fixtures use are ones the Ubuntu feed cannot name.
+//
+// `resolute` and `jammy` are real, and the advisory keyspace is GLOBAL and
+// untenanted by design (ADR-017 lists VENDOR_ADVISORY and ADVISORY_FIXED_PACKAGE
+// among the tables that carry no tenant_id), so seeding a fresh tenant buys no
+// isolation from it. These tests were written when the knowledge tables were
+// empty and passed only for that reason. Once `make knowledge-usn` had run, the
+// dev database held 332 `resolute` rows and 919 `jammy` ones and seven of them
+// went red — `credentialedKernelFindings` counts every credentialed `linux`
+// finding on the tenant, so real advisories matching the seeded inventory are
+// counted too (101 and 653 on two runs; the number moves with the feed).
+//
+// The counts were the visible half. The worse half is that real data DELETED a
+// scenario: TestAReleaseChangeWithdrawsNothingTheNewKeyspaceCannotJudge needs a
+// release whose keyspace has no `linux` rows, and real jammy has 17. A test
+// cannot demonstrate "no data is not a clean verdict" on a release that has the
+// data. So the fixtures move to release names no vendor feed will ever emit,
+// which makes the scenarios hold whatever has been ingested.
+const (
+	kernRelease      = "cvap-test-kern"       // knows `linux` (7.0.0-31.31) and `openssh`
+	kernOtherRelease = "cvap-test-kern-other" // knows `openssh`, and never `linux`
+)
+
+// assertKeyspaceIsolated fails if any advisory that is not one of this package's
+// own TEST- fixtures carries rows for the release.
+//
+// It exists because the bug it guards was invisible: nothing in the suite stated
+// that it needed an empty keyspace, so ingesting a feed moved the results and no
+// message said why. Without the guard the coupling returns the moment someone
+// picks a release name a vendor later ships, and the failure surfaces as an
+// arithmetic mismatch in a kernel test rather than as what it is. A test that
+// depends on the absence of data has to say so, or the next reader debugs the
+// wrong thing.
+func assertKeyspaceIsolated(t *testing.T, pool *pgxpool.Pool, release string) {
+	t.Helper()
+	var n int
+	var refs string
+	// Only a handful of refs are named: the count is the finding, and a release
+	// a vendor covers has hundreds, which would bury the sentence that says what
+	// to do about it.
+	if err := pool.QueryRow(context.Background(), `
+		SELECT (SELECT count(*) FROM advisory_fixed_packages afp
+		          JOIN vendor_advisories va USING (advisory_id)
+		         WHERE afp.distro_release = $1 AND va.advisory_ref NOT LIKE 'TEST-%'),
+		       coalesce((SELECT string_agg(ref, ', ' ORDER BY ref) FROM (
+		           SELECT DISTINCT va.advisory_ref AS ref
+		             FROM advisory_fixed_packages afp
+		             JOIN vendor_advisories va USING (advisory_id)
+		            WHERE afp.distro_release = $1 AND va.advisory_ref NOT LIKE 'TEST-%'
+		            ORDER BY ref LIMIT 5) sample), '')`,
+		release).Scan(&n, &refs); err != nil {
+		t.Fatalf("check keyspace isolation for %s: %v", release, err)
+	}
+	if n > 0 {
+		t.Fatalf("release %q carries %d advisory row(s) this package did not seed (e.g. %s). "+
+			"These tests count every credentialed finding on the tenant and the advisory keyspace is "+
+			"global and untenanted (ADR-017), so a vendor advisory on this release is counted with the "+
+			"fixture's. Pick a release name no feed emits.", release, n, refs)
+	}
+}
+
+// seedAdvisory writes one fixture USN — advisory, CVE, the map between them, and
+// a single fixed package on one release — through the knowledge import role.
+// Every ref it writes starts with TEST-, which is what assertKeyspaceIsolated
+// uses to tell this package's fixtures from a vendor's.
+func seedAdvisory(t *testing.T, pool *pgxpool.Pool, ref, cve, release, pkg, fixed string) {
+	t.Helper()
+	ctx := context.Background()
+	stmts := []struct {
+		q    string
+		args []any
+	}{
+		{`INSERT INTO vendor_advisories (advisory_ref, vendor) VALUES ($1,'ubuntu') ON CONFLICT (advisory_ref) DO NOTHING`, []any{ref}},
+		{`INSERT INTO vulnerability_defs (cve_id, title) VALUES ($1,$1) ON CONFLICT (cve_id) DO NOTHING`, []any{cve}},
+		{`INSERT INTO advisory_vuln_map (advisory_id, vuln_def_id)
+		  SELECT va.advisory_id, vd.vuln_def_id FROM vendor_advisories va, vulnerability_defs vd
+		   WHERE va.advisory_ref=$1 AND vd.cve_id=$2 ON CONFLICT DO NOTHING`, []any{ref, cve}},
+		{`INSERT INTO advisory_fixed_packages (advisory_id, distro_release, package_name, fixed_version, comparator)
+		  SELECT va.advisory_id, $2, $3, $4, 'dpkg'::version_comparator
+		    FROM vendor_advisories va WHERE va.advisory_ref=$1
+		  ON CONFLICT (advisory_id, distro_release, package_name) DO NOTHING`, []any{ref, release, pkg, fixed}},
+	}
+	for _, st := range stmts {
+		if _, err := pool.Exec(ctx, st.q, st.args...); err != nil {
+			t.Fatalf("seed advisory %s (%s %s on %s): %v", ref, pkg, fixed, release, err)
+		}
+	}
+}
+
+// seedKernelKeyspace adds one kernel USN to the keyspace: `linux` fixed at
+// 7.0.0-31.31, one CVE, on kernRelease. Through the knowledge role like
+// seedKernOtherReleaseOpenSSH.
 func seedKernelKeyspace(t *testing.T) {
 	t.Helper()
 	url := os.Getenv("KNOWLEDGE_IMPORT_DATABASE_URL")
@@ -26,21 +116,8 @@ func seedKernelKeyspace(t *testing.T) {
 		t.Fatalf("connect as import role: %v", err)
 	}
 	defer pool.Close()
-	for _, q := range []string{
-		`INSERT INTO vendor_advisories (advisory_ref, vendor) VALUES ('TEST-KERNEL-RESOLUTE','ubuntu') ON CONFLICT (advisory_ref) DO NOTHING`,
-		`INSERT INTO vulnerability_defs (cve_id, title) VALUES ('CVE-2026-0001','CVE-2026-0001') ON CONFLICT (cve_id) DO NOTHING`,
-		`INSERT INTO advisory_vuln_map (advisory_id, vuln_def_id)
-		 SELECT va.advisory_id, vd.vuln_def_id FROM vendor_advisories va, vulnerability_defs vd
-		  WHERE va.advisory_ref='TEST-KERNEL-RESOLUTE' AND vd.cve_id='CVE-2026-0001' ON CONFLICT DO NOTHING`,
-		`INSERT INTO advisory_fixed_packages (advisory_id, distro_release, package_name, fixed_version, comparator)
-		 SELECT va.advisory_id, 'resolute', 'linux', '7.0.0-31.31', 'dpkg'::version_comparator
-		   FROM vendor_advisories va WHERE va.advisory_ref='TEST-KERNEL-RESOLUTE'
-		 ON CONFLICT (advisory_id, distro_release, package_name) DO NOTHING`,
-	} {
-		if _, err := pool.Exec(ctx, q); err != nil {
-			t.Fatalf("seed kernel keyspace: %v", err)
-		}
-	}
+	seedAdvisory(t, pool, "TEST-KERNEL", "CVE-2026-0001", kernRelease, "linux", "7.0.0-31.31")
+	assertKeyspaceIsolated(t, pool, kernRelease)
 }
 
 // The inventory .146 carries (ADR-093): the running ABI-31 kernel, the leftover
@@ -58,7 +135,7 @@ func kernelInventory() []map[string]any {
 
 func kernelPayload(kernelRelease string) map[string]any {
 	p := map[string]any{
-		"address": "10.0.0.36", "family": "ubuntu", "release": "resolute", "release_source": "os-release",
+		"address": "10.0.0.36", "family": "ubuntu", "release": kernRelease, "release_source": "os-release",
 		"installed": kernelInventory(),
 	}
 	if kernelRelease != "" {
@@ -163,7 +240,7 @@ func TestALeftoverKernelABIIsInventoryNotAFinding(t *testing.T) {
 func TestAReadWithoutTheRunningKernelJudgesNoKernelPackage(t *testing.T) {
 	db := testDB(t)
 	seedKernelKeyspace(t)
-	seedJammyOpenSSH(t)
+	seedKernOtherReleaseOpenSSH(t)
 	s := seed(t, db, "kernnouname")
 	c := correlate.New(db, quietLogger())
 	ctx := context.Background()
@@ -173,7 +250,7 @@ func TestAReadWithoutTheRunningKernelJudgesNoKernelPackage(t *testing.T) {
 	inv = append(inv, map[string]any{"name": "openssh", "binary": "openssh-server", "version": "1:8.9p1-3"})
 	s.observe(t, db, t0, sshService("10.0.0.37", 22, "SHA256:kernnouname-hostkey"))
 	s.observePackage(t, db, t0, map[string]any{
-		"address": "10.0.0.37", "family": "ubuntu", "release": "jammy", "release_source": "os-release",
+		"address": "10.0.0.37", "family": "ubuntu", "release": kernOtherRelease, "release_source": "os-release",
 		"installed": inv, // no kernel_release
 	})
 	if err := c.SweepOnce(ctx); err != nil {
@@ -189,7 +266,7 @@ func TestAReadWithoutTheRunningKernelJudgesNoKernelPackage(t *testing.T) {
 		t.Fatal(err)
 	}
 	if ssh != 1 {
-		t.Errorf("openssh below the jammy fix on the same read: credentialed findings = %d, want 1 (ordinary packages are still judged)", ssh)
+		t.Errorf("openssh below the other release's fix on the same read: credentialed findings = %d, want 1 (ordinary packages are still judged)", ssh)
 	}
 }
 
@@ -211,14 +288,14 @@ func TestAReadWithoutTheRunningKernelWithdrawsNoKernelFinding(t *testing.T) {
 	// one true kernel finding — and carries a vulnerable openssh alongside.
 	inv := append(kernelInventory(), map[string]any{"name": "openssh", "binary": "openssh-server", "version": "1:8.9p1-3"})
 	payload := func(kernel string, installed []map[string]any) map[string]any {
-		p := map[string]any{"address": "10.0.0.38", "family": "ubuntu", "release": "resolute", "release_source": "os-release", "installed": installed}
+		p := map[string]any{"address": "10.0.0.38", "family": "ubuntu", "release": kernRelease, "release_source": "os-release", "installed": installed}
 		if kernel != "" {
 			p["kernel_release"] = kernel
 		}
 		return p
 	}
 	s.observe(t, db, t0, sshService("10.0.0.38", 22, "SHA256:kernkeep-hostkey"))
-	seedResoluteOpenSSH(t)
+	seedKernReleaseOpenSSH(t)
 	s.observePackage(t, db, t0, payload("7.0.0-30-generic", inv))
 	if err := c.SweepOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -255,35 +332,56 @@ func TestAReadWithoutTheRunningKernelWithdrawsNoKernelFinding(t *testing.T) {
 	}
 }
 
-// seedResoluteOpenSSH adds one resolute openssh fix above 8.9p1 so a resolute
-// host with the jammy-era openssh reads as vulnerable.
-func seedResoluteOpenSSH(t *testing.T) {
+// seedKernReleaseOpenSSH adds an openssh fix above 8.9p1 on kernRelease, so a
+// host there carrying the older openssh reads as vulnerable.
+func seedKernReleaseOpenSSH(t *testing.T) {
+	t.Helper()
+	pool := knowledgePool(t)
+	defer pool.Close()
+	seedAdvisory(t, pool, "TEST-SSH-KERN", "CVE-2026-0002", kernRelease, "openssh", "1:9.0p1-1")
+	assertKeyspaceIsolated(t, pool, kernRelease)
+}
+
+// seedKernOtherReleaseOpenSSH gives kernOtherRelease an openssh fix and nothing
+// else. That asymmetry IS the fixture: a release whose keyspace knows one of the
+// host's packages and has no row at all for `linux`, so a read that moves the
+// host onto it judges openssh and cannot judge the kernel either way (ADR-068).
+// It stands in for what real `jammy` was before the feed was ingested — jammy now
+// carries 17 `linux` rows, which is precisely the scenario this release restores.
+func seedKernOtherReleaseOpenSSH(t *testing.T) {
+	t.Helper()
+	pool := knowledgePool(t)
+	defer pool.Close()
+	seedAdvisory(t, pool, "TEST-SSH-KERN-OTHER", "CVE-2026-0003", kernOtherRelease, "openssh", "1:8.9p1-3ubuntu0.6")
+	assertKeyspaceIsolated(t, pool, kernOtherRelease)
+	// The absence is load-bearing, so it is asserted rather than assumed. This
+	// catches what assertKeyspaceIsolated cannot: a future TEST- fixture reusing
+	// this release for a kernel advisory, which would pass the vendor check and
+	// silently turn the release-change scenario back into one that CAN judge.
+	var linuxRows int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM advisory_fixed_packages WHERE distro_release = $1 AND package_name = 'linux'`,
+		kernOtherRelease).Scan(&linuxRows); err != nil {
+		t.Fatalf("check %s has no linux rows: %v", kernOtherRelease, err)
+	}
+	if linuxRows != 0 {
+		t.Fatalf("%s carries %d `linux` advisory row(s); the release-change test needs a keyspace that CANNOT judge the kernel", kernOtherRelease, linuxRows)
+	}
+}
+
+// knowledgePool dials as the knowledge import role, the only role allowed to
+// write the global feed tables.
+func knowledgePool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	url := os.Getenv("KNOWLEDGE_IMPORT_DATABASE_URL")
 	if url == "" {
 		t.Skip("KNOWLEDGE_IMPORT_DATABASE_URL not set")
 	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, url)
+	pool, err := pgxpool.New(context.Background(), url)
 	if err != nil {
 		t.Fatalf("connect as import role: %v", err)
 	}
-	defer pool.Close()
-	for _, q := range []string{
-		`INSERT INTO vendor_advisories (advisory_ref, vendor) VALUES ('TEST-SSH-RESOLUTE','ubuntu') ON CONFLICT (advisory_ref) DO NOTHING`,
-		`INSERT INTO vulnerability_defs (cve_id, title) VALUES ('CVE-2026-0002','CVE-2026-0002') ON CONFLICT (cve_id) DO NOTHING`,
-		`INSERT INTO advisory_vuln_map (advisory_id, vuln_def_id)
-		 SELECT va.advisory_id, vd.vuln_def_id FROM vendor_advisories va, vulnerability_defs vd
-		  WHERE va.advisory_ref='TEST-SSH-RESOLUTE' AND vd.cve_id='CVE-2026-0002' ON CONFLICT DO NOTHING`,
-		`INSERT INTO advisory_fixed_packages (advisory_id, distro_release, package_name, fixed_version, comparator)
-		 SELECT va.advisory_id, 'resolute', 'openssh', '1:9.0p1-1', 'dpkg'::version_comparator
-		   FROM vendor_advisories va WHERE va.advisory_ref='TEST-SSH-RESOLUTE'
-		 ON CONFLICT (advisory_id, distro_release, package_name) DO NOTHING`,
-	} {
-		if _, err := pool.Exec(ctx, q); err != nil {
-			t.Fatalf("seed resolute openssh: %v", err)
-		}
-	}
+	return pool
 }
 
 // The withdrawal is keyed to the PROPERTY — did this read judge the package
@@ -304,7 +402,7 @@ func TestAUnameNamingNoInstalledKernelWithdrawsNothing(t *testing.T) {
 	ctx := context.Background()
 	t0 := time.Now().UTC().Add(-2 * time.Hour)
 	payload := func(kernel string) map[string]any {
-		return map[string]any{"address": "10.0.0.39", "family": "ubuntu", "release": "resolute", "release_source": "os-release",
+		return map[string]any{"address": "10.0.0.39", "family": "ubuntu", "release": kernRelease, "release_source": "os-release",
 			"kernel_release": kernel, "installed": kernelInventory()}
 	}
 	s.observe(t, db, t0, sshService("10.0.0.39", 22, "SHA256:kernnone-hostkey"))
@@ -331,13 +429,15 @@ func TestAUnameNamingNoInstalledKernelWithdrawsNothing(t *testing.T) {
 // A release key whose keyspace has no rows for the package — an upgrade whose
 // advisories are not imported yet, or a host that renamed its release — has no
 // data, and no data is never a clean verdict (ADR-068). The kernel finding
-// survives a resolute→jammy read (jammy has no `linux` row here); openssh, which
-// jammy DOES know and which is still below jammy's fix, stays matched.
+// survives a move from kernRelease to kernOtherRelease, whose keyspace has no
+// `linux` row at all; openssh, which that release DOES know and which is still
+// below its fix, stays matched. Both releases are synthetic precisely so the
+// "has no rows for the package" half stays true — see the note at the top.
 func TestAReleaseChangeWithdrawsNothingTheNewKeyspaceCannotJudge(t *testing.T) {
 	db := testDB(t)
 	seedKernelKeyspace(t)
-	seedResoluteOpenSSH(t)
-	seedJammyOpenSSH(t)
+	seedKernReleaseOpenSSH(t)
+	seedKernOtherReleaseOpenSSH(t)
 	s := seed(t, db, "kernrel")
 	c := correlate.New(db, quietLogger())
 	ctx := context.Background()
@@ -348,15 +448,15 @@ func TestAReleaseChangeWithdrawsNothingTheNewKeyspaceCannotJudge(t *testing.T) {
 			"kernel_release": "7.0.0-30-generic", "installed": inv}
 	}
 	s.observe(t, db, t0, sshService("10.0.0.40", 22, "SHA256:kernrel-hostkey"))
-	s.observePackage(t, db, t0, payload("resolute"))
+	s.observePackage(t, db, t0, payload(kernRelease))
 	if err := c.SweepOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if got := credentialedKernelFindings(t, db, s); got["open"] != 1 {
-		t.Fatalf("resolute read: credentialed linux findings = %v, want 1 open", got)
+		t.Fatalf("first read on kernRelease: credentialed linux findings = %v, want 1 open", got)
 	}
 	s.nextScan(t, db)
-	s.observePackage(t, db, t0.Add(time.Hour), payload("jammy"))
+	s.observePackage(t, db, t0.Add(time.Hour), payload(kernOtherRelease))
 	if err := c.SweepOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +470,7 @@ func TestAReleaseChangeWithdrawsNothingTheNewKeyspaceCannotJudge(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sshOpen == 0 {
-		t.Errorf("openssh below jammy's fix: no open credentialed finding; the new keyspace knows the package and still matches it")
+		t.Errorf("openssh below the new release's fix: no open credentialed finding; the new keyspace knows the package and still matches it")
 	}
 }
 
@@ -385,7 +485,7 @@ func TestTheNewestPackageObservationDecides(t *testing.T) {
 	ctx := context.Background()
 	t0 := time.Now().UTC().Add(-2 * time.Hour)
 	payload := func(kernel string) map[string]any {
-		return map[string]any{"address": "10.0.0.41", "family": "ubuntu", "release": "resolute", "release_source": "os-release",
+		return map[string]any{"address": "10.0.0.41", "family": "ubuntu", "release": kernRelease, "release_source": "os-release",
 			"kernel_release": kernel, "installed": kernelInventory()}
 	}
 	s.observe(t, db, t0, sshService("10.0.0.41", 22, "SHA256:kernnewest-hostkey"))
@@ -410,7 +510,7 @@ func TestACredentialedReopenIsRecorded(t *testing.T) {
 	ctx := context.Background()
 	t0 := time.Now().UTC().Add(-3 * time.Hour)
 	payload := func(kernel string) map[string]any {
-		return map[string]any{"address": "10.0.0.42", "family": "ubuntu", "release": "resolute", "release_source": "os-release",
+		return map[string]any{"address": "10.0.0.42", "family": "ubuntu", "release": kernRelease, "release_source": "os-release",
 			"kernel_release": kernel, "installed": kernelInventory()}
 	}
 	s.observe(t, db, t0, sshService("10.0.0.42", 22, "SHA256:kernreopen-hostkey"))

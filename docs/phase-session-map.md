@@ -505,7 +505,7 @@ before P3.4 trusts the finding set.
       so it would have said `f` whatever the truth was. "Answered from the feed"
       was answered from a column beside the feed. Membership lives in the `kev`
       table (ADR-069); migration 0049 drops the column so the mistake is no longer
-      available to make.
+      available to make, and ADR-106 records it.
   - **★ Acceptance, on pipeline findings not a fixture**
     (`TestFindingSetOrdersByPriorityOnMetasploitable`): the sweep produces advisory
     findings for both CVEs (via ADR-070), and `Findings.List`'s own priority order ranks
