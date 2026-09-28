@@ -21,8 +21,14 @@ import (
 // path to exist.
 //
 // The pair is checked, not asserted. CVE-2012-2122 (Metasploitable's MySQL) is
-// NOT in KEV (verified against the ingested feed: in_kev=f), so it does not show
-// the inversion. The pair that does, both real on Metasploitable:
+// NOT in KEV, so it does not show the inversion. That was once justified here as
+// "verified against the ingested feed: in_kev=f", which verified nothing:
+// vulnerability_defs.in_kev was false for every CVE ever ingested, including the
+// KEV-listed one two lines below, because no feed ever wrote it. The column is
+// gone (0049) and the check is `SELECT 1 FROM kev WHERE cve_id = ...`, which
+// returns no row for 2012-2122 and one for 2012-1823. Right answer, wrong
+// instrument — and the instrument would have said the same thing whatever the
+// truth was. The pair that does show it, both real on Metasploitable:
 //
 //	CVE-2012-1823  PHP-CGI arg injection   IN KEV,  EPSS 0.99998, CVSS 7.5
 //	CVE-2007-2447  Samba usermap RCE       not KEV, EPSS 0.71,    CVSS 10.0

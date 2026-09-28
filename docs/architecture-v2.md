@@ -356,6 +356,8 @@ erDiagram
     VULNERABILITY_DEF ||--o{ RULE_VULN_MAP : "detected by"
     VULNERABILITY_DEF |o--o{ FINDING : "optionally cites"
     VULNERABILITY_DEF }o--o{ VENDOR_ADVISORY : "addressed by"
+    VULNERABILITY_DEF |o..o| KEV : "listed in (cve_id, no FK)"
+    VULNERABILITY_DEF |o..o| EPSS : "scored by (cve_id, no FK)"
     VENDOR_ADVISORY ||--o{ ADVISORY_FIXED_PACKAGE : "fixes in"
 
     FINDING ||--o{ FINDING_EXPOSURE : "visible via"
@@ -618,11 +620,25 @@ erDiagram
         text title
         text description
         numeric cvss_base
-        text cvss_vector
-        bool in_kev "CISA known exploited"
-        numeric epss_score
+        text cvss_vector "unpopulated; USN publishes no vectors"
         jsonb cpe_ranges
         timestamp published_at
+    }
+
+    KEV {
+        text cve_id PK "joined on cve_id, NOT a FK"
+        date date_added "when CISA listed it"
+        bool known_ransomware
+        text source
+        timestamp last_fetched_at
+    }
+
+    EPSS {
+        text cve_id PK "joined on cve_id, NOT a FK"
+        numeric score "absent = unscored, never 0"
+        numeric percentile
+        date scored_at
+        timestamp last_fetched_at
     }
 
     RULE_VULN_MAP {

@@ -35,8 +35,11 @@ SELECT rule_pack_id, 'fixture-rule', 'network', 'discovery', 'core',
   FROM rule_packs WHERE name = 'fixture-pack'
 ON CONFLICT (rule_pack_id, name, version) DO NOTHING;
 
-INSERT INTO vulnerability_defs (cve_id, title, cvss_base, in_kev)
-VALUES ('CVE-1999-0000', 'fixture vulnerability', 5.0, false)
+-- No in_kev/epss_score column to fill: 0049 dropped both, because the kev and
+-- epss tables answer membership and score (ADR-069). A fixture that wants this
+-- CVE to read as KEV-listed inserts into `kev`, not into a flag here.
+INSERT INTO vulnerability_defs (cve_id, title, cvss_base)
+VALUES ('CVE-1999-0000', 'fixture vulnerability', 5.0)
 ON CONFLICT (cve_id) DO NOTHING;
 
 INSERT INTO rule_vuln_map (rule_id, vuln_def_id, match_confidence)

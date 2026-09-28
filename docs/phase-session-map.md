@@ -499,6 +499,13 @@ before P3.4 trusts the finding set.
     does, both real on Metasploitable and both KEV/EPSS-verified: **CVE-2012-1823**
     (PHP-CGI, in KEV, EPSS 0.99998, CVSS **7.5**) and **CVE-2007-2447** (Samba usermap,
     not KEV, EPSS 0.71, CVSS **10.0**).
+    - *S44 correction:* the conclusion held, the instrument did not. `in_kev=f` was
+      read off `vulnerability_defs.in_kev`, a column no feed has ever written — it
+      was false for every CVE including the KEV-listed CVE-2012-1823 two lines up,
+      so it would have said `f` whatever the truth was. "Answered from the feed"
+      was answered from a column beside the feed. Membership lives in the `kev`
+      table (ADR-069); migration 0049 drops the column so the mistake is no longer
+      available to make.
   - **★ Acceptance, on pipeline findings not a fixture**
     (`TestFindingSetOrdersByPriorityOnMetasploitable`): the sweep produces advisory
     findings for both CVEs (via ADR-070), and `Findings.List`'s own priority order ranks
