@@ -271,7 +271,7 @@ Exposure is therefore computed: which vantage points can currently see this asse
 Four entities where v1 had two.
 
 - **Rule** — detection logic, versioned, belongs to a signed rule pack. Always present on a finding. Carries `execution_site` (scan point or core).
-- **VulnerabilityDef** — a CVE record with CVSS, KEV flag, EPSS score, CPE ranges. Optional on a finding. Many-to-many with rules in both directions.
+- **VulnerabilityDef** — a CVE record with CVSS and CPE ranges. Optional on a finding. Many-to-many with rules in both directions. KEV membership and the EPSS score are NOT fields here: they live in the `kev` and `epss` tables and are joined on `cve_id` (ADR-069). The flag and score columns that used to sit here were dropped in 0049 — nothing ever wrote them, so they read as "not listed, unscored" for every CVE (ADR-106).
 - **VendorAdvisory** — USN, RHSA, DSA, MSRC and friends, with child `ADVISORY_FIXED_PACKAGE` rows giving the fixed version per distro release. This is the matching authority for anything installed by a package manager.
 - **Finding** — the observed instance: asset, rule, instance locator, evidence, exposure set.
 
