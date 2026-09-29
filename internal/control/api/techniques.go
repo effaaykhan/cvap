@@ -86,3 +86,76 @@ func coverageStatement(cov store.TechniqueCoverage, catalogueLoaded bool) string
 		return "Every finding here carries at least one ATT&CK technique."
 	}
 }
+
+// AttackCoverageResponse is the ATT&CK half of the knowledge surface.
+//
+// ADR-105 decision 4 has two halves. The per-finding half is TechniqueCoverage
+// above. This is the other one: "the surface reports what fraction is mapped".
+// Without it the mapping layer has no place to answer the question an operator
+// actually asks on seeing an unmapped finding — is this estate genuinely
+// untouched by ATT&CK, or did nobody run the importer? Those look identical from
+// a finding and are completely different facts.
+//
+// The numbers are deliberately split into what the DATASET holds and what THIS
+// installation can use. A surface reporting only "1,183 mappings ingested" would
+// read as coverage; the number that matters is how many of the CVEs this
+// installation actually has are among them, and on a USN-only advisory set that
+// is currently zero.
+type AttackCoverageResponse struct {
+	CatalogueVersion string `json:"catalogue_version,omitempty" doc:"The pinned ATT&CK corpus version, e.g. 16.1. Absent when no catalogue has been ingested."`
+	Techniques       int    `json:"techniques" doc:"Techniques in the catalogue."`
+	Deprecated       int    `json:"deprecated" doc:"Of those, retired from the pinned corpus. Retained, never deleted, so an older finding keeps its reason."`
+
+	CVEMappings int `json:"cve_mappings" doc:"Rows in the published CVE->technique dataset."`
+	MappedCVEs  int `json:"mapped_cves" doc:"Distinct CVEs that dataset covers, regardless of whether this installation holds them."`
+
+	LocalCVEs       int `json:"local_cves" doc:"CVE definitions this installation has ingested."`
+	LocalMappedCVEs int `json:"local_mapped_cves" doc:"Of those, how many carry an ATT&CK mapping. THIS is the number that decides whether advisory findings can show a technique."`
+
+	CuratedRules int `json:"curated_rules" doc:"Detection rules carrying a curated technique."`
+	TotalRules   int `json:"total_rules" doc:"Detection rules in total. The difference is rules whose findings read \"unmapped\"."`
+
+	// Statement exists because every number above can be read as a verdict by
+	// someone who does not know how this feed is built. It says which of the
+	// three states the installation is in, in words.
+	Statement string `json:"statement"`
+}
+
+// attackCoverageStatement names the state rather than leaving it to arithmetic.
+//
+// The middle case is the one worth the code: a published dataset that covers
+// CISA KEV cannot intersect a USN-only advisory set, because one describes
+// commercial and appliance software and the other describes Ubuntu archive
+// packages. An operator reading "0 mapped" with no explanation concludes the
+// feature is broken. It is not — it is ADR-105's predicted coverage problem,
+// and saying so is the difference between a measured result and an apparent
+// failure.
+func attackCoverageStatement(st store.CatalogueStatus) string {
+	switch {
+	case st.Techniques == 0:
+		return "No ATT&CK catalogue has been ingested, so no finding anywhere can carry a technique. Run `make knowledge-attack`. Until then an unmapped finding says nothing about whether a technique applies."
+	case st.CVEMappings == 0:
+		return "The technique catalogue is loaded but no CVE mappings are. Advisory findings will read unmapped; rule findings still carry their curated techniques. Run `make knowledge-attack-mappings`."
+	case st.LocalMappedCVEs == 0 && st.CuratedRules > 0:
+		return "No ingested CVE carries a mapping: the published dataset covers CISA KEV, which is commercial and appliance software, and this installation's CVEs come from Ubuntu advisories. The two sets describe different software, so the overlap is genuinely empty rather than missing. Rule-based findings still carry curated techniques."
+	case st.LocalMappedCVEs == 0:
+		return "No ingested CVE carries a mapping, and no rule carries a curated technique, so nothing will show a technique today. This is a coverage fact, not a verdict that no technique applies."
+	default:
+		return "Techniques are available from both anchors: curated rule mappings and the published CVE dataset."
+	}
+}
+
+func attackCoverageResponse(st store.CatalogueStatus) AttackCoverageResponse {
+	return AttackCoverageResponse{
+		CatalogueVersion: st.AttackVersion,
+		Techniques:       st.Techniques,
+		Deprecated:       st.Deprecated,
+		CVEMappings:      st.CVEMappings,
+		MappedCVEs:       st.MappedCVEs,
+		LocalCVEs:        st.LocalCVEs,
+		LocalMappedCVEs:  st.LocalMappedCVEs,
+		CuratedRules:     st.CuratedRules,
+		TotalRules:       st.TotalRules,
+		Statement:        attackCoverageStatement(st),
+	}
+}

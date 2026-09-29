@@ -293,6 +293,68 @@ func TestKnowledgeFreshnessReportsComputedState(t *testing.T) {
 	}
 }
 
+// TestKnowledgeFreshnessCarriesAttackCoverage — the second half of ADR-105
+// decision 4 reaches the surface: "the surface reports what fraction is mapped".
+//
+// Written to hold in BOTH environments rather than in the one it was authored
+// on, because the alternative is the trap this suite has already sprung once:
+// CI runs against a fresh database with no ATT&CK catalogue, a developer box has
+// the real 16.1 corpus, and an assertion on a technique count would pass in one
+// and fail in the other. So this asserts the INVARIANTS — the section is always
+// present, always carries an actionable statement, and its numbers never claim
+// more coverage than the installation has — and it checks the specific statement
+// only in the state it can prove it is in.
+func TestKnowledgeFreshnessCarriesAttackCoverage(t *testing.T) {
+	f := newFixture(t, `{"finding.read": true}`)
+	cookies, csrf := f.login(t)
+
+	w := f.do(t, http.MethodGet, "/v1/knowledge/freshness", nil, cookies, csrf)
+	if w.Code != http.StatusOK {
+		t.Fatalf("freshness: %d %s", w.Code, w.Body.String())
+	}
+	var resp api.KnowledgeFreshnessResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	a := resp.Attack
+
+	// The statement is the point of the section. A number with no statement is
+	// what lets "0 mapped" read as "nothing applies here".
+	if strings.TrimSpace(a.Statement) == "" {
+		t.Error("attack coverage carries no statement; the numbers alone let an absence read as a clean result (ADR-105 decision 4)")
+	}
+	// Never claim more coverage than exists. These two would be easy to wire to
+	// the dataset's totals, which are larger and say nothing about this estate.
+	if a.LocalMappedCVEs > a.LocalCVEs {
+		t.Errorf("local_mapped_cves (%d) exceeds local_cves (%d): the surface is reporting the DATASET's coverage as this installation's", a.LocalMappedCVEs, a.LocalCVEs)
+	}
+	if a.CuratedRules > a.TotalRules {
+		t.Errorf("curated_rules (%d) exceeds total_rules (%d)", a.CuratedRules, a.TotalRules)
+	}
+	if a.Deprecated > a.Techniques {
+		t.Errorf("deprecated (%d) exceeds techniques (%d)", a.Deprecated, a.Techniques)
+	}
+
+	if a.Techniques == 0 {
+		// The state CI is in. It must say so and say what to do, because an empty
+		// catalogue and a genuinely unmapped estate look identical from a finding.
+		if !strings.Contains(a.Statement, "knowledge-attack") {
+			t.Errorf("no catalogue ingested, but the statement does not say how to fix it: %q", a.Statement)
+		}
+		if a.CatalogueVersion != "" {
+			t.Errorf("catalogue_version = %q with no techniques loaded", a.CatalogueVersion)
+		}
+	} else if a.CatalogueVersion == "" {
+		// The state a developer box with `make knowledge-attack` is in.
+		t.Error("a loaded catalogue reports no version; a corpus that cannot name its version cannot be pinned or diffed (ADR-105)")
+	}
+	// The curated anchor is migration-seeded (0051), so it is present in every
+	// environment including CI, catalogue or no catalogue.
+	if a.TotalRules == 0 {
+		t.Error("total_rules = 0; the rule anchor is migration-seeded and should be visible with or without a catalogue")
+	}
+}
+
 // TestAssetDetailCarriesReleaseProvenance — the dashboard surface for P3.3
 // (ADR-064): a resolved release reaches the asset page WITH its evidence (which
 // services voted and which abstained), so an operator can check the claim. Seeds

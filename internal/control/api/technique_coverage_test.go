@@ -22,7 +22,7 @@ import (
 // rather than reasoning about it.
 //
 // mutate:subject internal/control/api/techniques.go
-// mutate:test    ./internal/control/api/ -run TestCoverageStatementSeparates|TestEveryCoverageStateIsStated|TestEveryTechniqueIsLabelled|TestADeprecatedTechniqueIsStill
+// mutate:test    ./internal/control/api/ -run TestCoverageStatementSeparates|TestEveryCoverageStateIsStated|TestEveryTechniqueIsLabelled|TestADeprecatedTechniqueIsStill|TestAttackCoverageStatementSeparates|TestAttackCoverageReportsLocal
 //
 // mutate:case    an empty catalogue is reported the same way as an unmapped finding set
 // mutate:old     case !catalogueLoaded:
@@ -35,6 +35,14 @@ import (
 // mutate:case    deprecated techniques are filtered out, so an old finding loses its reason
 // mutate:old     for _, t := range ts {
 // mutate:new     for _, t := range ts { if t.Deprecated { continue }
+//
+// mutate:case    an empty catalogue and an empty mapping set are reported the same way
+// mutate:old     case st.CVEMappings == 0:
+// mutate:new     case false:
+//
+// mutate:case    the surface reports the dataset's coverage as this installation's
+// mutate:old     LocalMappedCVEs:  st.LocalMappedCVEs,
+// mutate:new     LocalMappedCVEs:  st.MappedCVEs,
 
 // ADR-105 decision 4: coverage is STATED, never implied by absence, because
 // silence says "no technique applies" — a stronger and different claim from "we
@@ -136,5 +144,75 @@ func TestADeprecatedTechniqueIsStillReturned(t *testing.T) {
 	}
 	if !out[0].Deprecated || out[0].RevokedBy != "T5678" {
 		t.Errorf("deprecation not carried through: %+v", out[0])
+	}
+}
+
+// The knowledge surface's ATT&CK half (ADR-105 decision 4, second sentence:
+// "the surface reports what fraction is mapped").
+//
+// The states it must separate are not degrees of the same thing. "Nobody ran the
+// importer", "the catalogue is in but the mappings are not", and "both are in
+// and this estate genuinely does not intersect the dataset" are three different
+// facts with three different actions, and all three show zero techniques on a
+// finding. A surface that collapses any two of them tells an operator to go and
+// fix something that is not broken, or not to fix something that is.
+func TestAttackCoverageStatementSeparatesEveryState(t *testing.T) {
+	cases := []struct {
+		name string
+		st   store.CatalogueStatus
+		must string // a word the statement must contain to be actionable
+	}{
+		{"nothing ingested", store.CatalogueStatus{}, "knowledge-attack"},
+		{"catalogue only", store.CatalogueStatus{Techniques: 799, LocalCVEs: 6028}, "knowledge-attack-mappings"},
+		{"no overlap, rules curated", store.CatalogueStatus{
+			Techniques: 799, CVEMappings: 1183, MappedCVEs: 419,
+			LocalCVEs: 6028, LocalMappedCVEs: 0, CuratedRules: 11, TotalRules: 14}, "Ubuntu"},
+		{"no overlap, nothing curated", store.CatalogueStatus{
+			Techniques: 799, CVEMappings: 1183, LocalCVEs: 6028, TotalRules: 14}, "coverage fact"},
+		{"both anchors live", store.CatalogueStatus{
+			Techniques: 799, CVEMappings: 1183, LocalCVEs: 6028, LocalMappedCVEs: 12,
+			CuratedRules: 11, TotalRules: 14}, "anchors"},
+	}
+	seen := map[string]string{}
+	for _, c := range cases {
+		got := attackCoverageStatement(c.st)
+		if strings.TrimSpace(got) == "" {
+			t.Errorf("%s produced an empty statement; silence is the claim decision 4 forbids", c.name)
+			continue
+		}
+		if prev, dup := seen[got]; dup {
+			t.Errorf("%s and %s produce the SAME statement %q — they need different actions from the operator", c.name, prev, got)
+		}
+		seen[got] = c.name
+		if !strings.Contains(got, c.must) {
+			t.Errorf("%s statement does not mention %q, so it does not say what to do: %q", c.name, c.must, got)
+		}
+	}
+}
+
+// The response must report what THIS installation can use, not just what the
+// dataset holds. "1,183 mappings ingested" beside "0 of your CVEs are mapped"
+// are both true and only the second one answers the question; a surface carrying
+// only the first reads as coverage it does not have.
+func TestAttackCoverageReportsLocalNotJustDataset(t *testing.T) {
+	r := attackCoverageResponse(store.CatalogueStatus{
+		Techniques: 799, Deprecated: 143, CVEMappings: 1183, MappedCVEs: 419,
+		LocalCVEs: 6028, LocalMappedCVEs: 0, CuratedRules: 11, TotalRules: 14,
+		AttackVersion: "16.1",
+	})
+	if r.MappedCVEs == r.LocalMappedCVEs {
+		t.Fatal("the dataset's coverage and this installation's coverage are reported as the same number; they are the two halves that must not be confused")
+	}
+	if r.LocalMappedCVEs != 0 || r.LocalCVEs != 6028 {
+		t.Errorf("local coverage = %d of %d, want 0 of 6028", r.LocalMappedCVEs, r.LocalCVEs)
+	}
+	if r.CatalogueVersion != "16.1" {
+		t.Errorf("catalogue version = %q, want 16.1: a corpus with no version cannot be pinned or diffed", r.CatalogueVersion)
+	}
+	if r.Deprecated == 0 {
+		t.Error("deprecated count not reported; retired techniques are retained and an operator should see how many")
+	}
+	if strings.TrimSpace(r.Statement) == "" {
+		t.Error("no statement on the coverage response")
 	}
 }

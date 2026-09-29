@@ -5,6 +5,10 @@ import type { FindingSummary, Health, KnowledgeFeed, ScanPoint } from "./api";
 const f = (over: Partial<FindingSummary>): FindingSummary => ({
   id: "f", asset_id: "a", category: "vulnerability", confidence: 0.9, exposure_zones: 1,
   first_seen: "2026-09-01T00:00:00Z", last_seen: "2026-09-01T00:00:00Z", kev: false,
+  // Required, not optional, and empty is the meaningful value: it says CVAP holds
+  // no ATT&CK mapping for this finding, never that no technique applies
+  // (ADR-105 decision 4). A field that vanished when empty could not carry that.
+  attack_techniques: [],
   priority_basis: "CVSS 7.5", rule: "CVE-0000-0001", severity: "high", status: "open", ...over,
 });
 

@@ -1021,6 +1021,27 @@ export interface components {
             /** @description The highest severity among its open findings; absent when none. */
             worst_severity?: string;
         };
+        AttackCoverageResponse: {
+            /** @description The pinned ATT&CK corpus version, e.g. 16.1. Absent when no catalogue has been ingested. */
+            catalogue_version?: string;
+            /** @description Detection rules carrying a curated technique. */
+            curated_rules: number;
+            /** @description Rows in the published CVE->technique dataset. */
+            cve_mappings: number;
+            /** @description Of those, retired from the pinned corpus. Retained, never deleted, so an older finding keeps its reason. */
+            deprecated: number;
+            /** @description CVE definitions this installation has ingested. */
+            local_cves: number;
+            /** @description Of those, how many carry an ATT&CK mapping. THIS is the number that decides whether advisory findings can show a technique. */
+            local_mapped_cves: number;
+            /** @description Distinct CVEs that dataset covers, regardless of whether this installation holds them. */
+            mapped_cves: number;
+            statement: string;
+            /** @description Techniques in the catalogue. */
+            techniques: number;
+            /** @description Detection rules in total. The difference is rules whose findings read "unmapped". */
+            total_rules: number;
+        };
         BlockedScanResponse: {
             engine: string;
             id: string;
@@ -1434,6 +1455,7 @@ export interface components {
             state: string;
         };
         KnowledgeFreshnessResponse: {
+            attack: components["schemas"]["AttackCoverageResponse"];
             coverage: components["schemas"]["ReleaseCoverageResponse"][];
             feeds: components["schemas"]["KnowledgeFeedResponse"][];
         };

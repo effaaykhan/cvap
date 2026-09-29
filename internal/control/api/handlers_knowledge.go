@@ -46,23 +46,34 @@ type ReleaseCoverageResponse struct {
 	NewestAdvisoryAt *string `json:"newest_advisory_at,omitempty" doc:"The newest advisory the keyspace holds for this release — the honest coverage-end where the feed date is degenerate."`
 }
 
-// KnowledgeFreshnessResponse is the freshness of every ingested feed, and the
-// per-release coverage windows.
+// KnowledgeFreshnessResponse is the freshness of every ingested feed, the
+// per-release coverage windows, and the ATT&CK mapping coverage.
+//
+// Three ways matching can silently under-report, on one surface: a stale feed,
+// a release past its coverage window, and an ATT&CK layer with nothing in it.
+// The third is here rather than on a screen of its own because it fails the same
+// way as the other two — quietly, as an absence that reads like a clean result
+// (ADR-105 decision 4).
 type KnowledgeFreshnessResponse struct {
 	Feeds    []KnowledgeFeedResponse   `json:"feeds"`
 	Coverage []ReleaseCoverageResponse `json:"coverage"`
+	Attack   AttackCoverageResponse    `json:"attack"`
 }
 
 func (s *Server) knowledgeFreshness(w http.ResponseWriter, r *http.Request) {
 	tenant, _ := tenantFrom(r.Context())
 	var feeds []store.FeedFreshness
 	var coverage []store.ReleaseCoverage
+	var attack store.CatalogueStatus
 	err := s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
 		if feeds, err = (store.Advisories{}).FeedFreshnessAll(ctx, c); err != nil {
 			return err
 		}
-		coverage, err = (store.Advisories{}).CoverageAll(ctx, c)
+		if coverage, err = (store.Advisories{}).CoverageAll(ctx, c); err != nil {
+			return err
+		}
+		attack, err = (store.Techniques{}).CatalogueStatus(ctx, c)
 		return err
 	})
 	if err != nil {
@@ -72,6 +83,7 @@ func (s *Server) knowledgeFreshness(w http.ResponseWriter, r *http.Request) {
 	out := KnowledgeFreshnessResponse{
 		Feeds:    make([]KnowledgeFeedResponse, 0, len(feeds)),
 		Coverage: make([]ReleaseCoverageResponse, 0, len(coverage)),
+		Attack:   attackCoverageResponse(attack),
 	}
 	for _, f := range feeds {
 		out.Feeds = append(out.Feeds, KnowledgeFeedResponse{
