@@ -22,7 +22,7 @@ import (
 // rather than reasoning about it.
 //
 // mutate:subject internal/control/api/techniques.go
-// mutate:test    ./internal/control/api/ -run TestCoverageStatementSeparates|TestEveryCoverageStateIsStated|TestEveryTechniqueIsLabelled|TestADeprecatedTechniqueIsStill|TestAttackCoverageStatementSeparates|TestAttackCoverageReportsLocal
+// mutate:test    ./internal/control/api/ -run TestCoverageStatementSeparates|TestEveryCoverageStateIsStated|TestEveryTechniqueIsLabelled|TestADeprecatedTechniqueIsStill|TestAttackCoverageStatementSeparates|TestAttackCoverageReportsLocal|TestAnUnmappedFindingExportsAWord|TestARetiredTechniqueExportsAndIsMarked|TestTheExportKeepsBothAnchors
 //
 // mutate:case    an empty catalogue is reported the same way as an unmapped finding set
 // mutate:old     case !catalogueLoaded:
@@ -33,8 +33,13 @@ import (
 // mutate:new     Inference: "",
 //
 // mutate:case    deprecated techniques are filtered out, so an old finding loses its reason
-// mutate:old     for _, t := range ts {
-// mutate:new     for _, t := range ts { if t.Deprecated { continue }
+// Anchored on the append rather than on `for _, t := range ts {`, which csvTechniques
+// below now also contains: mutate.py refuses an anchor matching twice ("ANCHOR LOST —
+// the mutation tests nothing") rather than guessing which one was meant, and it was
+// right to. An ambiguous anchor is a mutation that silently stops testing the thing
+// it names.
+// mutate:old     out = append(out, TechniqueResponse{
+// mutate:new     if t.Deprecated { continue }; out = append(out, TechniqueResponse{
 //
 // mutate:case    an empty catalogue and an empty mapping set are reported the same way
 // mutate:old     case st.CVEMappings == 0:
@@ -43,6 +48,14 @@ import (
 // mutate:case    the surface reports the dataset's coverage as this installation's
 // mutate:old     LocalMappedCVEs:  st.LocalMappedCVEs,
 // mutate:new     LocalMappedCVEs:  st.MappedCVEs,
+//
+// mutate:case    an unmapped finding exports a blank cell instead of the word
+// mutate:old     return UnmappedCSV, "", ""
+// mutate:new     return "", "", ""
+//
+// mutate:case    a retired technique exports unmarked, so it reads as current
+// mutate:old     id += " (retired)"
+// mutate:new     id += ""
 
 // ADR-105 decision 4: coverage is STATED, never implied by absence, because
 // silence says "no technique applies" — a stronger and different claim from "we
@@ -214,5 +227,66 @@ func TestAttackCoverageReportsLocalNotJustDataset(t *testing.T) {
 	}
 	if strings.TrimSpace(r.Statement) == "" {
 		t.Error("no statement on the coverage response")
+	}
+}
+
+// The CSV export (ADR-105 decision 3 and 4, surviving a format change).
+//
+// A spreadsheet is the artifact most likely to be read detached from the API
+// that qualified it — forwarded, pivoted, pasted into a report. Everything the
+// JSON carries in a sibling field has to survive as a cell or a column name, or
+// it does not survive at all.
+func TestAnUnmappedFindingExportsAWordNotABlank(t *testing.T) {
+	ids, names, sources := csvTechniques(nil)
+	if ids != UnmappedCSV {
+		t.Errorf("ids cell = %q, want %q: a blank cell under an ATT&CK column reads as \"no technique applies\", which is the claim ADR-105 decision 4 forbids", ids, UnmappedCSV)
+	}
+	if ids == "" {
+		t.Error("the ids cell is empty; in a spreadsheet that is indistinguishable from a verdict")
+	}
+	if names != "" || sources != "" {
+		t.Errorf("names/sources = %q/%q, want empty: only the ids cell carries the unmapped marker", names, sources)
+	}
+}
+
+// A retired technique still exports, and says it is retired. Dropping it would
+// strip an older finding's only reason; exporting it unmarked would have an
+// analyst act on a technique the current corpus has withdrawn without knowing.
+func TestARetiredTechniqueExportsAndIsMarked(t *testing.T) {
+	ids, names, _ := csvTechniques([]store.Technique{
+		{ID: "T1234", Name: "Retired One", Source: "s", Deprecated: true},
+		{ID: "T1040", Name: "Network Sniffing", Source: "s"},
+	})
+	if !strings.Contains(ids, "T1234") {
+		t.Errorf("retired technique dropped from the export: %q", ids)
+	}
+	if !strings.Contains(ids, "retired") {
+		t.Errorf("retired technique exported unmarked (%q); nothing else in a CSV says the corpus withdrew it", ids)
+	}
+	if strings.Count(names, ";") != 1 {
+		t.Errorf("names = %q, want both techniques", names)
+	}
+}
+
+// Both anchors reach the CSV distinguishably. A curated judgement and a third
+// party's CVE mapping are not interchangeable evidence (decision 2), and the
+// export is where that distinction is most easily lost to save a column.
+func TestTheExportKeepsBothAnchorsDistinguishable(t *testing.T) {
+	_, _, sources := csvTechniques([]store.Technique{
+		{ID: "T1040", Name: "a", Anchor: store.AnchorRule, Source: "cvap-curated"},
+		{ID: "T1190", Name: "b", Anchor: store.AnchorCVE, Source: "ctid-mappings-explorer"},
+	})
+	for _, want := range []string{"cvap-curated", "ctid-mappings-explorer"} {
+		if !strings.Contains(sources, want) {
+			t.Errorf("sources = %q, missing %q: an analyst cannot weigh a technique without knowing who claimed it", sources, want)
+		}
+	}
+	// One source, named once — not repeated per technique.
+	_, _, single := csvTechniques([]store.Technique{
+		{ID: "T1040", Name: "a", Source: "cvap-curated"},
+		{ID: "T1557", Name: "b", Source: "cvap-curated"},
+	})
+	if strings.Contains(single, ";") {
+		t.Errorf("sources = %q, want the single source named once", single)
 	}
 }

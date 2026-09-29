@@ -535,7 +535,15 @@ func (s *Server) routes() {
 			"Bounded: an export matching more than the cap is REFUSED with 422 rather than " +
 			"truncated, so an incomplete file never masquerades as complete — narrow it with a " +
 			"filter. Gated by finding.export_all, a heavier authority than finding.read: pulling " +
-			"the whole set into a file is exfiltration shaped like a feature (ADR-052).",
+			"the whole set into a file is exfiltration shaped like a feature (ADR-052). " +
+			"Carries three ATT&CK columns (ADR-105): attack_techniques_inferred, " +
+			"attack_technique_names and attack_technique_sources. The first is named " +
+			"`_inferred` because a spreadsheet has nowhere to put the qualification the " +
+			"JSON carries in its `inference` field, and the file will be read detached from " +
+			"this description — CVAP has NOT observed these techniques being used and cannot " +
+			"(non-negotiable #9). A finding with no mapping exports the word `unmapped`, never " +
+			"a blank cell: a blank under an ATT&CK column reads as \"no technique applies\", " +
+			"which is a stronger claim than \"we hold no mapping\".",
 		Access: AccessPermission, Permission: PermFindingExportAll,
 		ResponseContentType: "text/csv",
 		Handler:             s.exportFindingsCSV,

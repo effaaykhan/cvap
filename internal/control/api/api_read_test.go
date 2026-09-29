@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -673,6 +674,55 @@ func TestFindingsCSVExportWritesACompleteFile(t *testing.T) {
 	}
 	if !strings.HasPrefix(lines[0], "finding_id,rule,category,severity,status") {
 		t.Errorf("header row wrong: %q", lines[0])
+	}
+}
+
+// TestFindingsCSVCarriesATechniqueColumnAndNeverABlank — ADR-105 decision 4
+// surviving the format change to CSV.
+//
+// The seeded findings use a fixture rule with no curated technique, so every row
+// here is unmapped — which is the case that matters. In JSON an empty array
+// travels beside a statement explaining it; a spreadsheet has neither, so a
+// blank cell under an ATT&CK column reads as "no technique applies" to anyone
+// who opens the file. This asserts the column exists, is named so the contract
+// survives detachment from the API, and carries a WORD rather than nothing.
+func TestFindingsCSVCarriesATechniqueColumnAndNeverABlank(t *testing.T) {
+	f := newFixture(t, `{"finding.export_all": true}`)
+	f.seedFinding(t, false)
+	cookies, csrf := f.login(t)
+
+	w := f.do(t, http.MethodGet, "/v1/findings.csv", nil, cookies, csrf)
+	if w.Code != http.StatusOK {
+		t.Fatalf("csv export: %d %s", w.Code, w.Body.String())
+	}
+	rows, err := csv.NewReader(strings.NewReader(w.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("csv parse: %v", err)
+	}
+	if len(rows) < 2 {
+		t.Fatalf("csv has %d row(s), want a header and at least one finding", len(rows))
+	}
+
+	col := -1
+	for i, h := range rows[0] {
+		if h == "attack_techniques_inferred" {
+			col = i
+		}
+	}
+	if col < 0 {
+		t.Fatalf("no attack_techniques_inferred column in the header: %v", rows[0])
+	}
+	// The column NAME is where the "this is an inference" contract lives once the
+	// file is open in a spreadsheet, detached from the API's inference field and
+	// from the ADR (decision 3, non-negotiable #9).
+	if !strings.Contains(rows[0][col], "inferred") {
+		t.Errorf("column is named %q; a CSV has nowhere else to say CVAP did not observe this", rows[0][col])
+	}
+
+	for _, row := range rows[1:] {
+		if strings.TrimSpace(row[col]) == "" {
+			t.Errorf("a finding exported a BLANK technique cell; in a spreadsheet that is indistinguishable from \"no technique applies\", which is the claim decision 4 forbids. Row: %v", row)
+		}
 	}
 }
 

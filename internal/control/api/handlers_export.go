@@ -103,9 +103,28 @@ func (s *Server) exportFindingsCSV(w http.ResponseWriter, r *http.Request) {
 	// (ADR-101). It was on the 30 s operator bound until an ADR-compliance review
 	// measured that the ADR, the index, pool.go and the Health doc string all
 	// SAID exports took the bulk number while the code did not.
+	var techniques map[uuid.UUID][]store.Technique
 	err := s.db.ReadWithin(r.Context(), tenant, store.BulkBudget, func(ctx context.Context, c *store.Conn) error {
 		var err error
-		rowsOut, err = (store.Findings{}).ListForExport(ctx, c, f, rowCap+1)
+		if rowsOut, err = (store.Findings{}).ListForExport(ctx, c, f, rowCap+1); err != nil {
+			return err
+		}
+		// ATT&CK techniques for the exported set, in the SAME transaction as the
+		// rows (ADR-105). A second read would describe a finding set that may
+		// have moved, and a CSV is the artifact someone acts on offline — the
+		// one place a row and its techniques disagreeing would never be noticed.
+		//
+		// Only fetched for rows that survive the cap check below; asking for
+		// rowCap+1 ids and then refusing the export would do the work twice over
+		// for nothing.
+		ids := make([]uuid.UUID, 0, len(rowsOut))
+		for i := range rowsOut {
+			ids = append(ids, rowsOut[i].ID)
+		}
+		if len(ids) > rowCap {
+			return nil // over cap; the export is about to be refused
+		}
+		techniques, _, err = (store.Techniques{}).ForFindings(ctx, c, ids)
 		return err
 	})
 	if err != nil {
@@ -127,10 +146,18 @@ func (s *Server) exportFindingsCSV(w http.ResponseWriter, r *http.Request) {
 
 	cw := csv.NewWriter(w)
 	// A stable header row; the columns are the summary an analyst triages by.
+	//
+	// The ATT&CK column is named `attack_techniques_inferred` rather than
+	// `attack_techniques` because a CSV has nowhere to put the sentence the API
+	// carries in its `inference` field (ADR-105 decision 3). The column NAME is
+	// the only place the contract can live once the file is open in a
+	// spreadsheet, detached from this API and from the ADR. CVAP has not observed
+	// these techniques being used and cannot: non-negotiable #9.
 	_ = cw.Write([]string{
 		"finding_id", "rule", "category", "severity", "status",
 		"asset_id", "asset_hostname", "instance_locator", "confidence",
 		"exposure_zones", "first_seen", "last_seen",
+		"attack_techniques_inferred", "attack_technique_names", "attack_technique_sources",
 	})
 	for _, f := range rowsOut {
 		// asset_hostname is DERIVED from what a scanned host volunteered — reverse
@@ -138,6 +165,7 @@ func (s *Server) exportFindingsCSV(w http.ResponseWriter, r *http.Request) {
 		// beginning =, +, -, @ or a control character is a formula a spreadsheet
 		// executes on open. csvSafe neutralises that; the rule name and locator
 		// pass through it too, defensively, since a pack could carry either.
+		ids, names, sources := csvTechniques(techniques[f.ID])
 		_ = cw.Write([]string{
 			f.ID.String(), csvSafe(f.RuleName), csvSafe(f.Category), f.Severity, f.Status,
 			f.AssetID.String(), csvSafe(f.AssetHostname), csvSafe(f.Locator),
@@ -145,6 +173,7 @@ func (s *Server) exportFindingsCSV(w http.ResponseWriter, r *http.Request) {
 			strconv.Itoa(f.ExposureZones),
 			f.FirstSeen.UTC().Format(time.RFC3339),
 			f.LastSeen.UTC().Format(time.RFC3339),
+			ids, names, sources,
 		})
 	}
 	cw.Flush()

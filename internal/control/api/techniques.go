@@ -1,6 +1,8 @@
 package api
 
 import (
+	"strings"
+
 	"github.com/effaaykhan/cvap/internal/store"
 )
 
@@ -158,4 +160,52 @@ func attackCoverageResponse(st store.CatalogueStatus) AttackCoverageResponse {
 		TotalRules:       st.TotalRules,
 		Statement:        attackCoverageStatement(st),
 	}
+}
+
+// UnmappedCSV is what a CSV cell says when CVAP holds no ATT&CK mapping for a
+// finding. A literal word, never an empty cell.
+//
+// This is ADR-105 decision 4 surviving a format change. In JSON an empty array
+// travels beside a coverage statement that explains it; in a spreadsheet there
+// is no statement and no API doc — a blank cell under a column headed
+// "attack_techniques" reads, to any reasonable person, as "no technique
+// applies". That is the stronger claim the decision forbids, and a CSV is the
+// artifact most likely to be read detached from everything that would qualify
+// it: forwarded, pivoted, pasted into a report.
+const UnmappedCSV = "unmapped"
+
+// csvTechniques renders a finding's techniques as three CSV cells: ids, names,
+// and the distinct sources that made the claims.
+//
+// Sources are carried rather than dropped for width, because the two anchors are
+// not interchangeable evidence (ADR-105 decision 2). "cvap-curated" is a
+// judgement someone here made about this detection rule and owns; a published
+// dataset's name is a third party's judgement about a CVE. An analyst deciding
+// how much weight to put on a technique needs to know which one they are
+// holding, and the CSV is where that context is most easily lost.
+func csvTechniques(ts []store.Technique) (ids, names, sources string) {
+	if len(ts) == 0 {
+		return UnmappedCSV, "", ""
+	}
+	idList := make([]string, 0, len(ts))
+	nameList := make([]string, 0, len(ts))
+	srcSeen := map[string]bool{}
+	srcList := make([]string, 0, 2)
+	for _, t := range ts {
+		id := t.ID
+		// A retired technique is still exported — an older finding must keep its
+		// reason (ADR-105) — but it is marked, because acting on a technique the
+		// current corpus has withdrawn is a different decision from acting on a
+		// current one, and nothing else in a CSV would say so.
+		if t.Deprecated {
+			id += " (retired)"
+		}
+		idList = append(idList, id)
+		nameList = append(nameList, t.Name)
+		if !srcSeen[t.Source] {
+			srcSeen[t.Source] = true
+			srcList = append(srcList, t.Source)
+		}
+	}
+	return strings.Join(idList, "; "), strings.Join(nameList, "; "), strings.Join(srcList, "; ")
 }
