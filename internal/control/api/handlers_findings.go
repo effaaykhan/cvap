@@ -57,6 +57,15 @@ type FindingSummaryResponse struct {
 	EPSSPercentile *float64 `json:"epss_percentile,omitempty"`
 	CVSS           *float64 `json:"cvss,omitempty" doc:"CVSS base score. Absent = unknown, NOT zero."`
 	PriorityBasis  string   `json:"priority_basis" doc:"Why this finding sits where it does: KEV-listed | EPSS <x> | CVSS <x> | unscored (ADR-069)."`
+
+	// ATT&CK techniques (ADR-105). An empty array means CVAP holds NO MAPPING for
+	// this finding — never that no technique applies. It is deliberately not
+	// omitempty: a field that vanishes when empty is one a client cannot
+	// distinguish from a field it forgot to read, and the distinction is the
+	// whole of decision 4. These do NOT feed priority_score (decision 5): KEV is
+	// observed exploitation and EPSS a measured probability, and adding an
+	// inference to that would launder a guess into a number.
+	Techniques []TechniqueResponse `json:"attack_techniques" doc:"Inferred ATT&CK techniques. Empty = no mapping held, NOT \"no technique applies\". Never an input to priority."`
 }
 
 // FindingListResponse is a keyset page of findings, priority-ordered (ADR-069).
@@ -66,6 +75,12 @@ type FindingListResponse struct {
 	// as before_id for the next page. Absent on the last page.
 	NextScore *string `json:"next_score,omitempty"`
 	NextID    *string `json:"next_id,omitempty"`
+
+	// TechniqueCoverage states what fraction of these findings carry a technique
+	// (ADR-105 decision 4), so a client cannot read the absence of techniques as
+	// a claim that none apply. Same contract as AssetAdvisoryStatus below: clean
+	// is a stated value, never the emptiness of a list.
+	TechniqueCoverage *TechniqueCoverageResponse `json:"attack_technique_coverage,omitempty"`
 
 	// AssetAdvisoryStatus is present ONLY when the list is scoped to one asset
 	// (asset_id filter): that asset's advisory posture (ADR-068). It qualifies an
@@ -106,6 +121,11 @@ type ExposureResponse struct {
 
 // FindingResponse is the full finding, with the evidence a human verifies it by.
 type FindingResponse struct {
+	// Coverage for this one finding (ADR-105 decision 4). Present even when the
+	// finding carries techniques, because the statement is what distinguishes an
+	// unmapped finding from an installation with no catalogue at all.
+	TechniqueCoverage *TechniqueCoverageResponse `json:"attack_technique_coverage,omitempty"`
+
 	FindingSummaryResponse
 	Source      string             `json:"source" doc:"network | credentialed | dast | api | sast | config | cloud (ADR-010)."`
 	DedupKey    string             `json:"dedup_key" doc:"The identity this finding persists under across scans (ADR-010). Shown so it is auditable why two observations are, or are not, the same finding."`
@@ -191,9 +211,28 @@ func (s *Server) listFindings(w http.ResponseWriter, r *http.Request) {
 	assetScoped := f.AssetID != (uuid.UUID{})
 	var page *store.FindingPage
 	var advisoryStatus string
+	var techniques map[uuid.UUID][]store.Technique
+	var coverage store.TechniqueCoverage
+	var catalogue store.CatalogueStatus
 	err := s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
 		if page, err = (store.Findings{}).List(ctx, c, f, beforeScore, beforeID, limit); err != nil {
+			return err
+		}
+		// ATT&CK techniques for the whole page in one query (ADR-105). In the
+		// same transaction as the list, so the techniques describe the findings
+		// that were actually returned rather than a set that may have moved.
+		ids := make([]uuid.UUID, 0, len(page.Findings))
+		for i := range page.Findings {
+			ids = append(ids, page.Findings[i].ID)
+		}
+		if techniques, coverage, err = (store.Techniques{}).ForFindings(ctx, c, ids); err != nil {
+			return err
+		}
+		// Whether a catalogue exists at all, because "no mapping for this
+		// finding" and "no catalogue ingested" look identical on a finding and
+		// mean entirely different things (ADR-105 decision 4).
+		if catalogue, err = (store.Techniques{}).CatalogueStatus(ctx, c); err != nil {
 			return err
 		}
 		// When scoped to one asset, carry that asset's advisory posture (ADR-068)
@@ -215,7 +254,14 @@ func (s *Server) listFindings(w http.ResponseWriter, r *http.Request) {
 
 	out := FindingListResponse{Findings: make([]FindingSummaryResponse, 0, len(page.Findings))}
 	for i := range page.Findings {
-		out.Findings = append(out.Findings, findingSummaryResponse(page.Findings[i]))
+		fr := findingSummaryResponse(page.Findings[i])
+		fr.Techniques = techniqueResponses(techniques[page.Findings[i].ID])
+		out.Findings = append(out.Findings, fr)
+	}
+	out.TechniqueCoverage = &TechniqueCoverageResponse{
+		Findings:  coverage.Findings,
+		Mapped:    coverage.Mapped,
+		Statement: coverageStatement(coverage, catalogue.Techniques > 0),
 	}
 	if assetScoped {
 		out.AssetAdvisoryStatus = &advisoryStatus
@@ -259,16 +305,36 @@ func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 	tenant, _ := tenantFrom(r.Context())
 
 	var d *store.FindingDetail
+	var techniques map[uuid.UUID][]store.Technique
+	var coverage store.TechniqueCoverage
+	var catalogue store.CatalogueStatus
 	err = s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
-		d, err = (store.Findings{}).GetFinding(ctx, c, id)
+		if d, err = (store.Findings{}).GetFinding(ctx, c, id); err != nil {
+			return err
+		}
+		if techniques, coverage, err = (store.Techniques{}).ForFindings(ctx, c, []uuid.UUID{id}); err != nil {
+			return err
+		}
+		catalogue, err = (store.Techniques{}).CatalogueStatus(ctx, c)
 		return err
 	})
 	if err != nil {
 		s.storeError(w, r, err)
 		return
 	}
-	writeJSON(w, r, s.log, http.StatusOK, findingResponse(d))
+	out := findingResponse(d)
+	out.Techniques = techniqueResponses(techniques[id])
+	// Stated on the single finding too, not only on the list. A detail page is
+	// where someone decides what to do about one finding, and "no techniques
+	// shown" has to be readable as "we hold no mapping" rather than as a verdict
+	// (ADR-105 decision 4).
+	out.TechniqueCoverage = &TechniqueCoverageResponse{
+		Findings:  coverage.Findings,
+		Mapped:    coverage.Mapped,
+		Statement: coverageStatement(coverage, catalogue.Techniques > 0),
+	}
+	writeJSON(w, r, s.log, http.StatusOK, out)
 }
 
 func (s *Server) exposureByZone(w http.ResponseWriter, r *http.Request) {

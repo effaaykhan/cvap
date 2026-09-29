@@ -80,6 +80,11 @@ GO_SUITES = [
     # rests on. internal/correlate had no mutation coverage at all before this.
     "internal/correlate/seen_port_integration_test.go",
     "internal/correlate/seen_port_internal_test.go",
+    # ATT&CK labelling (ADR-105). DB-free: the three mutations drop the
+    # inference label, collapse the empty-catalogue case into the unmapped one,
+    # and filter deprecated techniques -- each the plausible version written by
+    # someone who had not read decision 3 or 4.
+    "internal/control/api/technique_coverage_test.go",
     "internal/control/credential/phc_test.go",
     # bootstrap verifies its own login path; the mutation inverts the credential
     # check so a wrong password would pass — "a bootstrap that cannot log in has

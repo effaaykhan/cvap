@@ -358,6 +358,10 @@ erDiagram
     VULNERABILITY_DEF }o--o{ VENDOR_ADVISORY : "addressed by"
     VULNERABILITY_DEF |o..o| KEV : "listed in (cve_id, no FK)"
     VULNERABILITY_DEF |o..o| EPSS : "scored by (cve_id, no FK)"
+    VULNERABILITY_DEF |o..o{ CVE_TECHNIQUE : "inferred technique (cve_id, no FK)"
+    RULE ||--o{ RULE_TECHNIQUE : "curated technique"
+    ATTACK_TECHNIQUE ||--o{ CVE_TECHNIQUE : "named by"
+    ATTACK_TECHNIQUE ||--o{ RULE_TECHNIQUE : "named by"
     VENDOR_ADVISORY ||--o{ ADVISORY_FIXED_PACKAGE : "fixes in"
 
     FINDING ||--o{ FINDING_EXPOSURE : "visible via"
@@ -623,6 +627,32 @@ erDiagram
         text cvss_vector "unpopulated; USN publishes no vectors"
         jsonb cpe_ranges
         timestamp published_at
+    }
+
+    ATTACK_TECHNIQUE {
+        text technique_id PK "T1190 or T1190.001"
+        text name
+        text_array tactics
+        bool is_subtechnique
+        text parent_id
+        bool deprecated "retired, never deleted"
+        text revoked_by
+        text attack_version "the PINNED corpus"
+    }
+
+    CVE_TECHNIQUE {
+        text cve_id PK "joined on cve_id, NOT a FK"
+        text technique_id PK
+        text mapping_type PK "the SOURCE's own qualifier"
+        text source "who made the claim"
+        numeric source_confidence "NULL unless the source publishes one"
+    }
+
+    RULE_TECHNIQUE {
+        uuid rule_id PK
+        text technique_id PK
+        text source "cvap-curated"
+        text rationale "why; NOT NULL, so the judgement is reviewable"
     }
 
     KEV {

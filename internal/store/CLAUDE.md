@@ -14,12 +14,18 @@ Rules:
 - `RULE_PACK`, `RULE`, `VULNERABILITY_DEF`, `VENDOR_ADVISORY`, `ADVISORY_FIXED_PACKAGE`,
   `knowledge_feed_status` (advisory-feed provenance/freshness, migration 0034),
   `product_packages` (the product→package map for release resolution, migration 0035, ADR-064),
-  `release_coverage` (per-release advisory coverage window, migration 0036, ADR-067) and
+  `release_coverage` (per-release advisory coverage window, migration 0036, ADR-067),
   `kev`/`epss` (the CISA KEV and FIRST EPSS risk feeds that prioritise findings, migration 0037,
-  ADR-069) are global knowledge tables and correctly carry no `tenant_id`. `cvap_app` holds
-  `SELECT` on all of them. The nine advisory-knowledge tables (`VULNERABILITY_DEF` through
-  `epss`) are written only by `cvap_knowledge_import` (ADR-063 — `kev`/`epss` are its 8th and
-  9th, ADR-069); `RULE_PACK` and `RULE` are detection content on the separate rule-pack path
+  ADR-069) and `attack_techniques`/`cve_techniques`/`rule_techniques` (the MITRE ATT&CK
+  catalogue and its two mapping anchors, migration 0050/0051, ADR-105) are global knowledge
+  tables and correctly carry no `tenant_id`. `cvap_app` holds `SELECT` on all of them. The
+  eleven advisory-knowledge tables (`VULNERABILITY_DEF` through `cve_techniques`) are written
+  only by `cvap_knowledge_import` (ADR-063 — `kev`/`epss` are its 8th and 9th, ADR-069;
+  `attack_techniques`/`cve_techniques` its 10th and 11th, ADR-105). `rule_techniques` is the
+  exception: it is CURATED content on the rule-pack path, migration-seeded like `rules`, so the
+  import role holds only `SELECT` on it — and it needs that one grant because the corpus
+  importer VALIDATES against it, refusing a corpus that lacks any curated technique.
+  `RULE_PACK` and `RULE` are detection content on the separate rule-pack path
   (ADR-030's "separate identity", migration-seeded today), not by `cvap_knowledge_import`.
 - Observations are ephemeral. **Anything that must outlive them is copied at the moment it
   becomes load-bearing** (ADR-016): merge evidence into `asset_identity_keys`, finding and
@@ -231,6 +237,35 @@ enforcement is one line: `serviceObservations` in `internal/correlate/findings.g
 The measurement behind the decision: ports 2000 and 5060 answered on 19 of 19 hosts of a real
 /24 pair — one middlebox replying for the range. Those rows are durable now; the filter is what
 keeps them from becoming nineteen findings.
+
+## An ATT&CK technique is an inference, and the type says so
+
+`Techniques.ForFindings` returns techniques for a BATCH of findings, never one at a time: the
+finding list is what it feeds, and a per-row lookup there would be one query per listed finding
+inside a transaction that already carries a time budget (ADR-101).
+
+A finding with no techniques is **absent from the returned map**, and the caller renders
+"unmapped". That is not the same claim as "no technique applies" (ADR-105 decision 4), and the
+API carries a coverage statement precisely so a client cannot collapse the two. There is a third
+state that looks identical from a finding and is not: **no catalogue has been ingested at all**,
+in which case nothing anywhere can be mapped. `CatalogueStatus` exists only to separate those —
+without it, forgetting `make knowledge-attack` reads exactly like full coverage of an estate with
+no techniques.
+
+`Technique.Anchor` says which route reached the finding and the two are not interchangeable:
+`rule` is a judgement a person made about that specific detection rule and carries a rationale;
+`cve` is a third party's judgement about the CVE and carries that source's own qualifier.
+`Confidence` stays nil unless the SOURCE published one — no ingested source currently does, and
+ADR-105 forbids inventing a number here.
+
+**Deprecated techniques are returned, never filtered.** A finding that cited a technique must
+still be able to explain itself after that technique leaves the corpus, so the retirement is a
+flag rather than a deletion, and a read path that hid them would silently strip an old finding's
+only reason.
+
+**Techniques are NOT an input to `priority_score`** (ADR-105 decision 5). KEV is observed
+exploitation and EPSS a measured probability; adding an inference to that sum would launder a
+guess into a number and double-count the same weakness.
 
 ## A failed service write loses the HOST, not just the service
 

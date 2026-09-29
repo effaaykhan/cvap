@@ -13,6 +13,7 @@
         contract-guard-test fmt-check tidy-check govulncheck db-gates db-reachable \
         safety-sabotage adr-index ci-parity knowledge-usn knowledge-product-map knowledge-coverage \
         knowledge-kev knowledge-epss \
+        knowledge-attack knowledge-attack-corpus knowledge-attack-mappings \
         ui ui-deps ui-types ui-verify ui-typecheck ui-test ui-build embedui-build
 
 # golang-migrate, pinned by digest rather than tag so the tool cannot change
@@ -654,6 +655,32 @@ knowledge-epss: ## Ingest FIRST EPSS (daily exploitation probability, ~370k CVEs
 	python3 knowledge/risk_ingest.py fetch-epss --out "$(EPSS_PACK)"
 	KNOWLEDGE_IMPORT_DATABASE_URL="$(KNOWLEDGE_IMPORT_DATABASE_URL)" \
 		python3 knowledge/risk_ingest.py import-epss --pack "$(EPSS_PACK)"
+
+# MITRE ATT&CK (ADR-105). Two feeds, and the ORDER matters: the mapping import
+# refuses any technique the catalogue does not hold, so the corpus goes first.
+# `knowledge-attack` runs both, which is what anyone wants.
+#
+# Both pack paths are DEFINED here. The KEV and EPSS targets above reference
+# $(KEV_PACK) and $(EPSS_PACK), which are defined nowhere in this file, so they
+# expand to empty and those targets pass `--out ""`. Left alone rather than
+# fixed in passing -- it is a real bug in a sibling target and deserves its own
+# change -- but not repeated here.
+ATTACK_CORPUS_PACK   ?= /tmp/cvap-attack-corpus.json
+ATTACK_MAPPINGS_PACK ?= /tmp/cvap-attack-mappings.json
+
+knowledge-attack: knowledge-attack-corpus knowledge-attack-mappings ## Ingest MITRE ATT&CK: the technique catalogue, then the CVE mappings (ADR-105)
+
+knowledge-attack-corpus: ## Ingest the pinned ATT&CK technique catalogue (ADR-105)
+	@test -n "$(KNOWLEDGE_IMPORT_DATABASE_URL)" || { echo "KNOWLEDGE_IMPORT_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
+	python3 knowledge/attack_ingest.py fetch-corpus --out "$(ATTACK_CORPUS_PACK)"
+	KNOWLEDGE_IMPORT_DATABASE_URL="$(KNOWLEDGE_IMPORT_DATABASE_URL)" \
+		python3 knowledge/attack_ingest.py import-corpus --pack "$(ATTACK_CORPUS_PACK)"
+
+knowledge-attack-mappings: ## Ingest the published CVE -> ATT&CK mappings. Needs the corpus first (ADR-105)
+	@test -n "$(KNOWLEDGE_IMPORT_DATABASE_URL)" || { echo "KNOWLEDGE_IMPORT_DATABASE_URL is not set. Copy env.example to .env."; exit 1; }
+	python3 knowledge/attack_ingest.py fetch-mappings --out "$(ATTACK_MAPPINGS_PACK)"
+	KNOWLEDGE_IMPORT_DATABASE_URL="$(KNOWLEDGE_IMPORT_DATABASE_URL)" \
+		python3 knowledge/attack_ingest.py import-mappings --pack "$(ATTACK_MAPPINGS_PACK)"
 
 frontmatter: ## Validate .claude agent and skill frontmatter
 	python3 .github/scripts/check_frontmatter.py

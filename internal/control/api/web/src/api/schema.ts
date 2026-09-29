@@ -1153,6 +1153,7 @@ export interface components {
         FindingListResponse: {
             /** @description When scoped to one asset, that asset's advisory_status (ADR-068). Emptiness of findings is never a clean verdict; this is. */
             asset_advisory_status?: string | null;
+            attack_technique_coverage?: components["schemas"]["TechniqueCoverageResponse"];
             findings: components["schemas"]["FindingSummaryResponse"][];
             next_id?: string | null;
             next_score?: string | null;
@@ -1160,6 +1161,9 @@ export interface components {
         FindingResponse: {
             asset_hostname?: string;
             asset_id: string;
+            attack_technique_coverage?: components["schemas"]["TechniqueCoverageResponse"];
+            /** @description Inferred ATT&CK techniques. Empty = no mapping held, NOT "no technique applies". Never an input to priority. */
+            attack_techniques: components["schemas"]["TechniqueResponse"][];
             category: string;
             confidence: number;
             /** @description The CVE the finding is matched to, when it has a vulnerability definition. Absent for configuration and exposure rules. */
@@ -1206,6 +1210,8 @@ export interface components {
         FindingSummaryResponse: {
             asset_hostname?: string;
             asset_id: string;
+            /** @description Inferred ATT&CK techniques. Empty = no mapping held, NOT "no technique applies". Never an input to priority. */
+            attack_techniques: components["schemas"]["TechniqueResponse"][];
             category: string;
             confidence: number;
             /** @description The CVE the finding is matched to, when it has a vulnerability definition. Absent for configuration and exposure rules. */
@@ -1653,6 +1659,41 @@ export interface components {
         };
         StartOIDCResponse: {
             authorization_url: string;
+        };
+        TechniqueCoverageResponse: {
+            /** @description Findings in this response. */
+            findings: number;
+            /** @description Of those, how many carry at least one ATT&CK technique. */
+            mapped: number;
+            /** @description Plain-language coverage, for a client that would otherwise show nothing and imply completeness. */
+            statement: string;
+        };
+        TechniqueResponse: {
+            /** @description How this technique reached the finding: "rule" (curated for this detection rule) or "cve" (a published dataset's mapping for the CVE). */
+            anchor: string;
+            /** @description The source's own note, on the CVE anchor only. */
+            comments?: string;
+            /** @description The SOURCE's confidence, absent when it publishes none — which is currently every ingested source. Never a number CVAP invents (ADR-105). */
+            confidence?: number | null;
+            /** @description Retired from the pinned ATT&CK corpus. Still shown so an older finding keeps its reason. */
+            deprecated?: boolean;
+            /** @description MITRE ATT&CK technique id, e.g. T1040 or T1190.001. */
+            id: string;
+            /** @description Always "inferred". CVAP does not exploit anything (non-negotiable #9) and has NOT observed this technique being used — this is a judgement about what the weakness would enable. */
+            inference: string;
+            /** @description The source's OWN qualifier on a CVE mapping (exploitation_technique | primary_impact | secondary_impact). Absent on the rule anchor. */
+            mapping_type?: string;
+            name: string;
+            /** @description The curator's reason, on the rule anchor only. */
+            rationale?: string;
+            /** @description The technique that replaced this one. */
+            revoked_by?: string;
+            /** @description Who made the claim, e.g. cvap-curated or ctid-mappings-explorer. */
+            source: string;
+            /** @description ATT&CK tactic shortnames this technique serves, e.g. credential-access. */
+            tactics: string[];
+            /** @description The MITRE page for this technique. */
+            url?: string;
         };
         TrendPointResponse: {
             /** @description UTC calendar day, YYYY-MM-DD. */
