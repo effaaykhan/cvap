@@ -150,13 +150,13 @@ code, .mono { font-family:var(--mono); }
 .who .new-scan {
   display:inline-block; padding:.3rem .7rem; border-radius:6px;
   font-size:.76rem; font-weight:600; line-height:1.4;
-  color:#fff;
+  color:var(--nav-accent);
   background:color-mix(in srgb, var(--nav-accent) 14%, transparent);
   border:1px solid color-mix(in srgb, var(--nav-accent) 38%, transparent);
 }
 .who .new-scan:hover {
   background:color-mix(in srgb, var(--nav-accent) 22%, transparent);
-  color:#fff; text-decoration:none;
+  color:var(--nav-accent); text-decoration:none;
 }
 .theme-seg {
   display:inline-flex; align-items:stretch; overflow:hidden;
