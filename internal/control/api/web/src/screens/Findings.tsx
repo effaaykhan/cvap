@@ -96,8 +96,8 @@ export function Findings() {
         <table>
           <thead>
             <tr>
-              <th>Priority</th><th>Severity</th><th>Finding</th><th>Asset</th><th>Where</th>
-              <th>Confidence</th><th className="num">EPSS</th><th className="num">CVSS</th><th>Exposure</th><th>ATT&amp;CK</th><th>Status</th><th />
+              <th>Priority</th><th>Severity</th><th>Finding</th><th>ATT&amp;CK</th><th>Asset</th><th>Where</th>
+              <th>Confidence</th><th className="num">EPSS</th><th className="num">CVSS</th><th>Exposure</th><th>Status</th><th />
             </tr>
           </thead>
           <tbody>
@@ -124,8 +124,8 @@ export function Findings() {
 function Row({ f, rank }: { f: FindingSummary; rank: number }) {
   const band = confidenceBand(f.confidence);
   // ATT&CK is context beside the ranking, never inside it (ADR-105 decision
-  // 5): the cell renders after every column that carries priority, and
-  // nothing sorts, weights or colours by it.
+  // 5): the cell sits next to the finding it qualifies, and nothing sorts,
+  // weights or colours by it.
   const atk = attackCell(f.attack_techniques);
   return (
     <tr className={`frow frow-${f.severity}`}>
@@ -144,6 +144,14 @@ function Row({ f, rank }: { f: FindingSummary; rank: number }) {
           <Link to={`/findings/${f.id}`} className={f.cve ? "data" : undefined}>{f.cve || f.rule}</Link>
           <span className="cat small">{f.cve ? "vulnerability" : "configuration"}</span>
         </td>
+        <td
+          className={`attack-cell${atk.unmapped ? " unmapped" : ""}`}
+          title={atk.unmapped
+            ? "CVAP holds no ATT&CK mapping for this finding — not a claim that no technique applies"
+            : `inferred, not observed: ${f.attack_techniques.map((t) => `${t.id} ${t.name}`).join(", ")}`}
+        >
+          {atk.unmapped ? atk.text : <span className="data">{atk.text}</span>}
+        </td>
         <td className="data">{f.asset_hostname || f.asset_id}</td>
         <td className="data">{f.instance_locator || "—"}</td>
         <td>
@@ -154,14 +162,6 @@ function Row({ f, rank }: { f: FindingSummary; rank: number }) {
         <td className={`num${(f.epss ?? 0) >= 0.5 ? " hot" : ""}`}>{score(f.epss, 5)}</td>
         <td className="num">{score(f.cvss, 1)}</td>
         <td className="exposure-cell">{f.exposure_zones} zone{f.exposure_zones === 1 ? "" : "s"}</td>
-        <td
-          className={`attack-cell${atk.unmapped ? " unmapped" : ""}`}
-          title={atk.unmapped
-            ? "CVAP holds no ATT&CK mapping for this finding — not a claim that no technique applies"
-            : `inferred, not observed: ${f.attack_techniques.map((t) => `${t.id} ${t.name}`).join(", ")}`}
-        >
-          {atk.unmapped ? atk.text : <span className="data">{atk.text}</span>}
-        </td>
         <td className="muted">{f.status}</td>
         <td className="expand">
           <Link to={`/findings/${f.id}`} aria-label="open finding" title="open finding">›</Link>

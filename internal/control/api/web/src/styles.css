@@ -273,6 +273,11 @@ tr.frow-info     td:first-child::before { width:2px; background:var(--sev-info);
   padding:1.25rem;
 }
 .detail { max-width:860px; }
+/* The finding detail alone uses the desktop width it is given: the fact
+   grids place more columns as the container grows (auto-fill below), so
+   widening the cap spreads the same content rather than enlarging it — the
+   type scale is unchanged, and the other detail pages keep their measure. */
+.detail.detail-wide { max-width:1560px; }
 .crumb { margin:0 0 1rem; font-size:.82rem; }
 .row-between { display:flex; align-items:center; justify-content:space-between; gap:1rem; }
 
@@ -330,7 +335,9 @@ button:disabled { opacity:.55; cursor:not-allowed; }
 /* Same card vocabulary as evidence: quiet surface, neutral border. Nothing
    in this section carries severity colour or the nav accent — a technique is
    context for a human, and it must not read as urgency. */
-.techniques { display:flex; flex-direction:column; gap:.6rem; }
+.techniques { display:grid; grid-template-columns:1fr; gap:.6rem; align-items:start; }
+/* Two technique cards abreast on a wide desktop; one column below that. */
+@media (min-width:1100px) { .techniques { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 .tech-card { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:.85rem 1rem; }
 .tech-head { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; }
 .tech-id { font-family:var(--mono); font-size:.82rem; }

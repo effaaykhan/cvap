@@ -18,7 +18,7 @@ export function FindingDetail() {
   if (error || !f) return <p className="error">Could not load this finding.</p>;
 
   return (
-    <section className="detail">
+    <section className="detail detail-wide">
       <p className="crumb"><Link to="/triage">← Triage</Link></p>
       <div className="row-between">
         <h1><span className={`sev sev-${f.severity}`}>{f.severity}</span> {f.rule}</h1>
