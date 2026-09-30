@@ -113,6 +113,66 @@ docs/           architecture-v2, execution-plan, 109 ADRs, specs, session map
 
 ---
 
+## 3a. How the two people on this project work
+
+The architect should know this before proposing anything that touches the console, because
+the division is enforced by tooling rather than convention and a plan that ignores it will
+produce commits the repository refuses.
+
+**Two people, one OS account, one clone, two worktrees.**
+
+```
+/home/soc/cvap                 main       effaaykhan  <kf582993@gmail.com>       backend
+/home/soc/cvap/.worktrees/ui   feat/ui    Nidhi Choudhari <...@users.noreply>   console
+```
+
+**The directory decides the author, and a hook enforces it.** `extensions.worktreeConfig` is
+enabled and each worktree carries its own `user.email` via `git config --worktree`. A
+`pre-commit` hook reads the working tree's toplevel and **refuses** a commit whose author
+does not match that directory. GitHub credits a commit to the owner of the author email, so
+a mis-credited commit is only visible after it reaches GitHub, which is too late to fix
+quietly. The hook refuses it instead.
+
+**Ownership is declared in `.github/CODEOWNERS` and it is deliberately asymmetric:**
+
+```
+*                                            @effaaykhan     everything by default
+/internal/control/api/web/                   @nidhichoudhari the console
+/internal/control/api/web/src/api/schema.ts  @effaaykhan     GENERATED from the route registry
+/internal/control/api/routes.go              @effaaykhan     the API surface
+/internal/control/api/handlers_*.go          @effaaykhan     the handlers
+```
+
+The generated client sits inside the console directory but is owned by the backend, because
+it is produced by `make ui-types` from the Go route registry and a CI gate (`make ui-verify`)
+diffs it. **It is the one file in her tree that she must not edit** — and the one the backend
+must regenerate whenever an API field changes, or her typecheck breaks through no fault of
+hers.
+
+**Practical consequences for any plan:**
+
+- Backend work and console work land in **separate commits by different authors**, always.
+  A change that spans both (a new API field plus its rendering) is two commits in two
+  worktrees, not one.
+- An API change that alters the response shape **breaks her build until `schema.ts` is
+  regenerated**. The backend does that as part of its own change, not as a follow-up.
+- A required (non-`omitempty`) new field breaks every test fixture constructing that type.
+  Backend fixes the shared factory; she fixes anything she has added.
+- `CONTRIBUTING.md` carries the full merge runbook (commit in the worktree → gate in the
+  worktree → merge to main → rebuild the bundle → relink → restart → confirm the served
+  bundle hash changed). It is not summarised here because it is operational detail that
+  changes; read it there.
+- Backend-to-console handoffs are written as a **spec document**, not as tickets — see
+  `docs/attack-technique-console-spec.md` for the worked example. The spec carries the
+  wording contracts the API cannot enforce (what an empty array means, what must never be
+  implied), because those are exactly what gets lost in a handoff.
+
+**Why this matters to an architect scoping Volumes 4–8.** Every one of those volumes has a
+console surface. The current model has one person on the console and one on everything else,
+and the console is already the narrower resource. Any plan that adds five engines without
+adding console capacity will produce five capabilities with no surface — which is a shape
+this project has an explicit standing rule against.
+
 ## 4. How it works end to end
 
 1. An operator creates a **scan** against targets, governed by a **scan policy** (allowlist,
