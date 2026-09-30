@@ -1,6 +1,6 @@
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "../lib/api";
+import { api, type Technique } from "../lib/api";
 import { EvidenceBlock } from "../components/Evidence";
 import { Confidence } from "../components/Confidence";
 
@@ -28,6 +28,8 @@ export function FindingDetail() {
         <div className="kv"><dt>Asset</dt><dd><Link to={`/assets/${f.asset_id}`}>{f.asset_hostname || f.asset_id}</Link></dd></div>
         <div className="kv"><dt>Where</dt><dd className="data">{f.instance_locator || "—"}</dd></div>
         <div className="kv"><dt>Category</dt><dd>{f.category}</dd></div>
+        <div className="kv"><dt>Claim</dt><dd>{f.has_vuln_def ? "advisory-matched" : "rule / banner-inferred"}</dd></div>
+        <div className="kv"><dt>Source</dt><dd>{f.source}</dd></div>
         <div className="kv"><dt>Confidence</dt><dd><Confidence value={f.confidence} /></dd></div>
         {f.cwe && <div className="kv"><dt>CWE</dt><dd>{f.cwe}</dd></div>}
         <div className="kv"><dt>Dedup key</dt><dd><code>{f.dedup_key}</code></dd></div>
@@ -35,10 +37,12 @@ export function FindingDetail() {
         <div className="kv"><dt>Last seen</dt><dd>{fmt(f.last_seen)}</dd></div>
       </dl>
 
-      {f.has_vuln_def && (
-        <>
-          <h2>Priority</h2>
-          <dl className="facts">
+      {/* Priority for every finding, not only advisory-matched ones: the KEV
+          line and the basis are what the triage table's expanded row used to
+          show for all findings, and they read honestly for a configuration
+          rule too. EPSS/CVSS stay gated — they exist only with a vuln def. */}
+      <h2>Priority</h2>
+      <dl className="facts">
             <div className="kv">
               <dt>Exploitation</dt>
               <dd>
@@ -55,29 +59,56 @@ export function FindingDetail() {
                 )}
               </dd>
             </div>
-            <div className="kv">
-              <dt>EPSS</dt>
-              <dd>
-                {f.epss == null ? (
-                  <span className="muted">Unscored (no signal — not low probability)</span>
-                ) : (
-                  <>
-                    {f.epss.toFixed(5)}
-                    {f.epss_percentile != null && (
-                      <span className="muted"> · {(f.epss_percentile * 100).toFixed(1)}th percentile</span>
-                    )}
-                  </>
-                )}
-              </dd>
-            </div>
-            <div className="kv">
-              <dt>CVSS</dt>
-              <dd>{f.cvss == null ? <span className="muted">Unknown</span> : f.cvss}</dd>
-            </div>
+            {f.has_vuln_def && (
+              <div className="kv">
+                <dt>EPSS</dt>
+                <dd>
+                  {f.epss == null ? (
+                    <span className="muted">Unscored (no signal — not low probability)</span>
+                  ) : (
+                    <>
+                      {f.epss.toFixed(5)}
+                      {f.epss_percentile != null && (
+                        <span className="muted"> · {(f.epss_percentile * 100).toFixed(1)}th percentile</span>
+                      )}
+                    </>
+                  )}
+                </dd>
+              </div>
+            )}
+            {f.has_vuln_def && (
+              <div className="kv">
+                <dt>CVSS</dt>
+                <dd>{f.cvss == null ? <span className="muted">Unknown</span> : f.cvss}</dd>
+              </div>
+            )}
             <div className="kv"><dt>Basis</dt><dd>{f.priority_basis}</dd></div>
-          </dl>
+      </dl>
+
+      <h2>ATT&amp;CK techniques</h2>
+      {f.attack_techniques.length ? (
+        <>
+          {/* The wording contract (ADR-105 decision 3): these are inferences
+              about what the weakness would enable. CVAP has not observed any
+              of them in use and cannot (non-negotiable #9). */}
+          <p className="muted">
+            Inferred from the weakness — techniques an adversary could use it for.
+            CVAP has not observed any of these techniques in use.
+          </p>
+          <div className="techniques">
+            {f.attack_techniques.map((t) => (
+              <TechniqueCard key={`${t.source}-${t.id}`} t={t} />
+            ))}
+          </div>
+        </>
+      ) : (
+        <>
+          {/* [] is "no mapping held", never "no technique applies" (decision 4). */}
+          <p className="tech-unmapped">Unmapped</p>
+          <p className="muted">CVAP holds no mapping for this finding.</p>
         </>
       )}
+      {f.attack_technique_coverage && <p className="note">{f.attack_technique_coverage.statement}</p>}
 
       {f.remediation && (
         <>
@@ -112,6 +143,50 @@ export function FindingDetail() {
         assessment — that is not yet computed.
       </p>
     </section>
+  );
+}
+
+// One inferred technique. The two anchors are different kinds of evidence
+// (ADR-105 decision 2) and stay visibly different: a curated rule mapping is
+// a judgement someone here made and wrote a rationale for; a CVE mapping is a
+// published dataset's judgement, carried with that source's own qualifier.
+// Neither is ever styled like severity or priority (decision 5).
+function TechniqueCard({ t }: { t: Technique }) {
+  return (
+    <div className="tech-card">
+      <div className="tech-head">
+        {t.url ? (
+          <a className="tech-id" href={t.url} target="_blank" rel="noreferrer">{t.id}</a>
+        ) : (
+          <span className="tech-id">{t.id}</span>
+        )}
+        <span className="tech-name">{t.name}</span>
+        <span className="tag">{t.inference}</span>
+        <span className="tag">{t.anchor === "rule" ? "curated rule" : t.anchor === "cve" ? "CVE mapping" : t.anchor}</span>
+        {t.deprecated && <span className="tag tech-retired">retired</span>}
+      </div>
+      <div className="tech-meta">
+        <span className="tech-tactics">{t.tactics.map((x) => x.replace(/-/g, " ")).join(" · ")}</span>
+        <span> · source: {t.source}</span>
+        {t.mapping_type && <span> · {t.mapping_type}</span>}
+        {/* The source's confidence, only when it published one — no bar, no
+            band, no substitute number when it is absent (ADR-105). */}
+        {t.confidence != null && <span> · source confidence {t.confidence}</span>}
+      </div>
+      {t.deprecated && (
+        <p className="tech-why">
+          <span className="k">Retired</span>
+          Withdrawn from the pinned ATT&amp;CK corpus
+          {t.revoked_by ? <> — replaced by <span className="data">{t.revoked_by}</span></> : null}. Shown so this finding keeps its reason.
+        </p>
+      )}
+      {t.rationale && (
+        <p className="tech-why"><span className="k">Why this mapping</span>{t.rationale}</p>
+      )}
+      {t.comments && (
+        <p className="tech-why"><span className="k">Source note</span>{t.comments}</p>
+      )}
+    </div>
   );
 }
 

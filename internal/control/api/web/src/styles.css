@@ -323,6 +323,22 @@ button:disabled { opacity:.55; cursor:not-allowed; }
 .evidence .kv dd { font-family:var(--mono); font-size:.76rem; border:0; padding:0; word-break:break-word; }
 .provenance { margin:.7rem 0 0; font-size:.75rem; color:var(--faint); }
 
+/* ---- ATT&CK techniques (finding detail, ADR-105) ----------------------- */
+/* Same card vocabulary as evidence: quiet surface, neutral border. Nothing
+   in this section carries severity colour or the nav accent — a technique is
+   context for a human, and it must not read as urgency. */
+.techniques { display:flex; flex-direction:column; gap:.6rem; }
+.tech-card { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:.85rem 1rem; }
+.tech-head { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; }
+.tech-id { font-family:var(--mono); font-size:.82rem; }
+.tech-name { font-weight:600; }
+.tech-meta { margin-top:.35rem; font-size:.76rem; color:var(--muted); }
+.tech-tactics { text-transform:capitalize; }
+.tech-why { margin:.55rem 0 0; font-size:.8rem; color:var(--muted); max-width:70ch; }
+.tech-why .k { display:block; color:var(--faint); font-size:.66rem; text-transform:uppercase; letter-spacing:.04em; margin-bottom:.15rem; }
+.tag.tech-retired { color:var(--faint); border-style:dashed; }
+.tech-unmapped { margin:.2rem 0 0; font-weight:600; color:var(--muted); }
+
 /* ---- tags, chips, notes ----------------------------------------------- */
 .tag {
   display:inline-block; padding:.1rem .5rem; border:1px solid var(--line-strong);
@@ -498,13 +514,14 @@ main.console { max-width:1440px; padding:1.4rem 1.6rem; }
 td.num.hot { color:var(--sev-high); }
 .exposure-cell { font-family:var(--mono); font-size:.72rem; color:var(--faint); }
 td.expand { text-align:right; }
-td.expand button { padding:.1rem .45rem; font-size:.9rem; line-height:1; background:transparent; color:var(--accent); border:0; }
-td.expand button:hover { background:var(--surface-2); }
-tr.evidence-row td { background:var(--surface-2); border-bottom:1px solid var(--line-strong); padding:.8rem 1rem 1rem; }
-tr.evidence-row .lbl { margin-bottom:.5rem; display:block; }
-.evidence-facts { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.8rem 1.4rem; font-size:.76rem; margin-bottom:.8rem; }
-.evidence-facts .k { color:var(--faint); font-size:.66rem; text-transform:uppercase; letter-spacing:.04em; }
-.evidence-facts .v { font-family:var(--mono); }
+td.expand a { display:inline-block; padding:.1rem .45rem; font-size:.9rem; line-height:1; color:var(--accent); border-radius:4px; }
+td.expand a:hover { background:var(--surface-2); text-decoration:none; }
+/* The triage ATT&CK cell: context beside the ranking, never inside it
+   (ADR-105 decision 5) — neutral colours only, nothing here uses the
+   severity scale or the accent. "unmapped" is a stated absence, not blank. */
+td.attack-cell { font-size:.74rem; white-space:nowrap; }
+td.attack-cell .data { font-size:.74rem; }
+td.attack-cell.unmapped { color:var(--faint); }
 .legend { margin-top:1rem; display:flex; gap:1.4rem; align-items:center; flex-wrap:wrap; font-size:.72rem; color:var(--muted); border-top:1px solid var(--line); padding-top:.75rem; }
 .legend .lbl { margin-right:.2rem; }
 .legend .end { margin-left:auto; color:var(--faint); }
@@ -527,7 +544,6 @@ tr.evidence-row .lbl { margin-bottom:.5rem; display:block; }
 @media (max-width:1000px) {
   .metric-strip { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .overview, .health-grid { grid-template-columns:1fr; }
-  .evidence-facts { grid-template-columns:repeat(2,minmax(0,1fr)); }
 }
 @media (max-width:640px) {
   .metric-strip { grid-template-columns:1fr; }

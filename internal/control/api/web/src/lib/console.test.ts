@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { advisory, ageRatio, applyTriageFilter, attention, confidenceBand, exactRead, groupPorts, isSeenOnly, kevInversion, provenanceAge, scanReadiness, score, sparkPath, stackSegments, tally, trendGeometry, worstFirst, yTicks } from "./console";
+import { advisory, ageRatio, applyTriageFilter, attackCell, attention, confidenceBand, exactRead, groupPorts, isSeenOnly, kevInversion, provenanceAge, scanReadiness, score, sparkPath, stackSegments, tally, trendGeometry, worstFirst, yTicks } from "./console";
 import type { FindingSummary, Health, KnowledgeFeed, ScanPoint } from "./api";
 
 const f = (over: Partial<FindingSummary>): FindingSummary => ({
@@ -32,6 +32,20 @@ describe("applyTriageFilter", () => {
     expect(applyTriageFilter(rows, { kevOnly: true, band: "", q: "" }).map((x) => x.id)).toEqual(["1"]);
     const hit = applyTriageFilter(rows, { kevOnly: false, band: "", q: "2007-2447" });
     expect(hit.map((x) => x.rank)).toEqual([2]);
+  });
+});
+
+describe("attackCell", () => {
+  it("joins technique ids for the compact column", () => {
+    expect(attackCell([{ id: "T1040" }, { id: "T1557" }])).toEqual({ text: "T1040 · T1557", unmapped: false });
+  });
+  it("renders [] as unmapped — no mapping held, never blank and never a verdict", () => {
+    // ADR-105 decision 4: [] means CVAP holds no mapping, NOT "no technique
+    // applies" — so the cell carries the word, not a dash or an absence.
+    expect(attackCell([])).toEqual({ text: "unmapped", unmapped: true });
+  });
+  it("keeps sub-technique ids verbatim", () => {
+    expect(attackCell([{ id: "T1190.001" }]).text).toBe("T1190.001");
   });
 });
 

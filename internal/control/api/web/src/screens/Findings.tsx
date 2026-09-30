@@ -3,9 +3,8 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, type FindingSummary } from "../lib/api";
 import { ExportButton } from "../components/ExportButton";
-import { EvidenceBlock } from "../components/Evidence";
 import { PageHead } from "../components/PageHead";
-import { applyTriageFilter, confidenceBand, score, type TriageFilter } from "../lib/console";
+import { applyTriageFilter, attackCell, confidenceBand, score, type TriageFilter } from "../lib/console";
 
 const STATUSES = ["open", "confirmed", "", "false_positive", "accepted_risk", "remediated", "closed"];
 const PAGE = 200;
@@ -17,7 +16,6 @@ export function Findings() {
   const [status, setStatus] = useState("open");
   const [severity, setSeverity] = useState("");
   const [filter, setFilter] = useState<TriageFilter>({ kevOnly: false, band: "", q: "" });
-  const [open, setOpen] = useState<string | null>(null);
 
   const qs = new URLSearchParams();
   if (status) qs.set("status", status);
@@ -99,15 +97,15 @@ export function Findings() {
           <thead>
             <tr>
               <th>Priority</th><th>Severity</th><th>Finding</th><th>Asset</th><th>Where</th>
-              <th>Confidence</th><th className="num">EPSS</th><th className="num">CVSS</th><th>Exposure</th><th>Status</th><th />
+              <th>Confidence</th><th className="num">EPSS</th><th className="num">CVSS</th><th>Exposure</th><th>ATT&amp;CK</th><th>Status</th><th />
             </tr>
           </thead>
           <tbody>
             {rows.map((f) => (
-              <Row key={f.id} f={f} rank={f.rank} open={open === f.id} onToggle={() => setOpen(open === f.id ? null : f.id)} />
+              <Row key={f.id} f={f} rank={f.rank} />
             ))}
             {rows.length === 0 && (
-              <tr className="empty"><td colSpan={11}>{data.findings.length ? "No findings match these filters within this page." : "No findings match these filters."}</td></tr>
+              <tr className="empty"><td colSpan={12}>{data.findings.length ? "No findings match these filters within this page." : "No findings match these filters."}</td></tr>
             )}
           </tbody>
         </table>
@@ -123,11 +121,14 @@ export function Findings() {
   );
 }
 
-function Row({ f, rank, open, onToggle }: { f: FindingSummary; rank: number; open: boolean; onToggle: () => void }) {
+function Row({ f, rank }: { f: FindingSummary; rank: number }) {
   const band = confidenceBand(f.confidence);
+  // ATT&CK is context beside the ranking, never inside it (ADR-105 decision
+  // 5): the cell renders after every column that carries priority, and
+  // nothing sorts, weights or colours by it.
+  const atk = attackCell(f.attack_techniques);
   return (
-    <>
-      <tr className={`frow frow-${f.severity}`}>
+    <tr className={`frow frow-${f.severity}`}>
         <td>
           <span className="rank">#{rank}</span>
           {f.kev && (
@@ -153,39 +154,18 @@ function Row({ f, rank, open, onToggle }: { f: FindingSummary; rank: number; ope
         <td className={`num${(f.epss ?? 0) >= 0.5 ? " hot" : ""}`}>{score(f.epss, 5)}</td>
         <td className="num">{score(f.cvss, 1)}</td>
         <td className="exposure-cell">{f.exposure_zones} zone{f.exposure_zones === 1 ? "" : "s"}</td>
+        <td
+          className={`attack-cell${atk.unmapped ? " unmapped" : ""}`}
+          title={atk.unmapped
+            ? "CVAP holds no ATT&CK mapping for this finding — not a claim that no technique applies"
+            : `inferred, not observed: ${f.attack_techniques.map((t) => `${t.id} ${t.name}`).join(", ")}`}
+        >
+          {atk.unmapped ? atk.text : <span className="data">{atk.text}</span>}
+        </td>
         <td className="muted">{f.status}</td>
         <td className="expand">
-          <button onClick={onToggle} aria-expanded={open} aria-label={open ? "hide evidence" : "show evidence"} title="evidence">{open ? "▾" : "›"}</button>
+          <Link to={`/findings/${f.id}`} aria-label="open finding" title="open finding">›</Link>
         </td>
       </tr>
-      {open && <EvidenceRow id={f.id} />}
-    </>
-  );
-}
-
-// Evidence one click away: the row fetches the finding it expands, so the
-// analyst confirms the claim without leaving the table or re-scanning.
-function EvidenceRow({ id }: { id: string }) {
-  const { data: f, isLoading, error } = useQuery({ queryKey: ["finding", id], queryFn: () => api.getFinding(id) });
-  return (
-    <tr className="evidence-row">
-      <td colSpan={11}>
-        <span className="lbl">Evidence — confirm without re-scanning</span>
-        {isLoading && <p className="muted">Loading…</p>}
-        {error && <p className="error">Could not load this finding's evidence.</p>}
-        {f && (
-          <>
-            <div className="evidence-facts">
-              <div><div className="k">claim</div><div className="v">{f.has_vuln_def ? "advisory-matched" : "rule / banner-inferred"}</div></div>
-              <div><div className="k">source</div><div className="v">{f.source}</div></div>
-              <div><div className="k">exploitation</div><div className="v">{f.kev ? `KEV${f.kev_date_added ? ` · added ${f.kev_date_added}` : ""}` : "not listed in KEV (unlisted, not known-unexploited)"}</div></div>
-              <div><div className="k">basis</div><div className="v">{f.priority_basis}</div></div>
-            </div>
-            <EvidenceBlock evidence={f.evidence ?? []} />
-            <p className="provenance"><Link to={`/findings/${f.id}`}>Open the full finding →</Link></p>
-          </>
-        )}
-      </td>
-    </tr>
   );
 }

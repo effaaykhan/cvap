@@ -38,6 +38,17 @@ export function applyTriageFilter(findings: FindingSummary[], f: TriageFilter): 
     );
 }
 
+// The triage ATT&CK cell (ADR-105): technique ids joined for the compact
+// column, and [] rendered as "unmapped" — CVAP holds no mapping for this
+// finding, which is NOT the claim that no technique applies (decision 4).
+// Never an input to order, severity or priority (decision 5): callers render
+// this beside the ranking, not inside it.
+export function attackCell(techniques: Array<{ id: string }>): { text: string; unmapped: boolean } {
+  return techniques.length
+    ? { text: techniques.map((t) => t.id).join(" · "), unmapped: false }
+    : { text: "unmapped", unmapped: true };
+}
+
 // EPSS/CVSS: null is UNSCORED — a dash, never 0 (ADR-069).
 export function score(v: number | null | undefined, digits: number): string {
   return v == null ? "—" : v.toFixed(digits);

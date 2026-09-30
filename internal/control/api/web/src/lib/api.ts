@@ -39,6 +39,7 @@ export type ScanPort = Schemas["ScanPortResponse"];
 export type BlockedScan = Schemas["BlockedScanResponse"];
 export type AssetRisk = Schemas["AssetRiskResponse"];
 export type Zone = Schemas["ZoneResponse"];
+export type Technique = Schemas["TechniqueResponse"];
 export type ScopeRule = Schemas["ScopeRuleResponse"];
 export type Policy = Schemas["PolicyResponse"];
 
