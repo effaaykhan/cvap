@@ -360,6 +360,10 @@ button:disabled { opacity:.55; cursor:not-allowed; }
   background:var(--surface); border-radius:6px; padding:.6rem .8rem;
   color:var(--muted); font-size:.8rem; margin:.75rem 0 0; max-width:70ch;
 }
+/* A note that follows a full-width table spans the same width, so its one
+   sentence stays one line on a desktop viewport instead of wrapping inside
+   a narrow box. Wraps normally when the viewport itself is narrow. */
+.note.note-wide { max-width:none; }
 .error { color:var(--danger); }
 code { background:var(--surface-2); padding:.06rem .35rem; border-radius:4px; font-size:.78rem; }
 

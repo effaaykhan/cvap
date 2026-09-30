@@ -129,7 +129,6 @@ export function FindingDetail() {
           <p className="muted">CVAP holds no mapping for this finding.</p>
         </>
       )}
-      {f.attack_technique_coverage && <p className="note">{f.attack_technique_coverage.statement}</p>}
 
       {f.remediation && (
         <>
@@ -159,7 +158,7 @@ export function FindingDetail() {
       ) : (
         <p className="muted">No zone exposure recorded.</p>
       )}
-      <p className="note">
+      <p className="note note-wide">
         Exposure lists the zones this finding was seen from. It is not an internet-reachability
         assessment — that is not yet computed.
       </p>
