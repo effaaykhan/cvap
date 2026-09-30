@@ -1241,6 +1241,43 @@ mechanism inside a third party — a planner node, a transport's buffer — it c
 a hypothesis (§5.17). Third-party mechanisms are where this happens most, because nobody can grep them.
 ([[measure-dont-read]]; [[explain-shows-one-of-two-plans]].)
 
+**A worked instance, S44 — and the first one caught in the same session it was made.** Asked to
+position the policy-form gap, the assistant wrote that a console form "doesn't fix an inventory
+that's 98% fictional". The number had appeared once as a rough aside in an earlier message and was
+restated as established fact in the next. The operator asked where it came from, which is the
+question that ends this pattern, and it was wrong three ways:
+
+- **Arithmetic.** The largest defensible "not confirmed real" figure on that estate is 483/512 =
+  94.3%. 98% was inflated.
+- **Category, and the worse one.** Of 512 addresses, 254 (49.6%) are `responder`, 229 (44.7%) are
+  `unknown`, 29 (5.7%) are `present`. `unknown` means *not convicted, not confirmed* — and
+  "fictional" asserts exactly what ADR-108 decision 4 forbids. Even `responder` is not "fictional":
+  ADR-108 says so in as many words, *"NOT 'nothing is here' — a claim this rule is not entitled to
+  make."*
+- **Provenance.** It was never measured, and was presented as though it had been.
+
+**The detail worth recording is that the CODE ALREADY REFUSED TO MAKE THE CLAIM THE PROSE MADE.**
+The `PresenceUnknown` branch of `domain.DecidePresence` exists for precisely this distinction and
+had been written two days earlier, in the same session, by the same author — after real data forced
+the correction from "answered anonymously therefore present" to "not convicted is not confirmed".
+The rule learned it; the prose did not. A guard in code constrains the code, and constrains nothing
+a person writes about the code.
+
+The data refutes it directly, which is the cheapest possible check and was available the whole time:
+**both of that estate's findings sit on `unknown` addresses.** `plaintext-telnet` and
+`plaintext-ftp` — live services, a rule fired on each — read `unknown` only because nothing returned
+a product string. `unknown` demonstrably contains real hosts, and filtering it from the asset list
+would have hidden two true findings.
+
+**What this adds to the pattern.** §5.21 was written about a suspect surviving *across* sessions in
+a backlog entry. This one travelled two messages. The mechanism is not elapsed time, it is
+restatement: the first mention was hedged ("~98%"), the second was not, and nothing in between
+looked like a claim being made. The applicable discipline is unchanged and simply tighter — **a
+figure in a status report carries its query or it is not a figure** — plus one addition: when the
+codebase contains a rule about exactly the claim being made, check the prose against the rule. It is
+the cheapest review available and it was one grep away.
+([[denormalised-copy-nobody-writes]].)
+
 ---
 
 ## 6. Standing requirement (from S23 onward)
