@@ -914,6 +914,7 @@ export interface components {
             running_release?: string;
         };
         AssetListResponse: {
+            address_presence?: components["schemas"]["PresenceSummaryResponse"];
             assets: components["schemas"]["AssetSummary"][];
             /** @description Cursor for the next page; pass as before with next_id. Absent on the last page. */
             next_before?: string | null;
@@ -1545,6 +1546,17 @@ export interface components {
             max_rate_pps?: number | null;
             name: string;
             safety_mode: string;
+        };
+        PresenceSummaryResponse: {
+            /** @description Addresses where a service identified itself. The defensible inventory. */
+            present: number;
+            /** @description Addresses whose answers carry the signature of one device answering for a range, or which are the network/broadcast address of a scanned prefix with nothing identified. SUPPRESSED from the estate, not deleted — the rows, services and history are intact and the per-address reason is on the row. */
+            responder: number;
+            statement: string;
+            /** @description Every live address, judged or not. This is the number CVAP used to report as its asset count. */
+            total: number;
+            /** @description Answered, but nothing identified itself and no responder signature either. Not convicted, not confirmed — and deliberately NOT counted as present. */
+            unknown: number;
         };
         ReleaseCoverageResponse: {
             /** @description 'feed' when the feed gave a real support window; 'feed-degenerate' when it returned only the release date (a placeholder for pre-ESM-tracking releases). */

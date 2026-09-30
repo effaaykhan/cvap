@@ -85,6 +85,12 @@ GO_SUITES = [
     # and filter deprecated techniques -- each the plausible version written by
     # someone who had not read decision 3 or 4.
     "internal/control/api/technique_coverage_test.go",
+    # Address presence (ADR-108/109). DB-free and the most load-bearing set in
+    # this file: the mutations restore ubiquity-as-the-rule (which deletes the
+    # best-managed estates first), the vacuous universal that suppresses an
+    # address with no ports, absence-of-evidence read as presence, and the line
+    # order that suppressed a real identified host on its first real run.
+    "internal/domain/presence_test.go",
     "internal/control/credential/phc_test.go",
     # bootstrap verifies its own login path; the mutation inverts the credential
     # check so a wrong password would pass — "a bootstrap that cannot log in has

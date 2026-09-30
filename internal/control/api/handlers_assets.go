@@ -56,6 +56,11 @@ type AssetListResponse struct {
 	Assets     []AssetSummary `json:"assets"`
 	NextBefore *string        `json:"next_before,omitempty" doc:"Cursor for the next page; pass as before with next_id. Absent on the last page."`
 	NextID     *string        `json:"next_id,omitempty"`
+
+	// Presence is the estate's composition by verdict (ADR-108 decision 6).
+	// It travels with the list because "512 assets" was the wrong number and a
+	// smaller number with no explanation would be the wrong number too.
+	Presence *PresenceSummaryResponse `json:"address_presence,omitempty"`
 }
 
 // AssetAddressResponse is one current address of an asset.
@@ -187,9 +192,17 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 
 	tenant, _ := tenantFrom(r.Context())
 	var page *store.AssetPage
+	var presence store.PresenceSummary
 	err := s.db.Read(r.Context(), tenant, func(ctx context.Context, c *store.Conn) error {
 		var err error
-		page, err = (store.Assets{}).List(ctx, c, filter, before, beforeID, limit)
+		if page, err = (store.Assets{}).List(ctx, c, filter, before, beforeID, limit); err != nil {
+			return err
+		}
+		// The estate's composition, in the same transaction as the page it
+		// qualifies (ADR-108 decision 6). A count read separately would describe a
+		// network that may have moved between the two reads, and the whole point
+		// of this number is that it is the honest one.
+		presence, err = (store.Presence{}).Summary(ctx, c)
 		return err
 	})
 	if err != nil {
@@ -201,6 +214,8 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	for i := range page.Assets {
 		out.Assets = append(out.Assets, assetSummary(&page.Assets[i]))
 	}
+	pr := presenceSummaryResponse(presence)
+	out.Presence = &pr
 	setKeysetNext(&out.NextBefore, &out.NextID, page.NextBefore, page.NextID)
 	writeJSON(w, r, s.log, http.StatusOK, out)
 }
