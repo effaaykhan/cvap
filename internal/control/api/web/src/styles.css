@@ -186,7 +186,7 @@ h2 {
   font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.09em;
   color:var(--muted); margin:1.75rem 0 .6rem;
 }
-.detail h1 { display:flex; align-items:center; gap:.6rem; }
+.detail h1 { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; overflow-wrap:anywhere; }
 .muted { color:var(--muted); } .faint { color:var(--faint); }
 .small { font-size:.8rem; }
 
@@ -308,10 +308,13 @@ button:disabled { opacity:.55; cursor:not-allowed; }
   display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr));
   gap:.1rem 2rem; margin:1rem 0; border-top:1px solid var(--line);
 }
-.kv { display:flex; gap:.75rem; padding:.45rem 0; border-bottom:1px solid var(--line); }
+.kv { display:flex; gap:.75rem; padding:.45rem 0; border-bottom:1px solid var(--line); min-width:0; }
 .kv dt { color:var(--faint); min-width:104px; font-size:.75rem; text-transform:uppercase; letter-spacing:.04em; padding-top:.05rem; }
-.kv dd { margin:0; }
+.kv dd { margin:0; min-width:0; overflow-wrap:anywhere; }
 .kv dd code, .kv dd .data { font-family:var(--mono); font-size:.78rem; }
+/* The dedup key gets its own full-width line under its own heading: it is
+   long by construction and would otherwise crush the fact grid. */
+.dedup-val { display:block; padding:.45rem .6rem; font-size:.78rem; word-break:break-all; }
 
 /* ---- evidence ---------------------------------------------------------- */
 .evidence { display:flex; flex-direction:column; gap:.6rem; }
@@ -334,7 +337,7 @@ button:disabled { opacity:.55; cursor:not-allowed; }
 .tech-name { font-weight:600; }
 .tech-meta { margin-top:.35rem; font-size:.76rem; color:var(--muted); }
 .tech-tactics { text-transform:capitalize; }
-.tech-why { margin:.55rem 0 0; font-size:.8rem; color:var(--muted); max-width:70ch; }
+.tech-why { margin:.55rem 0 0; font-size:.8rem; color:var(--muted); max-width:70ch; overflow-wrap:break-word; }
 .tech-why .k { display:block; color:var(--faint); font-size:.66rem; text-transform:uppercase; letter-spacing:.04em; margin-bottom:.15rem; }
 .tag.tech-retired { color:var(--faint); border-style:dashed; }
 .tech-unmapped { margin:.2rem 0 0; font-weight:600; color:var(--muted); }

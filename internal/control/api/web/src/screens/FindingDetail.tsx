@@ -24,23 +24,38 @@ export function FindingDetail() {
         <h1><span className={`sev sev-${f.severity}`}>{f.severity}</span> {f.rule}</h1>
         <span className="tag">{f.status}</span>
       </div>
+      {/* The page's three visual registers, used consistently below: a fact
+          grid for metadata, a structured card for ATT&CK and raw evidence,
+          and a plain section for prose. */}
+      <h2>Finding facts</h2>
       <dl className="facts">
         <div className="kv"><dt>Asset</dt><dd><Link to={`/assets/${f.asset_id}`}>{f.asset_hostname || f.asset_id}</Link></dd></div>
         <div className="kv"><dt>Where</dt><dd className="data">{f.instance_locator || "—"}</dd></div>
         <div className="kv"><dt>Category</dt><dd>{f.category}</dd></div>
+        <div className="kv"><dt>Confidence</dt><dd><Confidence value={f.confidence} /></dd></div>
+      </dl>
+
+      <h2>Finding context</h2>
+      <dl className="facts">
         <div className="kv"><dt>Claim</dt><dd>{f.has_vuln_def ? "advisory-matched" : "rule / banner-inferred"}</dd></div>
         <div className="kv"><dt>Source</dt><dd>{f.source}</dd></div>
-        <div className="kv"><dt>Confidence</dt><dd><Confidence value={f.confidence} /></dd></div>
         {f.cwe && <div className="kv"><dt>CWE</dt><dd>{f.cwe}</dd></div>}
-        <div className="kv"><dt>Dedup key</dt><dd><code>{f.dedup_key}</code></dd></div>
         <div className="kv"><dt>First seen</dt><dd>{fmt(f.first_seen)}</dd></div>
         <div className="kv"><dt>Last seen</dt><dd>{fmt(f.last_seen)}</dd></div>
       </dl>
 
-      {/* Priority for every finding, not only advisory-matched ones: the KEV
-          line and the basis are what the triage table's expanded row used to
-          show for all findings, and they read honestly for a configuration
-          rule too. EPSS/CVSS stay gated — they exist only with a vuln def. */}
+      <h2>Dedup key</h2>
+      {/* Long by construction (ADR-010: the identity this finding persists
+          under across scans) — a full-width line that wraps freely, never
+          crushed into a fact cell. */}
+      <code className="dedup-val">{f.dedup_key}</code>
+
+      {/* Priority for every finding, not only advisory-matched ones. All
+          four cells always render so the section keeps one shape; a finding
+          without a vuln def shows an em dash for EPSS/CVSS because those
+          scores exist only against a CVE — the dash is "does not apply
+          here", distinct from the unscored/unknown wording a matched
+          finding gets (ADR-069). */}
       <h2>Priority</h2>
       <dl className="facts">
             <div className="kv">
@@ -59,30 +74,36 @@ export function FindingDetail() {
                 )}
               </dd>
             </div>
-            {f.has_vuln_def && (
-              <div className="kv">
-                <dt>EPSS</dt>
-                <dd>
-                  {f.epss == null ? (
-                    <span className="muted">Unscored (no signal — not low probability)</span>
-                  ) : (
-                    <>
-                      {f.epss.toFixed(5)}
-                      {f.epss_percentile != null && (
-                        <span className="muted"> · {(f.epss_percentile * 100).toFixed(1)}th percentile</span>
-                      )}
-                    </>
-                  )}
-                </dd>
-              </div>
-            )}
-            {f.has_vuln_def && (
-              <div className="kv">
-                <dt>CVSS</dt>
-                <dd>{f.cvss == null ? <span className="muted">Unknown</span> : f.cvss}</dd>
-              </div>
-            )}
             <div className="kv"><dt>Basis</dt><dd>{f.priority_basis}</dd></div>
+            <div className="kv">
+              <dt>EPSS</dt>
+              <dd>
+                {f.epss != null ? (
+                  <>
+                    {f.epss.toFixed(5)}
+                    {f.epss_percentile != null && (
+                      <span className="muted"> · {(f.epss_percentile * 100).toFixed(1)}th percentile</span>
+                    )}
+                  </>
+                ) : f.has_vuln_def ? (
+                  <span className="muted">Unscored (no signal — not low probability)</span>
+                ) : (
+                  <span className="muted" title="no vulnerability definition, so EPSS has nothing to score">—</span>
+                )}
+              </dd>
+            </div>
+            <div className="kv">
+              <dt>CVSS</dt>
+              <dd>
+                {f.cvss != null ? (
+                  f.cvss
+                ) : f.has_vuln_def ? (
+                  <span className="muted">Unknown</span>
+                ) : (
+                  <span className="muted" title="no vulnerability definition, so no CVSS vector exists">—</span>
+                )}
+              </dd>
+            </div>
       </dl>
 
       <h2>ATT&amp;CK techniques</h2>
