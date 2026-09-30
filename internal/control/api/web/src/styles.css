@@ -342,7 +342,8 @@ button:disabled { opacity:.55; cursor:not-allowed; }
 .tech-head { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; }
 .tech-id { font-family:var(--mono); font-size:.82rem; }
 .tech-name { font-weight:600; }
-.tech-meta { margin-top:.35rem; font-size:.76rem; color:var(--muted); }
+.tech-meta { margin-top:.35rem; font-size:.76rem; color:var(--muted); display:flex; flex-direction:column; gap:.15rem; }
+.tech-k { color:var(--faint); }
 .tech-tactics { text-transform:capitalize; }
 .tech-why { margin:.55rem 0 0; font-size:.8rem; color:var(--muted); max-width:70ch; overflow-wrap:break-word; }
 .tech-why .k { display:block; color:var(--faint); font-size:.66rem; text-transform:uppercase; letter-spacing:.04em; margin-bottom:.15rem; }

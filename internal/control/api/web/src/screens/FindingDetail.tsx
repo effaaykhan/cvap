@@ -186,12 +186,14 @@ function TechniqueCard({ t }: { t: Technique }) {
         {t.deprecated && <span className="tag tech-retired">retired</span>}
       </div>
       <div className="tech-meta">
-        <span className="tech-tactics">{t.tactics.map((x) => x.replace(/-/g, " ")).join(" · ")}</span>
-        <span> · source: {t.source}</span>
-        {t.mapping_type && <span> · {t.mapping_type}</span>}
-        {/* The source's confidence, only when it published one — no bar, no
-            band, no substitute number when it is absent (ADR-105). */}
-        {t.confidence != null && <span> · source confidence {t.confidence}</span>}
+        <div><span className="tech-k">Tactics:</span> <span className="tech-tactics">{t.tactics.map((x) => x.replace(/-/g, " ")).join(" · ")}</span></div>
+        <div>
+          <span className="tech-k">Source:</span> {t.source}
+          {t.mapping_type && <> · {t.mapping_type}</>}
+          {/* The source's confidence, only when it published one — no bar, no
+              band, no substitute number when it is absent (ADR-105). */}
+          {t.confidence != null && <> · source confidence {t.confidence}</>}
+        </div>
       </div>
       {t.deprecated && (
         <p className="tech-why">
