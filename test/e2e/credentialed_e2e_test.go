@@ -124,8 +124,8 @@ func TestCredentialedInventoryOverTheWire(t *testing.T) {
 	eventually(t, "the grant record to close on the attestation", 20*time.Second, func() bool {
 		return h.grantZeroised()
 	})
-	if src := h.auditDetail("credential.granted", "trust_source"); src != "observed" {
-		t.Errorf("credential.granted trust_source = %q, want observed", src)
+	if src := h.auditDetail("credential.issued", "trust_source"); src != "observed" {
+		t.Errorf("credential.issued trust_source = %q, want observed", src)
 	}
 	if n := h.auditCount("scan_point.credentials_not_attested"); n != 0 {
 		t.Errorf("%d credentials_not_attested event(s); the runtime attested over creds and agents", n)

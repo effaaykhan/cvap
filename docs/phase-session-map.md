@@ -1319,6 +1319,20 @@ count *is* a measurement — of whatever the matcher happened to match. **A brok
 zero looks exactly like a clean result**, and a heuristic answering a slightly wrong question looks
 exactly like a finding.
 
+**The criterion is the finding, and it is the same lesson as the regex arriving from the other
+side.** `Record\w+\(` failed to match a real thing; `err_after` matched four unreal ones. Both were
+instruments trusted without being checked against a known answer, and both would have pointed the
+fix in a wrong direction — one at absent audits that were present, the other at four designs that
+were correct. The difference between them is what to take away:
+
+> **`a record, then an error return later` matches SHAPE. `does the record describe something
+> outside this transaction's control` matches MEANING.** The first is greppable and wrong. The
+> second needs reading each site and is right.
+
+A shape-matcher is the only kind a census can run at scale, which is exactly why its output is a
+list of *candidates* and never a list of *findings*. The reading is not an optional second pass; it
+is where the classification happens.
+
 **How to apply.** A census that reports "N sites have no X" is asserting absence, and absence is the
 default output of a matcher that is broken, mis-scoped or asking the wrong question. Before trusting
 it: **run the matcher against a known positive** and confirm it fires. Then, for anything it
@@ -1326,6 +1340,45 @@ classifies as a defect, read the code — a heuristic proposes candidates, it do
 This is absence-is-not-evidence (ADR-069's rule for KEV, ADR-105's for techniques) turned on our own
 instruments rather than on product data, and it is the first instance of that direction.
 ([[denormalised-copy-nobody-writes]]; [[test-that-proves-nothing]].)
+
+### 5.24 A test that encodes a defect as correct behaviour protects it better than no test would
+
+**What happened (S44).** `credential.granted` was written inside offerWork's transaction and
+committed, asserting a delivery that happens after that transaction — and fails, at 4 of 9 trials,
+when the outbound queue is full. The audit named a fingerprint that received nothing.
+
+It had a test. `TestResolvedMaterialIsErasedWhenTheSendIsRefused` drove exactly that path — a
+refused send — and asserted:
+
+```go
+// The grant row and audit event were written in the transaction, which is
+// correct — the release was decided — and the drop is logged by offerWork.
+if events["credential.granted"] == nil {
+    t.Error("no credential.granted event for a grant that was issued (and then dropped)")
+```
+
+The test **required** the wrong audit, and a comment explained why it was right. The reasoning is
+not stupid — the release *was* decided, and something should record that — it is just answering a
+different question from the one the audit's name answers.
+
+**Why this is worse than an untested defect.** An untested defect is an oversight; anyone who
+notices it can fix it. This one was guarded: removing the overclaim broke a passing test carrying a
+reasoned justification, so the next person to look would have concluded the behaviour was
+deliberate and moved on. It converts *nobody noticed* into *somebody decided*, and the second is far
+harder to reverse.
+
+**How it is distinct from §5.7's family.** Those entries are about tests that prove nothing — a
+sabotage survives, an acceptance was already true. This one proved something, reliably, and the
+something was wrong. A mutation gate does not catch it either: mutate the behaviour and the test
+fails, which reads as the guard working.
+
+**How to apply.** When a defect is found in code that has a test covering that exact path, read the
+test before the fix and expect to change it — and treat "the test says this is correct" as a claim
+to check rather than a reason to stop. The tell is a test asserting the *presence* of a record whose
+NAME makes a claim the code cannot support at that point: `granted` written before the send,
+`delivered` before delivery, `confirmed` before confirmation. The fix here split the claim in two so
+the trail says what happened, and the same test now asserts the opposite of what it used to —
+issued, not delivered, and a reason.
 
 ---
 

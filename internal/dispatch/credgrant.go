@@ -59,14 +59,36 @@ type pendingGrant struct {
 	// dequeued it, so the runtime received a grant of zeros. A test that read
 	// the bytes at Send caught it.
 	queued bool
+
+	// undelivered is set by discard() and read after the send pass, so the
+	// reason reaches the audit rather than only the log.
+	undelivered discardReason
 }
 
-func (p *pendingGrant) discard() {
+// discardReason says WHY a grant never reached a scan point. Queue full is a
+// different operational fact from a lease lost or a stream that ended, and the
+// undelivered case is one an operator eventually asks about; a single
+// "undelivered" with no reason sends them to the logs to reconstruct it.
+type discardReason string
+
+const (
+	discardQueueFullAssignment discardReason = "outbound queue full before the assignment"
+	discardQueueFullGrant      discardReason = "outbound queue full after the assignment, before the grant"
+	discardPassRolledBack      discardReason = "the dispatch transaction rolled back"
+	discardStreamEnded         discardReason = "the stream ended before the grant was dequeued"
+)
+
+// discard erases the material and records why it never went.
+//
+// The erase is unconditional and first: whatever the reason, the bytes must not
+// outlive the decision not to send them (non-negotiable #8).
+func (p *pendingGrant) discard(why discardReason) {
 	if p == nil || p.grant == nil {
 		return
 	}
 	clear(p.grant.Material)
 	p.grant.Material = nil
+	p.undelivered = why
 }
 
 // eraseGrantMaterial is called by the send loop after stream.Send has returned
@@ -173,19 +195,30 @@ func (s *Service) credentialedAssignment(ctx context.Context, c *store.Conn, ses
 		TTL:                    CredentialGrantTTL,
 	})
 	if err != nil {
-		pending.discard()
+		pending.discard(discardPassRolledBack)
 		return nil, err
 	}
 	grant.GrantId = grantID.String()
 	grant.ExpiresUnix = expires.Unix()
 
-	// The claim the runtime enforces and the auditor reads, in the same
-	// transaction as the release it describes. No material, no ref: the
-	// profile id is the pointer an auditor follows.
+	// ISSUE, not delivery. The two are separate events because they are separate
+	// facts, and this one commits before the send is even attempted.
+	//
+	// It used to be `credential.granted`, written here and asserting a delivery
+	// that happens after this transaction commits — and that fails, measured at 4
+	// of 9 trials, when the outbound queue is full (B52). A record that is merely
+	// missing is a gap; one that says a secret reached a fingerprint it never
+	// reached is evidence pointing at the wrong conclusion, and "the audit said
+	// granted" is the sentence that matters in an incident.
+	//
+	// The names are deliberately unmissable: `credential.issued` and
+	// `credential.delivered`, so an operator does not have to know the ordering
+	// to read them. No material, no ref: the profile id is the pointer an
+	// auditor follows.
 	jobID := j.ID
 	if err := (store.AuditEvents{}).Record(ctx, c, store.AuditEvent{
 		ActorType:    store.ActorSystem,
-		Action:       "credential.granted",
+		Action:       "credential.issued",
 		ResourceType: "scan_job",
 		ResourceID:   &jobID,
 		Detail: map[string]any{
@@ -200,7 +233,7 @@ func (s *Service) credentialedAssignment(ctx context.Context, c *store.Conn, ses
 			"expires_at":            expires.UTC().Format(time.RFC3339),
 		},
 	}); err != nil {
-		pending.discard()
+		pending.discard(discardPassRolledBack)
 		return nil, err
 	}
 

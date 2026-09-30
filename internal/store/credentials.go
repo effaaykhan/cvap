@@ -218,6 +218,51 @@ func (CredentialGrants) Issue(ctx context.Context, c *Conn, g GrantIssue) (uuid.
 // behind rather than paper over. And only for the recipient: the fingerprint is
 // what the TLS layer authenticated, so a scan point that never received a grant
 // cannot close the record of it by naming the job.
+// MarkDelivered records that a grant's material actually reached the outbound
+// stream (ADR-101's class, 0053).
+//
+// Separate from Issue because issue and delivery are two facts and the row used
+// to carry only the first while the audit asserted the second. Measured at 4 of 9
+// trials: the transaction commits, `trySend` then finds the outbound queue full,
+// the material is erased, and nothing had recorded that it never went.
+//
+// Idempotent on the first write — `delivered_at IS NULL` in the predicate — so a
+// retry cannot move the timestamp forward and make a late delivery look prompt.
+func (CredentialGrants) MarkDelivered(ctx context.Context, c *Conn, grantID uuid.UUID, at time.Time) error {
+	const q = `
+		UPDATE credential_grants
+		   SET delivered_at = $3
+		 WHERE tenant_id = $1 AND grant_id = $2 AND delivered_at IS NULL`
+	_, err := c.Exec(ctx, q, c.Tenant().UUID(), grantID, at.UTC())
+	return mapError(err)
+}
+
+// Undelivered lists grants that were issued and never reached a scan point. The
+// question an operator asks after a dispatch storm, and the reason delivery is a
+// column rather than the absence of a second audit event: a state derived by
+// joining one event against the absence of another is one every caller
+// re-derives differently.
+func (CredentialGrants) Undelivered(ctx context.Context, c *Conn, limit int) ([]uuid.UUID, error) {
+	const q = `
+		SELECT grant_id FROM credential_grants
+		 WHERE tenant_id = $1 AND delivered_at IS NULL
+		 ORDER BY issued_at DESC LIMIT $2`
+	rows, err := c.Query(ctx, q, c.Tenant().UUID(), limit)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, mapError(err)
+		}
+		out = append(out, id)
+	}
+	return out, mapError(rows.Err())
+}
+
 func (CredentialGrants) MarkZeroised(ctx context.Context, c *Conn, jobID uuid.UUID, deliveredToFingerprint string, at time.Time) error {
 	if deliveredToFingerprint == "" {
 		return errors.New("store: MarkZeroised needs the attesting scan point's fingerprint")

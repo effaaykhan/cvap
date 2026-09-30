@@ -304,9 +304,9 @@ func TestHostJobTravelsWithItsGrantAndCoreErasesItsCopy(t *testing.T) {
 		t.Error("delivered_to_fingerprint is empty; the recipient of a secret must be recorded")
 	}
 	events := auditActions(t, db, tenant, jobID)
-	granted, ok := events["credential.granted"]
+	granted, ok := events["credential.issued"]
 	if !ok {
-		t.Fatal("no credential.granted audit event")
+		t.Fatal("no credential.issued audit event")
 	}
 	if granted["trust_source"] != "observed" {
 		t.Errorf("audit trust_source = %v, want observed — the audit must record the same claim the wire carries", granted["trust_source"])
@@ -407,8 +407,8 @@ func TestOperatorPinnedKnownHostsOutranksTheObservedKey(t *testing.T) {
 	if strings.Contains(material, "unrelated") {
 		t.Error("a pin line for a host outside the job travelled with it; trust material is per task")
 	}
-	if events := auditActions(t, db, tenant, jobID); events["credential.granted"]["trust_source"] != "operator" {
-		t.Errorf("audit trust_source = %v, want operator", events["credential.granted"]["trust_source"])
+	if events := auditActions(t, db, tenant, jobID); events["credential.issued"]["trust_source"] != "operator" {
+		t.Errorf("audit trust_source = %v, want operator", events["credential.issued"]["trust_source"])
 	}
 	fs.closeInbound()
 	cancel()
@@ -561,10 +561,31 @@ func TestResolvedMaterialIsErasedWhenTheSendIsRefused(t *testing.T) {
 	if !allZero(tr.handed[0]) {
 		t.Fatal("the resolved secret survived a refused send: Core holds material it will never deliver")
 	}
-	// The grant row and audit event were written in the transaction, which is
-	// correct — the release was decided — and the drop is logged by offerWork.
-	if events := auditActions(t, db, tenant, jobID); events["credential.granted"] == nil {
-		t.Error("no credential.granted event for a grant that was issued (and then dropped)")
+	// THIS ASSERTION USED TO ENCODE THE DEFECT.
+	//
+	// It read: "the grant row and audit event were written in the transaction,
+	// which is correct — the release was decided", and required
+	// `credential.granted` to be present for a grant that was dropped. B52 then
+	// measured what that costs: the event asserts a delivery to a fingerprint
+	// that never received anything, 4 times in 9. A missing audit is a gap; one
+	// that says a secret arrived where it did not is evidence pointing at the
+	// wrong conclusion, and this is the credential path.
+	//
+	// The claim is now split, so the trail says what happened: issued, then NOT
+	// delivered, with the reason.
+	events := auditActions(t, db, tenant, jobID)
+	if events["credential.issued"] == nil {
+		t.Error("no credential.issued event: the release WAS decided and that fact is still recorded")
+	}
+	if events["credential.delivered"] != nil {
+		t.Error("credential.delivered was written for a grant whose send was refused — the exact overclaim the split removes")
+	}
+	undelivered := events["credential.undelivered"]
+	if undelivered == nil {
+		t.Fatal("no credential.undelivered event: a grant that never went must say so, not merely omit the delivery")
+	}
+	if r, _ := undelivered["reason"].(string); r == "" {
+		t.Error("credential.undelivered carries no reason; queue-full, lease-lost and stream-ended are different operational facts and an operator will ask which")
 	}
 }
 

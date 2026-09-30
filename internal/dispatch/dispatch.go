@@ -1134,7 +1134,7 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 	defer func() {
 		for _, g := range grants {
 			if !g.queued {
-				g.discard()
+				g.discard(discardStreamEnded)
 			}
 		}
 	}()
@@ -1367,16 +1367,107 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 		if !s.trySend(out, &scanpointv1.CoreMessage{Msg: &scanpointv1.CoreMessage_Job{Job: a}}) {
 			s.log.WarnContext(ctx, "outbound queue full; credentialed assignment dropped with its grant",
 				slog.String("job_id", a.GetJobId()))
-			g.discard()
+			g.discard(discardQueueFullAssignment)
 			continue
 		}
 		if !s.trySend(out, &scanpointv1.CoreMessage{Msg: &scanpointv1.CoreMessage_Credential{Credential: g.grant}}) {
 			s.log.WarnContext(ctx, "outbound queue full; credential grant dropped after its assignment",
 				slog.String("job_id", a.GetJobId()), slog.String("grant_id", g.grant.GetGrantId()))
-			g.discard()
+			g.discard(discardQueueFullGrant)
 			continue
 		}
 		g.queued = true
+	}
+
+	// DELIVERY, recorded after the send pass and never before it.
+	//
+	// This is the half `credential.issued` deliberately does not claim. A grant
+	// reaches here only if both its assignment and its material were accepted by
+	// the outbound queue; anything else carries a discard reason instead, and
+	// gets an event saying so rather than silence. The two are written together
+	// in one transaction because they are one pass over one decision, and
+	// because an operator reading the trail wants both halves at the same
+	// timestamp.
+	//
+	// Outside the dispatch transaction on purpose: it describes what happened
+	// AFTER that transaction committed, and folding it back in would recreate
+	// the defect this split exists to remove.
+	s.recordGrantDelivery(ctx, sess, grants)
+}
+
+// recordGrantDelivery marks delivered grants on the row and writes one audit
+// event per grant — `credential.delivered` or `credential.undelivered` with the
+// reason.
+//
+// Best effort, and logged rather than returned: the work is already dispatched,
+// the material has already gone or already been erased, and failing the pass here
+// would change nothing about either. What it must not do is stay silent, which is
+// what the previous code did.
+func (s *Service) recordGrantDelivery(ctx context.Context, sess *session, grants []*pendingGrant) {
+	if len(grants) == 0 {
+		return
+	}
+	now := s.now()
+	if err := s.db.WriteWithin(ctx, sess.tenant, dispatchBudget, func(ctx context.Context, c *store.Conn) error {
+		for _, g := range grants {
+			if g == nil || g.grant == nil {
+				continue
+			}
+			grantID, perr := uuid.Parse(g.grant.GetGrantId())
+			if perr != nil {
+				continue
+			}
+			// The resource is the JOB, and if the job id cannot be parsed the
+			// event carries no resource id rather than a plausible-looking one.
+			// The first draft of this function defaulted it to the grant id,
+			// which would have written a `scan_job` resource pointing at a
+			// credential grant — a wrong audit, which is the exact defect this
+			// split exists to remove, reintroduced inside the fix for it.
+			var jobID *uuid.UUID
+			if g.assignment != nil {
+				if jid, e := uuid.Parse(g.assignment.GetJobId()); e == nil {
+					jobID = &jid
+				}
+			}
+			if g.queued {
+				if err := (store.CredentialGrants{}).MarkDelivered(ctx, c, grantID, now); err != nil {
+					return err
+				}
+				if err := (store.AuditEvents{}).Record(ctx, c, store.AuditEvent{
+					ActorType: store.ActorSystem, Action: "credential.delivered",
+					ResourceType: "scan_job", ResourceID: jobID,
+					Detail: map[string]any{
+						"grant_id":      grantID.String(),
+						"scan_point_id": sess.spID.String(),
+					},
+				}); err != nil {
+					return err
+				}
+				continue
+			}
+			// Never sent. The row keeps delivered_at NULL, which is what makes
+			// "issued but never delivered" queryable without joining an event
+			// against the absence of another.
+			reason := string(g.undelivered)
+			if reason == "" {
+				reason = "undelivered, reason not recorded"
+			}
+			if err := (store.AuditEvents{}).Record(ctx, c, store.AuditEvent{
+				ActorType: store.ActorSystem, Action: "credential.undelivered",
+				ResourceType: "scan_job", ResourceID: jobID,
+				Detail: map[string]any{
+					"grant_id":      grantID.String(),
+					"scan_point_id": sess.spID.String(),
+					"reason":        reason,
+				},
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		s.log.ErrorContext(ctx, "grant delivery outcome could not be recorded",
+			slog.Any("error", err), slog.Int("grants", len(grants)))
 	}
 }
 
