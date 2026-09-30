@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, type MouseEvent, type ReactNode } from "react";
 import { Link, NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./lib/auth";
 import { has } from "./lib/api";
@@ -137,6 +137,23 @@ export function App() {
     });
   };
 
+  // Clicking the page outside an expanded sidebar collapses it, through the
+  // same persisted path as the hamburger. Navigation itself no longer does.
+  const collapseOnOutsideClick = () => {
+    if (!collapsed) toggleSidebar();
+  };
+
+  // Collapsed-rail tooltip: one fixed-position element rendered from state,
+  // because .sidebar/.side-item clip with overflow:hidden and the native
+  // title tooltip is too slow to appear.
+  const [tip, setTip] = useState<{ label: string; top: number; left: number } | null>(null);
+  const showTip = (label: string) => (e: MouseEvent<HTMLElement>) => {
+    if (!collapsed) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    setTip({ label, top: r.top + r.height / 2, left: r.right + 10 });
+  };
+  const hideTip = () => setTip(null);
+
   if (loading) return <div className="center">Loading…</div>;
   if (mustChange) return <ChangePassword />;
   if (!session) return <Login />;
@@ -176,24 +193,49 @@ export function App() {
         </div>
         <nav className="side-nav">
           {nav.filter(([, , ok]) => ok).map(([to, label, , icon]) => (
-            <NavLink key={to} to={to} end={to === "/"} className="side-item" title={label}>
+            <NavLink
+              key={to}
+              to={to}
+              end={to === "/"}
+              className="side-item"
+              aria-label={collapsed ? label : undefined}
+              onMouseEnter={showTip(label)}
+              onMouseLeave={hideTip}
+            >
               <span className="side-icon">{icon}</span>
               <span className="side-label">{label}</span>
             </NavLink>
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <NavLink to="/settings" className="side-item" title="Settings">
+          <NavLink
+            to="/settings"
+            className="side-item"
+            aria-label={collapsed ? "Settings" : undefined}
+            onMouseEnter={showTip("Settings")}
+            onMouseLeave={hideTip}
+          >
             <span className="side-icon">{icons.settings}</span>
             <span className="side-label">Settings</span>
           </NavLink>
-          <button className="side-item" onClick={() => void logout()} title="Sign out">
+          <button
+            className="side-item"
+            onClick={() => void logout()}
+            aria-label={collapsed ? "Sign out" : undefined}
+            onMouseEnter={showTip("Sign out")}
+            onMouseLeave={hideTip}
+          >
             <span className="side-icon">{icons.signout}</span>
             <span className="side-label">Sign out</span>
           </button>
         </div>
       </aside>
-      <div className="main-col">
+      {collapsed && tip && (
+        <div className="side-tip" role="tooltip" style={{ top: tip.top, left: tip.left }}>
+          {tip.label}
+        </div>
+      )}
+      <div className="main-col" onClick={collapseOnOutsideClick}>
         <header>
           <span className="who">
             {has(session, "scan.create") && <Link className="new-scan" to="/scans">New scan</Link>}
@@ -230,20 +272,6 @@ export function App() {
                 </Icon>
               </span>
               <span className="email">{session.email}</span>
-              <span className="chev" aria-hidden="true">
-                <svg
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M6 9l6 6 6-6" />
-                </svg>
-              </span>
             </span>
           </span>
         </header>

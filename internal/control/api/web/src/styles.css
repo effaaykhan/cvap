@@ -126,6 +126,18 @@ code, .mono { font-family:var(--mono); }
   border-radius:2px; background:var(--nav-accent);
 }
 .nav-collapsed .side-label, .nav-collapsed .sidebar-top .brand { display:none; }
+/* Collapsed-rail tooltip. Fixed so the sidebar's overflow:hidden cannot clip
+   it and it reserves no layout space; deliberately soft white in both themes
+   so it floats above the dark chrome, and pointer-events:none so it can never
+   swallow the click it sits over. */
+.side-tip {
+  position:fixed; z-index:20; transform:translateY(-50%);
+  padding:.32rem .6rem; border-radius:6px;
+  background:#f5f7fa; color:#07111d; border:1px solid #d7dce3;
+  box-shadow:0 4px 12px rgba(0,0,0,.35);
+  font:500 .78rem/1.4 var(--sans);
+  white-space:nowrap; pointer-events:none;
+}
 .nav-collapsed .side-item { justify-content:center; padding:.5rem 0; }
 .nav-collapsed .sidebar-top { justify-content:center; padding:0; }
 
@@ -138,13 +150,13 @@ code, .mono { font-family:var(--mono); }
 .who .new-scan {
   display:inline-block; padding:.3rem .7rem; border-radius:6px;
   font-size:.76rem; font-weight:600; line-height:1.4;
-  color:var(--nav-accent);
+  color:#fff;
   background:color-mix(in srgb, var(--nav-accent) 14%, transparent);
   border:1px solid color-mix(in srgb, var(--nav-accent) 38%, transparent);
 }
 .who .new-scan:hover {
   background:color-mix(in srgb, var(--nav-accent) 22%, transparent);
-  color:var(--nav-accent); text-decoration:none;
+  color:#fff; text-decoration:none;
 }
 .theme-seg {
   display:inline-flex; align-items:stretch; overflow:hidden;
@@ -166,7 +178,6 @@ code, .mono { font-family:var(--mono); }
   background:color-mix(in srgb, var(--nav-accent) 16%, transparent);
   border:1px solid color-mix(in srgb, var(--nav-accent) 40%, transparent);
 }
-.profile .chev { display:grid; place-items:center; color:var(--muted); }
 main { padding:1.5rem 1.25rem; max-width:1180px; }
 
 /* ---- type scale -------------------------------------------------------- */
