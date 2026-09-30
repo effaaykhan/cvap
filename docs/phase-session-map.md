@@ -1278,6 +1278,55 @@ codebase contains a rule about exactly the claim being made, check the prose aga
 the cheapest review available and it was one grep away.
 ([[denormalised-copy-nobody-writes]].)
 
+### 5.22 Two thorough audits, each complete against its own boundary, reading as coverage together
+
+**What happened (S44).** ADR-101 swept the auth and ingest paths for records a timeout could
+discard and named five. B52 swept dispatch by measurement and named three more. Both were careful
+and both were right. Asked for a complete list, a census of all 49 `db.Write`/`WriteWithin` sites
+found 28 that record an audit or refusal inside the closure — of which the two lists together
+covered four files. Nobody had examined the rest, and nobody knew that, because each audit was
+*complete against its own boundary* and neither stated the boundary.
+
+**Why it is its own shape.** This is not a gap that was disclosed and then forgotten (§5.9), nor a
+suspect that hardened (§5.21). Both artefacts were accurate. The failure is emergent: two true
+statements about adjacent regions read, together, as a statement about the whole. Thoroughness is
+what makes it dangerous — a sloppy audit invites a second look, a meticulous one closes the
+question.
+
+**How to apply.** A partial sweep states its boundary **in the artefact**, in the form "examined X;
+did NOT examine Y". The reader then knows what was not looked at instead of inferring coverage from
+evident care. A sweep with no stated boundary is read as total, whatever its author intended.
+
+### 5.23 A census is a claim about ABSENCE, and absence is what a broken matcher produces
+
+**What happened (S44).** The write-then-report census classified sites with a regex,
+`Record\w+\(` — which cannot match `.Record(`, because `\w+` requires at least one word character
+after `Record`. Every site whose audit is the idiomatic `(store.AuditEvents{}).Record(ctx, c, ...)`
+came back as **"no record in closure"**: 28 false negatives, reported as a finding. Had it been
+acted on, the fix would have moved audits *into* transactions they were already in.
+
+A second instrument in the same census was wrong in the other direction. The `err_after` heuristic —
+"a record, then a non-nil error return later in the closure" — flagged five sites AT RISK. Reading
+them, four were correct by design: the audit records a mutation in the **same** transaction, so a
+rollback discards both and the absent audit is accurate. `onTerminal`, `sweepTenant`, `ageTenant`
+and `Issue` are all that shape, and `sweeper.go` says so in a comment written long before the
+census: *"The job state and the reason someone should care about it commit together or not at
+all."* One site survived scrutiny, and by a different mechanism than the heuristic described.
+
+**Why it is its own pattern.** §5.21 is about a claim acquiring authority by restatement. This is a
+claim manufactured by an instrument, and it arrives with the register of a measurement because a
+count *is* a measurement — of whatever the matcher happened to match. **A broken matcher reporting
+zero looks exactly like a clean result**, and a heuristic answering a slightly wrong question looks
+exactly like a finding.
+
+**How to apply.** A census that reports "N sites have no X" is asserting absence, and absence is the
+default output of a matcher that is broken, mis-scoped or asking the wrong question. Before trusting
+it: **run the matcher against a known positive** and confirm it fires. Then, for anything it
+classifies as a defect, read the code — a heuristic proposes candidates, it does not classify them.
+This is absence-is-not-evidence (ADR-069's rule for KEV, ADR-105's for techniques) turned on our own
+instruments rather than on product data, and it is the first instance of that direction.
+([[denormalised-copy-nobody-writes]]; [[test-that-proves-nothing]].)
+
 ---
 
 ## 6. Standing requirement (from S23 onward)
