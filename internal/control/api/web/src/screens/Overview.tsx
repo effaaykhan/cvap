@@ -54,7 +54,7 @@ export function Overview() {
   return (
     <section>
       <PageHead
-        title="Operator overview"
+        title="Dashboard"
         sub={`Exact counts from the finding set; changes over the last ${WINDOW} days; the series from each finding's first-seen and resolved dates.`}
         meta={<>as of {new Date().toISOString().slice(0, 16).replace("T", " ")}Z</>}
       />
