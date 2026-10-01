@@ -828,3 +828,53 @@ td.attack-cell.unmapped { color:var(--faint); }
   .login-tagline br { display:none; }
   .login-card { padding:var(--login-card-pad) 1.25rem 1.2rem; }
 }
+
+/* ---- settings: two trust cards over a full-width account card ------------
+   Theme tokens only, so dark and light follow the rest of the console. */
+.settings { max-width:1040px; }
+.settings > h2:first-of-type { margin-top:0; }
+.settings-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; align-items:start; }
+.settings-card { padding:1rem 1.1rem; min-width:0; }
+.settings-card h3 { margin:0 0 .75rem; font-size:.92rem; font-weight:650; color:var(--fg); }
+:where(.settings-card) p { margin:0; }
+.settings-sub { color:var(--muted); font-size:.8rem; margin:-.5rem 0 .9rem; }
+.settings-stat { margin-bottom:.4rem; }
+.settings-stat .lbl { margin-bottom:.15rem; }
+.settings-value {
+  display:flex; align-items:center; gap:.5rem;
+  font:650 1.15rem/1.3 var(--sans); font-variant-numeric:tabular-nums; color:var(--fg);
+}
+.settings-explain { margin-bottom:.85rem; max-width:60ch; }
+.settings-msg { margin-top:.6rem; }
+.settings-hint { margin-top:.35rem; }
+.settings-edit { display:flex; flex-direction:column; margin-top:.9rem; padding-top:.85rem; border-top:1px solid var(--line); }
+.settings-edit > .lbl { margin-bottom:.35rem; }
+.settings-inline { display:flex; gap:.5rem; align-items:center; }
+.settings-inline input { flex:1 1 auto; min-width:0; }
+.settings-inline button { flex:none; }
+.settings-wrap { flex-wrap:wrap; margin-top:.5rem; }
+.settings-wrap input { flex-basis:14rem; }
+.settings input { height:32px; }
+.settings input::placeholder, .settings textarea::placeholder { color:var(--faint); opacity:.7; }
+.settings-field { display:flex; flex-direction:column; gap:.3rem; min-width:0; }
+.settings-field label { font-size:.75rem; color:var(--muted); }
+.settings-field input { width:100%; }
+.settings-reason { margin-top:.75rem; }
+.settings-reason label, .settings-reason input { font-size:.76rem; }
+.settings-empty { padding:.75rem .9rem; border:1px dashed var(--line-strong); border-radius:6px; }
+.settings-empty > p:first-child { color:var(--fg); font-weight:600; margin-bottom:.3rem; }
+.settings-profile + .settings-profile { margin-top:.9rem; padding-top:.9rem; border-top:1px solid var(--line); }
+.settings-profile p + p { margin-top:.4rem; }
+.settings-pw-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1rem; }
+.settings-pw { position:relative; display:flex; align-items:center; }
+.settings-pw input { padding-right:2.2rem; }
+.settings-pw-toggle {
+  position:absolute; right:.25rem; display:grid; place-items:center;
+  width:26px; height:26px; padding:0; border:0; border-radius:5px;
+  background:transparent; color:var(--faint);
+}
+.settings-pw-toggle:hover { background:var(--raised); color:var(--fg); }
+.settings-actions { margin-top:.9rem; }
+@media (max-width:860px) {
+  .settings-grid, .settings-pw-grid { grid-template-columns:minmax(0,1fr); }
+}
