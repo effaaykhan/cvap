@@ -40,7 +40,7 @@ describe("Settings", () => {
     expect(hours).toHaveValue(null);
     expect(hours).toHaveAttribute("placeholder", "Hours");
     expect(screen.getByText(/Allowed range: 24–2160 hours \(1–90 days\)/)).toBeInTheDocument();
-    expect(screen.getByText("✓ Compatible")).toBeInTheDocument();
+    expect(screen.queryByText(/Compatible/)).toBeNull();
     expect(screen.getByText("No credential profiles configured.")).toBeInTheDocument();
   });
 
@@ -63,6 +63,18 @@ describe("Settings", () => {
     expect(await screen.findByText("96 hours")).toBeInTheDocument();
     expect(hours).toHaveValue(null);
     expect(reason).toHaveValue("");
+  });
+
+  it("shows the backend's refusal verbatim, in red", async () => {
+    const user = userEvent.setup();
+    const { ApiError } = await import("../lib/api");
+    api.setIdentityWindow.mockRejectedValue(new ApiError(422, "unprocessable", "server says no"));
+    renderSettings();
+    await user.type(await screen.findByLabelText("Set new window"), "5");
+    await user.type(screen.getByPlaceholderText("Why are you changing this?"), "test");
+    await user.click(screen.getByRole("button", { name: "Set window" }));
+    expect(await screen.findByText("server says no")).toHaveClass("error");
+    expect(screen.getByText("72 hours")).toBeInTheDocument();
   });
 
   it("toggles each password field's visibility independently", async () => {

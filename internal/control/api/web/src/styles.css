@@ -865,7 +865,8 @@ td.attack-cell.unmapped { color:var(--faint); }
 .settings-empty > p:first-child { color:var(--fg); font-weight:600; margin-bottom:.3rem; }
 .settings-profile + .settings-profile { margin-top:.9rem; padding-top:.9rem; border-top:1px solid var(--line); }
 .settings-profile p + p { margin-top:.4rem; }
-.settings-pw-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1rem; }
+.settings-pw-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)) auto; gap:1rem; align-items:end; }
+.settings-pw-submit { height:32px; padding-top:0; padding-bottom:0; white-space:nowrap; }
 .settings-pw { position:relative; display:flex; align-items:center; }
 .settings-pw input { padding-right:2.2rem; }
 .settings-pw-toggle {
@@ -874,7 +875,7 @@ td.attack-cell.unmapped { color:var(--faint); }
   background:transparent; color:var(--faint);
 }
 .settings-pw-toggle:hover { background:var(--raised); color:var(--fg); }
-.settings-actions { margin-top:.9rem; }
 @media (max-width:860px) {
   .settings-grid, .settings-pw-grid { grid-template-columns:minmax(0,1fr); }
+  .settings-pw-submit { justify-self:start; }
 }

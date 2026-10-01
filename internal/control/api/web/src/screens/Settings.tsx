@@ -69,15 +69,13 @@ function ChangePasswordCard() {
         <PasswordField label="Current password" autoComplete="current-password" value={current} onChange={setCurrent} />
         <PasswordField label="New password" autoComplete="new-password" value={next} onChange={setNext} />
         <PasswordField label="Retype new password" autoComplete="new-password" value={confirm} onChange={setConfirm} />
+        <button type="submit" className="settings-pw-submit" disabled={busy}>
+          {busy ? "Saving…" : "Change password"}
+        </button>
       </div>
       <p className="faint small settings-hint">At least 12 characters.</p>
       {err && <p className="error small settings-msg">{err}</p>}
       {done && <p className="muted small settings-msg">Password changed. Your current sessions stay signed in.</p>}
-      <div className="settings-actions">
-        <button type="submit" disabled={busy}>
-          {busy ? "Saving…" : "Change password"}
-        </button>
-      </div>
     </form>
   );
 }
@@ -181,18 +179,13 @@ function IdentityWindow() {
         )}
       </div>
 
-      {cadence != null && (tooShort ? (
+      {tooShort && (
         <p className="error small settings-msg">
           <span className="chip chip-danger">Incompatible</span>{" "}
           The current window ({data.sighting_window_hours} hours) is under twice the measured cadence ({(2 * cadence).toFixed(1)} hours):
           no observed key can be seen by two scans inside it, so the credentialed path trusts nothing observed. Scan more often, or widen the window.
         </p>
-      ) : (
-        <p className="settings-msg">
-          <span className="chip chip-ok">✓ Compatible</span>{" "}
-          <span className="faint small">At least twice the scan cadence; a shorter window is refused.</span>
-        </p>
-      ))}
+      )}
 
       {has(session, "policy.write") ? (
         // noValidate: the bounds are the server's to enforce, and its refusal
