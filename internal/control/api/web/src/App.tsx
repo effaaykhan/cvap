@@ -1,5 +1,5 @@
-import { useState, type MouseEvent, type ReactNode } from "react";
-import { Link, NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
+import { Link, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth } from "./lib/auth";
 import { has } from "./lib/api";
 import { Login } from "./screens/Login";
@@ -16,6 +16,7 @@ import { ScanDetail } from "./screens/ScanDetail";
 import { Exposure } from "./screens/Exposure";
 import { Knowledge } from "./screens/Knowledge";
 import { Settings } from "./screens/Settings";
+import { Pending } from "./screens/Pending";
 
 function readTheme(): "dark" | "light" {
   try {
@@ -30,6 +31,15 @@ function readCollapsed(): boolean {
     return localStorage.getItem("cvap-sidebar") === "collapsed";
   } catch {
     return false;
+  }
+}
+
+function readOpenGroups(): string[] {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem("cvap-nav-groups") ?? "[]");
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
   }
 }
 
@@ -103,6 +113,18 @@ const icons = {
       <path d="M19.4 13.5a7.6 7.6 0 0 0 0-3l2-1.5-2-3.5-2.4.9a7.6 7.6 0 0 0-2.6-1.5L14 2.5h-4l-.4 2.4A7.6 7.6 0 0 0 7 6.4l-2.4-.9-2 3.5 2 1.5a7.6 7.6 0 0 0 0 3l-2 1.5 2 3.5 2.4-.9a7.6 7.6 0 0 0 2.6 1.5l.4 2.4h4l.4-2.4a7.6 7.6 0 0 0 2.6-1.5l2.4.9 2-3.5-2-1.5z" />
     </Icon>
   ),
+  discover: (
+    <Icon>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M15.5 8.5l-2 5-5 2 2-5 5-2z" />
+    </Icon>
+  ),
+  assess: (
+    <Icon>
+      <rect x="5" y="4.5" width="14" height="16.5" rx="1.5" />
+      <path d="M9 4.5V3h6v1.5M9 13l2 2 4-4" />
+    </Icon>
+  ),
   signout: (
     <Icon>
       <path d="M14 4H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h7" />
@@ -111,10 +133,119 @@ const icons = {
   ),
 };
 
+// The grouped part of the sidebar. A leaf either points at the screen that
+// already is that module (`to` differs from `path`; `path` redirects there, so
+// no screen is duplicated) or at a Pending shell rendered at `path`. `data`
+// records what Core holds for a shell today, so the shell cannot overclaim:
+// "none" means nothing collects it, "partial" means related data exists but
+// no view is built. `perm` mirrors the flat nav's courtesy hiding for reused
+// screens; a shell reads nothing, so it needs none.
+interface NavLeaf {
+  label: string;
+  path: string;
+  to?: string;
+  perm?: string;
+  data?: "none" | "partial";
+}
+interface NavGroup {
+  id: string;
+  label: string;
+  icon?: ReactNode;
+  children: (NavGroup | NavLeaf)[];
+}
+
+const isGroup = (n: NavGroup | NavLeaf): n is NavGroup => "children" in n;
+const leafTarget = (l: NavLeaf) => l.to ?? l.path;
+// The same rule NavLink applies (end=false), so a group's state never
+// disagrees with the leaf it holds: /assets/123 still sits under Systems.
+const routeMatches = (to: string, pathname: string) => pathname === to || pathname.startsWith(to + "/");
+
+const NAV_GROUPS: NavGroup[] = [
+  {
+    id: "discover",
+    label: "Discover",
+    icon: icons.discover,
+    children: [
+      {
+        id: "discover/discovery",
+        label: "Discovery",
+        children: [
+          { label: "Asset Inventory", path: "/discover/discovery/asset-inventory", to: "/assets", perm: "asset.read" },
+          { label: "Network Discovery", path: "/discover/discovery/network-discovery", data: "partial" },
+          { label: "Web & API Discovery", path: "/discover/discovery/web-api-discovery", data: "none" },
+          { label: "Cloud Assets", path: "/discover/discovery/cloud-assets", data: "none" },
+          { label: "Containers", path: "/discover/discovery/containers", data: "none" },
+          { label: "Kubernetes", path: "/discover/discovery/kubernetes", data: "none" },
+          { label: "Databases", path: "/discover/discovery/databases", data: "partial" },
+          { label: "Network Devices", path: "/discover/discovery/network-devices", data: "none" },
+          { label: "Unknown Assets", path: "/discover/discovery/unknown-assets", data: "partial" },
+          { label: "Asset Relationships / Topology", path: "/discover/discovery/topology", data: "none" },
+        ],
+      },
+      {
+        id: "discover/attack-surface",
+        label: "Attack Surface",
+        children: [
+          { label: "External Attack Surface", path: "/discover/attack-surface/external", data: "partial" },
+          { label: "Internal Attack Surface", path: "/discover/attack-surface/internal", data: "partial" },
+          { label: "Internet-Facing Assets", path: "/discover/attack-surface/internet-facing", data: "partial" },
+          { label: "Exposed Services", path: "/discover/attack-surface/exposed-services", data: "partial" },
+          { label: "Shadow IT", path: "/discover/attack-surface/shadow-it", data: "none" },
+          { label: "Unknown / Unmanaged Assets", path: "/discover/attack-surface/unknown-unmanaged", data: "partial" },
+        ],
+      },
+    ],
+  },
+  {
+    id: "assess",
+    label: "Assess",
+    icon: icons.assess,
+    children: [
+      { label: "Scans", path: "/assess/scans", to: "/scans", perm: "scan.read" },
+      { label: "Vulnerabilities", path: "/assess/vulnerabilities", to: "/triage", perm: "finding.read" },
+      { label: "SAST", path: "/assess/sast", data: "none" },
+      { label: "DAST", path: "/assess/dast", data: "none" },
+    ],
+  },
+];
+
+function navLeaves(nodes: (NavGroup | NavLeaf)[]): NavLeaf[] {
+  return nodes.flatMap((n) => (isGroup(n) ? navLeaves(n.children) : [n]));
+}
+
+// Ids of every group on the path to a leaf matching `pathname`.
+function activeGroups(nodes: (NavGroup | NavLeaf)[], pathname: string): string[] {
+  return nodes.flatMap((n) => {
+    if (!isGroup(n)) return [];
+    const inner = activeGroups(n.children, pathname);
+    const direct = n.children.some((c) => !isGroup(c) && routeMatches(leafTarget(c), pathname));
+    return direct || inner.length > 0 ? [n.id, ...inner] : [];
+  });
+}
+
 export function App() {
   const { session, loading, mustChange, logout } = useAuth();
   const [theme, setTheme] = useState<"dark" | "light">(readTheme);
   const [collapsed, setCollapsed] = useState<boolean>(readCollapsed);
+  const [openGroups, setOpenGroups] = useState<string[]>(readOpenGroups);
+  const { pathname } = useLocation();
+
+  const persistGroups = (next: string[]) => {
+    try {
+      localStorage.setItem("cvap-nav-groups", JSON.stringify(next));
+    } catch {
+      /* same courtesy as the sidebar toggle */
+    }
+    return next;
+  };
+
+  // Arriving at a grouped route opens the groups that hold it, so the active
+  // leaf is never hidden. Only opens: a group the operator closed elsewhere
+  // stays closed until they navigate into it.
+  useEffect(() => {
+    const need = activeGroups(NAV_GROUPS, pathname);
+    setOpenGroups((cur) => (need.every((g) => cur.includes(g)) ? cur : persistGroups([...new Set([...cur, ...need])])));
+  }, [pathname]);
 
   const applyTheme = (next: "dark" | "light") => {
     document.documentElement.dataset.theme = next;
@@ -154,6 +285,19 @@ export function App() {
   };
   const hideTip = () => setTip(null);
 
+  // On the collapsed rail a group's children have no room to show, so its
+  // header expands the sidebar (the hamburger's own persisted path) with the
+  // group open, rather than toggling a list nobody can see.
+  const toggleGroup = (id: string) => {
+    if (collapsed) {
+      setTip(null);
+      toggleSidebar();
+      setOpenGroups((cur) => (cur.includes(id) ? cur : persistGroups([...cur, id])));
+      return;
+    }
+    setOpenGroups((cur) => persistGroups(cur.includes(id) ? cur.filter((g) => g !== id) : [...cur, id]));
+  };
+
   if (loading) return <div className="center">Loading…</div>;
   if (mustChange) return <ChangePassword />;
   if (!session) return <Login />;
@@ -174,6 +318,57 @@ export function App() {
     ["/knowledge", "Knowledge", canFindings, icons.knowledge],
   ];
 
+  const sideItem = (to: string, label: string, icon: ReactNode | null, extra = "") => (
+    <NavLink
+      key={to}
+      to={to}
+      end={to === "/"}
+      className={"side-item" + extra}
+      aria-label={collapsed ? label : undefined}
+      onMouseEnter={showTip(label)}
+      onMouseLeave={hideTip}
+    >
+      {icon && <span className="side-icon">{icon}</span>}
+      <span className="side-label">{label}</span>
+    </NavLink>
+  );
+
+  const visibleLeaf = (l: NavLeaf) => !l.perm || has(session, l.perm);
+  const renderGroup = (g: NavGroup, top: boolean): ReactNode => {
+    const open = openGroups.includes(g.id);
+    const holdsActive = navLeaves(g.children).some((l) => routeMatches(leafTarget(l), pathname));
+    const bodyId = `side-group-${g.id.replace("/", "-")}`;
+    return (
+      <div key={g.id} className="side-group">
+        <button
+          type="button"
+          className={"side-item side-group-head" + (holdsActive ? " holds-active" : "") + (top ? "" : " side-group-sub")}
+          aria-expanded={open}
+          aria-controls={bodyId}
+          aria-label={collapsed ? g.label : undefined}
+          onClick={() => toggleGroup(g.id)}
+          onMouseEnter={showTip(g.label)}
+          onMouseLeave={hideTip}
+        >
+          {g.icon && <span className="side-icon">{g.icon}</span>}
+          <span className="side-label">{g.label}</span>
+          <span className={open ? "side-chevron open" : "side-chevron"} aria-hidden="true">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </span>
+        </button>
+        {open && (
+          <div className="side-children" id={bodyId} role="group" aria-label={g.label}>
+            {g.children.map((c) =>
+              isGroup(c) ? renderGroup(c, false) : visibleLeaf(c) && sideItem(leafTarget(c), c.label, null, " side-leaf"),
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className={collapsed ? "app nav-collapsed" : "app"}>
       <aside className="sidebar">
@@ -192,20 +387,11 @@ export function App() {
           <span className="brand">CVAP</span>
         </div>
         <nav className="side-nav">
-          {nav.filter(([, , ok]) => ok).map(([to, label, , icon]) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={to === "/"}
-              className="side-item"
-              aria-label={collapsed ? label : undefined}
-              onMouseEnter={showTip(label)}
-              onMouseLeave={hideTip}
-            >
-              <span className="side-icon">{icon}</span>
-              <span className="side-label">{label}</span>
-            </NavLink>
-          ))}
+          {/* Dashboard, then the Discover / Assess groups, then the flat
+              modules exactly as before. */}
+          {nav.slice(0, 1).filter(([, , ok]) => ok).map(([to, label, , icon]) => sideItem(to, label, icon))}
+          {NAV_GROUPS.map((g) => renderGroup(g, true))}
+          {nav.slice(1).filter(([, , ok]) => ok).map(([to, label, , icon]) => sideItem(to, label, icon))}
         </nav>
         <div className="sidebar-bottom">
           <NavLink
@@ -292,6 +478,15 @@ export function App() {
             <Route path="/exposure" element={<Exposure />} />
             <Route path="/knowledge" element={<Knowledge />} />
             <Route path="/settings" element={<Settings />} />
+            {/* Discover / Assess. A leaf that is an existing screen redirects
+                to it; the rest are shells until their data exists. */}
+            {navLeaves(NAV_GROUPS).map((l) => (
+              <Route
+                key={l.path}
+                path={l.path}
+                element={l.to ? <Navigate to={l.to} replace /> : <Pending title={l.label} data={l.data ?? "none"} />}
+              />
+            ))}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>

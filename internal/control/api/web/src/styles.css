@@ -141,6 +141,31 @@ code, .mono { font-family:var(--mono); }
 .nav-collapsed .side-item { justify-content:center; padding:.5rem 0; }
 .nav-collapsed .sidebar-top { justify-content:center; padding:0; }
 
+/* Nav groups (Discover, Assess): a header is a .side-item, so hover and
+   spacing are the flat items' own. Children hang off a hairline guide under
+   the parent's icon. Only a leaf takes .active; a header marks the group that
+   holds the active leaf only on the icon rail, where the leaf cannot show. */
+.side-group { display:flex; flex-direction:column; gap:2px; }
+.side-chevron { flex:none; display:grid; place-items:center; margin-left:auto; color:var(--faint); transform:rotate(-90deg); }
+.side-chevron.open { transform:none; }
+.side-children {
+  display:flex; flex-direction:column; gap:2px;
+  margin-left:1.15rem; padding-left:.35rem; border-left:1px solid var(--line);
+}
+/* Long leaf names wrap rather than ellipsise: "Asset Relationships /
+   Topology" is unreadable cut in half, and the rail's width is fixed. */
+.side-leaf { white-space:normal; }
+.side-leaf .side-label { overflow:visible; }
+.nav-collapsed .side-children, .nav-collapsed .side-chevron { display:none; }
+.nav-collapsed .side-group-head.holds-active {
+  color:var(--nav-accent);
+  background:color-mix(in srgb, var(--nav-accent) 16%, transparent);
+}
+.nav-collapsed .side-group-head.holds-active::before {
+  content:""; position:absolute; left:0; top:5px; bottom:5px; width:3px;
+  border-radius:2px; background:var(--nav-accent);
+}
+
 /* ---- header controls: New scan, theme segment, profile ------------------ */
 .who {
   margin-left:auto; color:var(--muted); display:flex; gap:.9rem; align-items:center;
@@ -375,6 +400,7 @@ code { background:var(--surface-2); padding:.06rem .35rem; border-radius:4px; fo
 @media (prefers-reduced-motion:no-preference) {
   .side-item, button, .conf-fill { transition:background .12s ease, color .12s ease, width .2s ease; }
   .sidebar { transition:width .18s ease; }
+  .side-chevron { transition:transform .15s ease; }
 }
 @media (max-width:640px) {
   .main-col > header { gap:.9rem; padding:0 .8rem; }
@@ -386,6 +412,8 @@ code { background:var(--surface-2); padding:.06rem .35rem; border-radius:4px; fo
   .side-label, .sidebar-top .brand { display:none; }
   .side-item { justify-content:center; padding:.5rem 0; }
   .sidebar-top { justify-content:center; padding:0; }
+  .side-children, .side-chevron { display:none; }
+  .side-group-head.holds-active { color:var(--nav-accent); background:color-mix(in srgb, var(--nav-accent) 16%, transparent); }
 }
 
 /* OS attribution (ADR-061): the presentation must make each confidence state
