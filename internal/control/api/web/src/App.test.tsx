@@ -21,6 +21,11 @@ vi.mock("./screens/ScanDetail", () => ({ ScanDetail: () => <h1>Scan detail scree
 vi.mock("./screens/Exposure", () => ({ Exposure: () => <h1>Exposure screen</h1> }));
 vi.mock("./screens/Knowledge", () => ({ Knowledge: () => <h1>Knowledge screen</h1> }));
 vi.mock("./screens/Settings", () => ({ Settings: () => <h1>Settings screen</h1> }));
+vi.mock("./screens/AssetInventory", () => ({ AssetInventory: () => <h1>Asset Inventory</h1> }));
+vi.mock("./screens/NetworkDiscovery", () => ({ NetworkDiscovery: () => <h1>Network Discovery</h1> }));
+vi.mock("./screens/WebDiscovery", () => ({ WebDiscovery: () => <h1>Web &amp; API Discovery</h1> }));
+vi.mock("./screens/Databases", () => ({ Databases: () => <h1>Databases</h1> }));
+vi.mock("./screens/UnknownAssets", () => ({ UnknownAssets: () => <h1>Unknown Assets</h1> }));
 
 import { App } from "./App";
 
@@ -35,14 +40,10 @@ const heading = () => screen.getByRole("heading", { level: 1 }).textContent;
 const sideNav = () => screen.getByRole("navigation");
 
 const shells: [string, string, "none" | "partial"][] = [
-  ["/discover/discovery/network-discovery", "Network Discovery", "partial"],
-  ["/discover/discovery/web-api-discovery", "Web & API Discovery", "none"],
   ["/discover/discovery/cloud-assets", "Cloud Assets", "none"],
   ["/discover/discovery/containers", "Containers", "none"],
   ["/discover/discovery/kubernetes", "Kubernetes", "none"],
-  ["/discover/discovery/databases", "Databases", "partial"],
   ["/discover/discovery/network-devices", "Network Devices", "none"],
-  ["/discover/discovery/unknown-assets", "Unknown Assets", "partial"],
   ["/discover/discovery/topology", "Asset Relationships / Topology", "none"],
   ["/discover/attack-surface/external", "External Attack Surface", "partial"],
   ["/discover/attack-surface/internal", "Internal Attack Surface", "partial"],
@@ -71,7 +72,20 @@ describe("App navigation", () => {
   });
 
   it.each([
-    ["/discover/discovery/asset-inventory", "Systems screen"],
+    ["/discover/discovery/asset-inventory", "Asset Inventory"],
+    ["/discover/discovery/network-discovery", "Network Discovery"],
+    ["/discover/discovery/web-api-discovery", "Web & API Discovery"],
+    ["/discover/discovery/databases", "Databases"],
+    ["/discover/discovery/unknown-assets", "Unknown Assets"],
+  ])("%s renders its Discovery screen, active in the nav", (path, title) => {
+    renderAt(path);
+    expect(heading()).toBe(title);
+    expect(within(sideNav()).getByRole("link", { name: title })).toHaveClass("active");
+    // Asset Inventory is its own page now, not the Systems screen under a new name.
+    expect(within(sideNav()).getByRole("link", { name: "Systems" })).not.toHaveClass("active");
+  });
+
+  it.each([
     ["/assess/scans", "Scans screen"],
     ["/assess/vulnerabilities", "Triage screen"],
   ])("%s reuses the existing screen", (path, screenHeading) => {

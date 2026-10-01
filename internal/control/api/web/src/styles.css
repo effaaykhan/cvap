@@ -914,3 +914,90 @@ td.attack-cell.unmapped { color:var(--faint); }
 @media (max-width:520px) {
   .settings-stats { grid-template-columns:minmax(0,1fr); gap:.45rem; }
 }
+
+/* ======================================================================== */
+/* Discover pages: one module, one layout. Tiles (the Dashboard's metric     */
+/* strip), a row of three distribution panels, then the main table beside a  */
+/* narrow context column. Same tokens and tone classes as the rest.          */
+/* ======================================================================== */
+.discover > .disc-panel { margin-bottom:1.1rem; }
+.disc-grid-3 { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:1.1rem; margin-bottom:1.1rem; align-items:stretch; }
+.disc-main { display:grid; grid-template-columns:minmax(0,2.3fr) minmax(280px,1fr); gap:1.1rem; align-items:start; margin-bottom:1.1rem; }
+.disc-panel { min-width:0; }
+.disc-panel .empty { padding:1.4rem .5rem; }
+.disc-metric-ok .value { color:var(--ok); }
+.disc-toolbar { display:flex; gap:.5rem; flex-wrap:wrap; margin:.7rem 0 .2rem; }
+.disc-toolbar input { width:260px; max-width:100%; background:var(--surface-2); }
+.disc-toolbar select { background:var(--surface-2); font-size:.78rem; }
+.disc-toolbar-note { align-self:center; color:var(--faint); font-size:.74rem; }
+.disc-statement { font-size:.74rem; color:var(--muted); margin:.75rem 0 0; border-top:1px solid var(--line); padding-top:.6rem; }
+.disc-tiles { margin-top:.85rem; }
+.disc-tiles-3 { grid-template-columns:repeat(3, minmax(0,1fr)); }
+
+/* tables inside a card: the wrapper scrolls a wide table on a narrow screen,
+   never the page; its header is not sticky there, since the wrapper is the
+   scroll container and a 52px offset would land inside it. */
+.table-wrap { overflow-x:auto; margin-top:.55rem; }
+.table-wrap thead th { position:static; background:transparent; }
+.disc-table tbody tr:last-child td { border-bottom:none; }
+.disc-compact tbody td, .disc-compact thead th { padding:.32rem .5rem; }
+.ports-cell { display:inline-flex; gap:.35rem; align-items:center; flex-wrap:wrap; }
+.pager { display:inline-flex; gap:.35rem; align-items:center; }
+.pager .filt { padding:.05rem .55rem; line-height:1.5; }
+.pager-count { font-family:var(--mono); font-size:.72rem; color:var(--faint); }
+
+/* capability list (what a page can and cannot show) and terms */
+.cap-list { list-style:none; margin:.6rem 0 0; padding:0; display:flex; flex-direction:column; gap:.45rem; font-size:.78rem; }
+.cap-list li { display:flex; gap:.55rem; align-items:baseline; }
+.cap-list .chip { flex:none; min-width:8.6em; text-align:center; }
+.cap-list.cap-detail li { display:block; }
+.disc-terms { margin:.5rem 0 0; font-size:.76rem; }
+.disc-terms dt { font-weight:600; display:flex; gap:.45rem; align-items:center; margin-top:.6rem; }
+.disc-terms dt:first-child { margin-top:0; }
+.disc-terms dd { margin:.15rem 0 0 1.05rem; color:var(--muted); }
+
+/* donut: ring + legend side by side, legend carries every number */
+.donut { display:flex; align-items:center; gap:1.1rem; margin-top:.7rem; flex-wrap:wrap; }
+.donut svg { flex:none; }
+.donut-track { fill:none; stroke:var(--surface-2); }
+.donut-seg { fill:none; stroke:var(--tone); }
+.donut-seg.dim { opacity:.35; }
+.donut-value { fill:var(--fg); font:650 20px var(--sans); font-variant-numeric:tabular-nums; }
+.donut-caption { fill:var(--faint); font:600 9.5px var(--mono); }
+.donut-legend { flex:1 1 150px; min-width:0; display:flex; flex-direction:column; gap:.4rem; font-size:.74rem; color:var(--muted); }
+.donut-legend .lane { display:grid; grid-template-columns:9px minmax(0,1fr) auto 4ch; gap:.5rem; align-items:center; cursor:default; }
+.donut-legend .lane.on { color:var(--fg); }
+.donut-legend .lane-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.donut-legend .val { font-family:var(--mono); color:var(--fg); font-variant-numeric:tabular-nums; text-align:right; }
+.donut-legend .pct { font-family:var(--mono); color:var(--faint); text-align:right; font-size:.7rem; }
+.donut-legend .end { color:var(--faint); font-size:.7rem; margin-top:.15rem; }
+
+/* columns: a count per bucket on one axis */
+.cols-wrap { margin-top:.6rem; }
+.cols-readout { font-size:.72rem; color:var(--muted); min-height:1.3em; margin-bottom:.3rem; }
+.cols-readout .val { font-family:var(--mono); color:var(--fg); }
+.cols { display:flex; align-items:flex-end; gap:3px; padding:0 2px; border-bottom:1px solid var(--line-strong); }
+.col { flex:1 1 0; min-width:0; height:100%; display:flex; align-items:flex-end; justify-content:center; }
+.col-bar { display:block; width:100%; max-width:44px; background:var(--tone); border-radius:2px 2px 0 0; }
+.col.dim .col-bar { opacity:.35; }
+.cols-axis { display:flex; gap:3px; padding:0 2px; margin-top:.3rem; }
+.col-tick { flex:1 1 0; min-width:0; text-align:center; font:600 9.5px var(--mono); color:var(--faint); white-space:nowrap; }
+
+@media (prefers-reduced-motion:no-preference) {
+  .donut-seg, .col-bar { transition:opacity .15s ease; }
+}
+@media (max-width:1280px) {
+  .disc-grid-3 { grid-template-columns:repeat(2, minmax(0,1fr)); }
+  .disc-grid-3 > :last-child:nth-child(odd) { grid-column:1 / -1; }
+}
+@media (max-width:1000px) {
+  .disc-main { grid-template-columns:1fr; }
+}
+@media (max-width:760px) {
+  .disc-grid-3 { grid-template-columns:1fr; }
+}
+@media (max-width:640px) {
+  .hide-sm { display:none; }
+  .disc-toolbar input { width:100%; }
+  .cap-list .chip { min-width:0; }
+}

@@ -17,6 +17,11 @@ import { Exposure } from "./screens/Exposure";
 import { Knowledge } from "./screens/Knowledge";
 import { Settings } from "./screens/Settings";
 import { Pending } from "./screens/Pending";
+import { AssetInventory } from "./screens/AssetInventory";
+import { NetworkDiscovery } from "./screens/NetworkDiscovery";
+import { WebDiscovery } from "./screens/WebDiscovery";
+import { Databases } from "./screens/Databases";
+import { UnknownAssets } from "./screens/UnknownAssets";
 
 function readTheme(): "dark" | "light" {
   try {
@@ -133,9 +138,10 @@ const icons = {
   ),
 };
 
-// The grouped part of the sidebar. A leaf either points at the screen that
-// already is that module (`to` differs from `path`; `path` redirects there, so
-// no screen is duplicated) or at a Pending shell rendered at `path`. `data`
+// The grouped part of the sidebar. A leaf either renders its own `screen` at
+// `path`, points at the screen that already is that module (`to` differs from
+// `path`; `path` redirects there, so no screen is duplicated) or at a Pending
+// shell rendered at `path`. `data`
 // records what Core holds for a shell today, so the shell cannot overclaim:
 // "none" means nothing collects it, "partial" means related data exists but
 // no view is built. `perm` mirrors the flat nav's courtesy hiding for reused
@@ -146,6 +152,7 @@ interface NavLeaf {
   to?: string;
   perm?: string;
   data?: "none" | "partial";
+  screen?: ReactNode;
 }
 interface NavGroup {
   id: string;
@@ -170,15 +177,15 @@ const NAV_GROUPS: NavGroup[] = [
         id: "discover/discovery",
         label: "Discovery",
         children: [
-          { label: "Asset Inventory", path: "/discover/discovery/asset-inventory", to: "/assets", perm: "asset.read" },
-          { label: "Network Discovery", path: "/discover/discovery/network-discovery", data: "partial" },
-          { label: "Web & API Discovery", path: "/discover/discovery/web-api-discovery", data: "none" },
+          { label: "Asset Inventory", path: "/discover/discovery/asset-inventory", perm: "asset.read", screen: <AssetInventory /> },
+          { label: "Network Discovery", path: "/discover/discovery/network-discovery", perm: "scan.read", screen: <NetworkDiscovery /> },
+          { label: "Web & API Discovery", path: "/discover/discovery/web-api-discovery", perm: "asset.read", screen: <WebDiscovery /> },
           { label: "Cloud Assets", path: "/discover/discovery/cloud-assets", data: "none" },
           { label: "Containers", path: "/discover/discovery/containers", data: "none" },
           { label: "Kubernetes", path: "/discover/discovery/kubernetes", data: "none" },
-          { label: "Databases", path: "/discover/discovery/databases", data: "partial" },
+          { label: "Databases", path: "/discover/discovery/databases", perm: "asset.read", screen: <Databases /> },
           { label: "Network Devices", path: "/discover/discovery/network-devices", data: "none" },
-          { label: "Unknown Assets", path: "/discover/discovery/unknown-assets", data: "partial" },
+          { label: "Unknown Assets", path: "/discover/discovery/unknown-assets", perm: "asset.read", screen: <UnknownAssets /> },
           { label: "Asset Relationships / Topology", path: "/discover/discovery/topology", data: "none" },
         ],
       },
@@ -478,13 +485,14 @@ export function App() {
             <Route path="/exposure" element={<Exposure />} />
             <Route path="/knowledge" element={<Knowledge />} />
             <Route path="/settings" element={<Settings />} />
-            {/* Discover / Assess. A leaf that is an existing screen redirects
-                to it; the rest are shells until their data exists. */}
+            {/* Discover / Assess. A leaf with its own screen renders it; one
+                that is an existing screen redirects to it; the rest are shells
+                until their data exists. */}
             {navLeaves(NAV_GROUPS).map((l) => (
               <Route
                 key={l.path}
                 path={l.path}
-                element={l.to ? <Navigate to={l.to} replace /> : <Pending title={l.label} data={l.data ?? "none"} />}
+                element={l.screen ?? (l.to ? <Navigate to={l.to} replace /> : <Pending title={l.label} data={l.data ?? "none"} />)}
               />
             ))}
             <Route path="*" element={<Navigate to="/" replace />} />
