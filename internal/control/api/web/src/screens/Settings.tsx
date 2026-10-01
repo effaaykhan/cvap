@@ -155,29 +155,30 @@ function IdentityWindow() {
     <div className="card settings-card">
       <h3>Identity Window</h3>
 
-      <div className="settings-stat">
-        <div className="lbl">Current window</div>
-        <div className="settings-value">
-          {data.sighting_window_hours} hours
-          {data.is_default && <span className="chip chip-muted">default</span>}
+      <div className="settings-stats">
+        <div className="settings-stat">
+          <div className="lbl">Current window</div>
+          <div className="settings-value">
+            {data.sighting_window_hours} hours
+            {data.is_default && <span className="chip chip-muted">default</span>}
+          </div>
+        </div>
+        <div className="settings-stat">
+          <div className="lbl">Scan cadence</div>
+          {cadence != null ? (
+            <>
+              <div className="settings-value">{cadence.toFixed(1)} hours</div>
+              <div className="faint small">Median over {data.scan_cadence_samples} completed scans</div>
+            </>
+          ) : (
+            <div className="faint small">Not yet measurable (fewer than two completed scans).</div>
+          )}
         </div>
       </div>
       <p className="muted small settings-explain">
         Two scans must observe the same SSH host identity within this window before CVAP treats it as observed
         trust (ADR-094), and an address stays evidence of the same host for as long.
       </p>
-
-      <div className="settings-stat">
-        <div className="lbl">Scan cadence</div>
-        {cadence != null ? (
-          <>
-            <div className="settings-value">{cadence.toFixed(1)} hours</div>
-            <div className="faint small">Median over {data.scan_cadence_samples} completed scans</div>
-          </>
-        ) : (
-          <div className="faint small">Not yet measurable (fewer than two completed scans).</div>
-        )}
-      </div>
 
       {tooShort && (
         <p className="error small settings-msg">
@@ -191,15 +192,17 @@ function IdentityWindow() {
         // noValidate: the bounds are the server's to enforce, and its refusal
         // is the message shown — the browser's own tooltip would pre-empt it.
         <form className="settings-edit" onSubmit={submit} noValidate>
-          <label className="lbl" htmlFor={hoursId}>Set new window</label>
+          <div className="settings-edit-head">
+            <label className="lbl" htmlFor={hoursId}>Set new window</label>
+            <span className="faint small">
+              Allowed range: {data.min_hours}–{data.max_hours} hours ({days(data.min_hours)}–{days(data.max_hours)} days).
+            </span>
+          </div>
           <div className="settings-inline">
             <input id={hoursId} type="number" min={data.min_hours} max={data.max_hours} placeholder="Hours"
               value={hours} onChange={(e) => setHours(e.target.value)} />
             <button type="submit" disabled={save.isPending || !hours || !reason}>Set window</button>
           </div>
-          <p className="faint small settings-hint">
-            Allowed range: {data.min_hours}–{data.max_hours} hours ({days(data.min_hours)}–{days(data.max_hours)} days).
-          </p>
           <div className="settings-field settings-reason">
             <label htmlFor={reasonId}>Reason <span className="faint">· recorded with your name</span></label>
             <input id={reasonId} placeholder="Why are you changing this?" value={reason} onChange={(e) => setReason(e.target.value)} />
