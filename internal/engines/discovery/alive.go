@@ -38,12 +38,18 @@ import (
 // arbitrary: **`net` gives TCP connect, and every other discovery method needs a
 // socket the standard library will not create.**
 
+// hostDiscoveryPorts is what probeAlive dials. It is HostDiscoveryPorts and
+// nothing else in production; a test points it at a loopback listener, because
+// the first port in the real list is 80 and an unprivileged test cannot bind it,
+// so the accepted-connection branch would otherwise go unexercised.
+var hostDiscoveryPorts = HostDiscoveryPorts
+
 // probeAlive returns whether anything answered and what answered.
 //
 // The rate limiter governs it: a connect made to decide liveness is a packet and
 // spends a token exactly as a port scan connect does.
 func probeAlive(ctx context.Context, cfg Config, address string, limiter *enginerate.Bucket, count func(uint32)) (bool, string) {
-	for _, port := range HostDiscoveryPorts() {
+	for _, port := range hostDiscoveryPorts() {
 		if err := ctx.Err(); err != nil {
 			return false, "cancelled"
 		}
