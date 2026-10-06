@@ -172,9 +172,7 @@ func Run(ctx context.Context, cfg Config, targets []Target, emit Emit, sent Sent
 	if len(ports) == 0 {
 		ports = ServicePorts()
 	}
-	if cfg.ConnectTimeout <= 0 {
-		cfg.ConnectTimeout = 3 * time.Second
-	}
+	cfg.ConnectTimeout = ClampConnectTimeout(cfg.ConnectTimeout)
 	if cfg.MaxConcurrentPerTarget <= 0 {
 		cfg.MaxConcurrentPerTarget = 1
 	}
@@ -190,9 +188,6 @@ func Run(ctx context.Context, cfg Config, targets []Target, emit Emit, sent Sent
 	}
 	if cfg.MaxConcurrentPerTarget > platformMaxConcurrentPerTarget {
 		cfg.MaxConcurrentPerTarget = platformMaxConcurrentPerTarget
-	}
-	if cfg.ConnectTimeout > platformMaxConnectTimeout {
-		cfg.ConnectTimeout = platformMaxConnectTimeout
 	}
 	if cfg.MaxProbesPerPort > platformMaxProbesPerPort {
 		cfg.MaxProbesPerPort = platformMaxProbesPerPort
@@ -303,7 +298,11 @@ func identifyTarget(ctx context.Context, cfg Config, t Target, ports []uint16, e
 		// is created rather than how fast it finishes. Taking them inside would
 		// let MaxConcurrentPerTarget goroutines start at once and then queue on
 		// the bucket, which is a burst at the host followed by a wait.
-		prepaid := enginerate.SynCost(cfg.ConnectTimeout)
+		//
+		// The WHOLE connection, not the SYN train: an open port costs its
+		// handshake ACK and its close as well, and those used to be paid for
+		// after they had left (R2a).
+		prepaid := PortAdmission(cfg.ConnectTimeout)
 		if err := limiter.TakeN(ctx, prepaid); err != nil {
 			break
 		}
@@ -344,6 +343,9 @@ func identifyPort(ctx context.Context, cfg Config, limiter *enginerate.Bucket, t
 	// paces on SYNs and everything after the handshake — the ACK and FIN pair, a
 	// handshake, a payload — is free; measured at 2.24x the ceiling.
 	if err := limiter.Settle(ctx, prepaid, cost); err != nil {
+		if conn != nil {
+			_ = conn.Close()
+		}
 		return nil, timedOut
 	}
 	if err != nil {
@@ -369,6 +371,10 @@ func identifyPort(ctx context.Context, cfg Config, limiter *enginerate.Bucket, t
 	// ------------------------------------------------------------------
 	// What it volunteered. Free, and it happens in every mode.
 	// ------------------------------------------------------------------
+	//
+	// Metered at zero: this connection was admitted for no writes, so any that
+	// a future change adds here is refused rather than sent unpaid.
+	conn = meter(conn, 0)
 	raw := readResponse(ctx, conn, bannerWait(ctx, port, cfg.ConnectTimeout), maxResponseBytes)
 	_ = conn.Close()
 
@@ -434,7 +440,7 @@ func identifyPort(ctx context.Context, cfg Config, limiter *enginerate.Bucket, t
 		// Acquiring first means the socket opens only when the whole exchange
 		// can be paid for, so no connection is ever held open by the rate
 		// limiter itself.
-		probePrepaid := probeCost(p, cfg.ConnectTimeout)
+		probePrepaid := ProbeAdmission(p, cfg.ConnectTimeout)
 		if err := limiter.TakeN(ctx, probePrepaid); err != nil {
 			break
 		}
@@ -558,12 +564,20 @@ type probeOutcome struct {
 	cost     uint32
 }
 
-func runProbe(ctx context.Context, cfg Config, address string, port uint16, p Probe) probeOutcome {
-	conn, cost, _, err := dial(ctx, address, port, cfg.ConnectTimeout)
+func runProbe(ctx context.Context, cfg Config, address string, port uint16, p Probe) (out probeOutcome) {
+	raw, cost, _, err := dial(ctx, address, port, cfg.ConnectTimeout)
 	if err != nil {
 		return probeOutcome{cost: cost}
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() { _ = raw.Close() }()
+
+	// Every byte this probe writes — the payload, a TLS client's flights, the
+	// SSH client's three messages — goes through the meter, which refuses what
+	// the admission did not cover. The cost reported is never below what it
+	// charged, so Settle never refunds a segment that was sent.
+	conn := meter(raw, probeWriteAllowance(p, cfg.ConnectTimeout))
+	connCost := cost
+	defer func() { out.cost = max(out.cost, connCost+conn.segments()) }()
 
 	if p.Kind == probeKindSSHHostKey {
 		// A key exchange, abandoned once the host key is in hand. See ssh.go:
@@ -587,7 +601,7 @@ func runProbe(ctx context.Context, cfg Config, address string, port uint16, p Pr
 	}
 
 	var tlsInfo *tlsPayload
-	rw := conn
+	var rw net.Conn = conn
 	if p.TLS {
 		tc, info, err := dialTLS(ctx, conn, address, cfg.ConnectTimeout)
 		cost += TLSHandshakeCost
@@ -780,21 +794,30 @@ func chainFor(probes []Probe, port uint16, cap int) []Probe {
 }
 
 // dial opens a TCP connection and reports what it cost in packets.
+//
+// The SYNs are bounded by the time the attempt took, not by how it ended. A
+// cancelled attempt used to be charged as a refusal — one SYN — and Settle then
+// refunded the rest of what was admitted, although a connect cancelled two
+// seconds in has sent three. Traffic already emitted is never refunded (R2a).
+// Capped at the timeout's own bound: the socket is gone at the deadline, so no
+// SYN leaves after it however late the dial returns.
 func dial(ctx context.Context, address string, port uint16, timeout time.Duration) (net.Conn, uint32, bool, error) {
 	dialer := net.Dialer{Timeout: timeout}
 	hostPort := net.JoinHostPort(address, strconv.Itoa(int(port)))
+	start := time.Now()
 	conn, err := dialer.DialContext(ctx, "tcp", hostPort)
+	syns := min(enginerate.SynTrainBound(time.Since(start)), enginerate.SynTrainBound(timeout))
 	if err != nil {
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
 			// The SYN train happened in full.
-			return nil, enginerate.SynCost(timeout), true, err
+			return nil, max(enginerate.SynCost(timeout), syns), true, err
 		}
-		// Refused: one SYN out, a RST back.
-		return nil, 1, false, err
+		// Refused (a RST back), unroutable, or cancelled mid-train.
+		return nil, syns, false, err
 	}
-	// SYN, then the ACK completing the handshake and the FIN pair closing it.
-	return conn, 1 + enginerate.EstablishedCost, false, nil
+	// The SYNs, then the ACK completing the handshake and the FIN pair closing it.
+	return conn, syns + enginerate.EstablishedCost, false, nil
 }
 
 // bannerWait is how long to wait for something a service may never send.

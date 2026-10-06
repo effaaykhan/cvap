@@ -178,7 +178,10 @@ def in_scope(addr, nets):
     return any(ip in n for n in nets)
 
 
-CAPTURE_IMAGE = "cvap-safety-capture:local"
+# ethtool joined tcpdump for the per-operation wire check (safety_wire_ops.py),
+# which must switch segmentation offload off before it can count segments; the
+# tag moved with it so a cached image without ethtool is never reused.
+CAPTURE_IMAGE = "cvap-safety-capture:local-2"
 
 
 def prepare_capture_image():
@@ -202,7 +205,7 @@ def prepare_capture_image():
     subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     prep = subprocess.run(
         ["docker", "run", "--name", name, BASE_IMAGE,
-         "sh", "-c", "apk add --no-cache tcpdump"],
+         "sh", "-c", "apk add --no-cache tcpdump ethtool"],
         capture_output=True, text=True,
     )
     if prep.returncode != 0:
@@ -248,7 +251,7 @@ def main():
         cwd=ROOT, check=True,
         env={**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"},
     )
-    for script in ("run.sh", "run-runtime.sh"):
+    for script in ("run.sh", "run-runtime.sh", "run-wireops.sh"):
         shutil.copy(ROOT / "test" / "safety" / script, work / script)
         (work / script).chmod(0o755)
 
@@ -582,6 +585,12 @@ def main():
     scope_failures, scope_lines = safety_scope.run_scope_cases(work, capture_image)
     failures.extend(scope_failures)
 
+    # Per operation, not per run: each fingerprint connection held to what it was
+    # admitted before it began (M0 R2a). See safety_wire_ops.py.
+    import safety_wire_ops
+    wire_failures, wire_lines = safety_wire_ops.run_wire_ops(work, capture_image, corpus)
+    failures.extend(wire_failures)
+
     if failures:
         print("\nsafety: FAILED", file=sys.stderr)
         for f in failures:
@@ -589,6 +598,10 @@ def main():
         if scope_lines:
             print("\nscope cases (for context):", file=sys.stderr)
             for ln in scope_lines:
+                print(ln, file=sys.stderr)
+        if wire_lines:
+            print("\nper-operation wire admission (for context):", file=sys.stderr)
+            for ln in wire_lines:
                 print(ln, file=sys.stderr)
         return 1
 
@@ -600,6 +613,12 @@ def main():
     print("\nScope enforcement (§6.3), each driven through the runtime send-path and measured")
     print("at the wire on " + safety_scope.NET + ":")
     for ln in scope_lines:
+        print(ln)
+    print("\nPer-operation wire admission (R2a), fingerprint engine, offload off: captured")
+    print("engine-originated packets <= what the operation was admitted before it began.")
+    print("Kernel-response traffic (ACKs of peer data, retransmissions) is shown and is")
+    print("R2-B's to bound, not this check's:")
+    for ln in wire_lines:
         print(ln)
     print("\nThe capture filter is 'tcp or udp port 53' — this engine's traffic plus resolver")
     print("lookups. It MUST widen when an engine gains a method; a raw sender would not appear.")

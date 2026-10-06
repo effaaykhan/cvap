@@ -176,6 +176,19 @@ func (b *Bucket) refund(n uint32) {
 // deliberately does not have (ADR-047). It errs high — the boundary case counts
 // the retransmit that races the timeout — because a ceiling that guesses low is
 // not a ceiling.
+//
+// ============================================================================
+// UNCHANGED by M0 R2a, and known to undercount on Linux 6.8. Future work.
+// ============================================================================
+//
+// The exponential schedule above is not what a kernel with
+// tcp_syn_linear_timeouts (6.7+, default 4) does: it retransmits the first SYNs
+// a second apart, and a 2.5s connect measured three SYNs here where this says
+// two. The discovery engine charges by this function, so its SYN accounting on
+// such a kernel is low for connect timeouts that are not a whole number of the
+// exponential delays. R2a deliberately did not change it — fingerprint admits
+// against SynTrainBound instead — and correcting discovery's accounting is a
+// separate, future piece of work, not something this function silently does.
 func SynCost(timeout time.Duration) uint32 {
 	if timeout <= 0 {
 		return 1
@@ -190,6 +203,98 @@ func SynCost(timeout time.Duration) uint32 {
 		syns++
 	}
 	return syns
+}
+
+// SynTrainBound is the most SYNs a connect attempt can have put on the wire in d.
+//
+// ============================================================================
+// SynCost is the EXPECTED train. This is the CEILING, and admission needs that.
+// ============================================================================
+//
+// SynCost models exponential backoff. Linux 6.7 added tcp_syn_linear_timeouts
+// (default 4), which retransmits the first SYNs a second apart, and on such a
+// kernel SynCost undercounts: a 2.5s connect measured three SYNs (0, 1.03, 2.05s)
+// where it says two, and a 7.5s one seven where it says four.
+//
+// # What this bound rests on, and where it is claimed
+//
+// It is the admission bound for the SUPPORTED SCAN POINT ENVIRONMENT — a stock
+// Linux kernel's TCP — and not a property of TCP in general. It holds because,
+// there, a SYN's retransmit timer starts at one second (TCP_TIMEOUT_INIT) and
+// never shrinks under either the linear or the exponential schedule, so at most
+// one SYN leaves per elapsed second after the first. A stack that retransmits a
+// SYN sooner — a route-level or BPF-set initial RTO below a second, another
+// operating system — is outside what this was measured against and outside what
+// it claims.
+//
+// SynCost is left as it is because the discovery engine charges by it; this is
+// what the fingerprint engine admits against when it must not be exceeded
+// (M0 R2a).
+func SynTrainBound(d time.Duration) uint32 {
+	if d <= 0 {
+		return 1
+	}
+	return SaturatingAdd(1, saturate(int64(d/time.Second)))
+}
+
+// saturate converts a non-negative count to uint32, holding at the type's
+// maximum instead of wrapping. A bound that wrapped would turn an enormous cost
+// into a small one, which is the one direction an admission ceiling may never
+// err; a saturated one admits nothing it cannot pay for.
+func saturate(n int64) uint32 {
+	if n <= 0 {
+		return 0
+	}
+	if n >= int64(maxUint32) {
+		return maxUint32
+	}
+	return uint32(n)
+}
+
+// SaturatingAdd is a + b, held at the maximum rather than wrapping.
+func SaturatingAdd(a, b uint32) uint32 {
+	if a > maxUint32-b {
+		return maxUint32
+	}
+	return a + b
+}
+
+const maxUint32 = ^uint32(0)
+
+// ConnectionBound is the most packets this end sends for one TCP connection that
+// carries no data of its own: the SYN train, the ACK completing the handshake,
+// the FIN or RST that closes it, and the ACK of the peer's FIN.
+//
+// The last is a kernel response to the peer rather than something the engine
+// originated; it is one fixed packet and admitting it up front is cheaper than
+// reasoning about when it is owed. ACKs of the peer's DATA are not here — those
+// are unbounded by anything a connect-based engine controls, which a
+// receive-window experiment measured, and they are R2-B's to bound.
+func ConnectionBound(timeout time.Duration) uint32 {
+	return SaturatingAdd(SynTrainBound(timeout), EstablishedCost)
+}
+
+// SegmentPayload is the fewest payload bytes R2a assumes one outbound segment
+// carries: IPv4's default MSS of 536 when the peer names none, less the twelve
+// bytes of the timestamp option, rounded down.
+//
+// A peer can force smaller segments than this — advertise a tiny MSS or a
+// one-byte window and every byte becomes a packet. That is peer-induced traffic
+// in the same class as the ACKs of its data (R2-B), and it is NOT bounded here.
+const SegmentPayload = 512
+
+// Segments is how many outbound segments one write of n bytes is admitted as.
+func Segments(n int) uint32 {
+	if n <= 0 {
+		return 0
+	}
+	// Divided before rounding up, so n near the int maximum cannot overflow the
+	// addition that the usual (n + d - 1) / d form needs.
+	q := n / SegmentPayload
+	if n%SegmentPayload != 0 {
+		q++
+	}
+	return saturate(int64(q))
 }
 
 // EstablishedCost is what a connection that actually opens costs BEYOND its
