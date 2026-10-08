@@ -20,7 +20,9 @@
      profile). Deliberately the same hex in both themes so chrome reads as CVAP
      everywhere; status colours stay their own scale. */
   --nav-accent:#4c9df0;
-  --sidebar-w:220px; --sidebar-w-collapsed:60px;
+  /* Wide enough that a third-level label ("Asset Relationships / Topology")
+     sits on one line beside its two indents and a scrollbar. */
+  --sidebar-w:288px; --sidebar-w-collapsed:60px;
 
   /* Severity is its own scale, never the accent. Each value clears 4.5:1 on
      --surface so the word itself passes AA; colour only reinforces the word,
@@ -141,19 +143,26 @@ code, .mono { font-family:var(--mono); }
 .nav-collapsed .side-item { justify-content:center; padding:.5rem 0; }
 .nav-collapsed .sidebar-top { justify-content:center; padding:0; }
 
-/* Nav groups (Discover, Assess): a header is a .side-item, so hover and
+/* Nav groups: a section (Discover, Assess, …) heads its modules (Discovery,
+   Scans, …), which expand on their own. A header is a .side-item, so hover and
    spacing are the flat items' own. Children hang off a hairline guide under
    the parent's icon. Only a leaf takes .active; a header marks the group that
    holds the active leaf only on the icon rail, where the leaf cannot show. */
 .side-group { display:flex; flex-direction:column; gap:2px; }
+.side-section { margin-top:.45rem; }
+/* Expanded, a section head is a heading, not a control: no hover wash. On the
+   icon rail it is a button and takes the items' hover like any other. */
+div.side-section-head { cursor:default; }
+div.side-section-head:hover { color:var(--muted); background:transparent; }
 .side-chevron { flex:none; display:grid; place-items:center; margin-left:auto; color:var(--faint); transform:rotate(-90deg); }
 .side-chevron.open { transform:none; }
 .side-children {
   display:flex; flex-direction:column; gap:2px;
   margin-left:1.15rem; padding-left:.35rem; border-left:1px solid var(--line);
 }
-/* Long leaf names wrap rather than ellipsise: "Asset Relationships /
-   Topology" is unreadable cut in half, and the rail's width is fixed. */
+/* The rail is sized so no current leaf wraps; a longer one, or a wider
+   fallback font, wraps rather than ellipsises — a name cut in half is
+   unreadable. */
 .side-leaf { white-space:normal; }
 .side-leaf .side-label { overflow:visible; }
 .nav-collapsed .side-children, .nav-collapsed .side-chevron { display:none; }

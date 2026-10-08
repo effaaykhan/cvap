@@ -78,40 +78,6 @@ const icons = {
       <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5" />
     </Icon>
   ),
-  triage: (
-    <Icon>
-      <path d="M12 3l7.5 3v5.2c0 4.5-3.2 8.1-7.5 9.8-4.3-1.7-7.5-5.3-7.5-9.8V6l7.5-3z" />
-    </Icon>
-  ),
-  systems: (
-    <Icon>
-      <rect x="3" y="4.5" width="18" height="12" rx="1.5" />
-      <path d="M9 20.5h6M12 16.5v4" />
-    </Icon>
-  ),
-  scans: (
-    <Icon>
-      <circle cx="10.5" cy="10.5" r="6.5" />
-      <path d="M15.3 15.3L21 21" />
-    </Icon>
-  ),
-  health: (
-    <Icon>
-      <path d="M3 12h4l2.5-6 4 12 2.5-6h5" />
-    </Icon>
-  ),
-  identity: (
-    <Icon>
-      <circle cx="12" cy="8" r="4" />
-      <path d="M4.5 20.5c1.2-3.6 4.1-5.5 7.5-5.5s6.3 1.9 7.5 5.5" />
-    </Icon>
-  ),
-  knowledge: (
-    <Icon>
-      <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15.5H6.5A2.5 2.5 0 0 0 4 21V5.5z" />
-      <path d="M4 18.5A2.5 2.5 0 0 1 6.5 16H20" />
-    </Icon>
-  ),
   settings: (
     <Icon>
       <circle cx="12" cy="12" r="3.2" />
@@ -130,6 +96,26 @@ const icons = {
       <path d="M9 4.5V3h6v1.5M9 13l2 2 4-4" />
     </Icon>
   ),
+  manage: (
+    <Icon>
+      <path d="M12 3l9 5-9 5-9-5 9-5z" />
+      <path d="M3 12.5l9 5 9-5M3 16.5l9 5 9-5" />
+    </Icon>
+  ),
+  platform: (
+    <Icon>
+      <rect x="3" y="4" width="18" height="6.5" rx="1.5" />
+      <rect x="3" y="13.5" width="18" height="6.5" rx="1.5" />
+      <path d="M7 7.25h.01M7 16.75h.01" />
+    </Icon>
+  ),
+  administration: (
+    <Icon>
+      <circle cx="9" cy="8" r="3.5" />
+      <path d="M2.5 20c.9-3.3 3.4-5 6.5-5s5.6 1.7 6.5 5" />
+      <path d="M15.5 4.7a3.5 3.5 0 0 1 0 6.6M18 15.4c1.6.8 2.7 2.4 3.3 4.6" />
+    </Icon>
+  ),
   signout: (
     <Icon>
       <path d="M14 4H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h7" />
@@ -138,14 +124,16 @@ const icons = {
   ),
 };
 
-// The grouped part of the sidebar. A leaf either renders its own `screen` at
-// `path`, points at the screen that already is that module (`to` differs from
-// `path`; `path` redirects there, so no screen is duplicated) or at a Pending
-// shell rendered at `path`. `data`
-// records what Core holds for a shell today, so the shell cannot overclaim:
-// "none" means nothing collects it, "partial" means related data exists but
-// no view is built. `perm` mirrors the flat nav's courtesy hiding for reused
-// screens; a shell reads nothing, so it needs none.
+// The sidebar hierarchy, three levels deep. A section (Discover, Assess, …) is
+// always open: it is a heading over its modules, not a control. A module
+// (Discovery, Scans, …) expands and collapses on its own, independently of its
+// siblings. A leaf either renders its own `screen` at `path`, points at the
+// screen that already is that module (`to` differs from `path`; `path`
+// redirects there, so no screen is duplicated) or at a Pending shell rendered
+// at `path`. `data` records what Core holds for a shell today, so the shell
+// cannot overclaim: "none" means nothing collects it, "partial" means related
+// data exists but no view is built. `perm` mirrors the courtesy hiding for
+// reused screens; a shell reads nothing, so it needs none.
 interface NavLeaf {
   label: string;
   path: string;
@@ -157,17 +145,21 @@ interface NavLeaf {
 interface NavGroup {
   id: string;
   label: string;
-  icon?: ReactNode;
-  children: (NavGroup | NavLeaf)[];
+  children: NavLeaf[];
+}
+interface NavSection {
+  id: string;
+  label: string;
+  icon: ReactNode;
+  children: NavGroup[];
 }
 
-const isGroup = (n: NavGroup | NavLeaf): n is NavGroup => "children" in n;
 const leafTarget = (l: NavLeaf) => l.to ?? l.path;
-// The same rule NavLink applies (end=false), so a group's state never
-// disagrees with the leaf it holds: /assets/123 still sits under Systems.
+// The same rule NavLink applies (end=false), so a module's state never
+// disagrees with the leaf it holds: /scans/123 still sits under Scans.
 const routeMatches = (to: string, pathname: string) => pathname === to || pathname.startsWith(to + "/");
 
-const NAV_GROUPS: NavGroup[] = [
+const NAV: NavSection[] = [
   {
     id: "discover",
     label: "Discover",
@@ -208,27 +200,172 @@ const NAV_GROUPS: NavGroup[] = [
     label: "Assess",
     icon: icons.assess,
     children: [
-      { label: "Scans", path: "/assess/scans", to: "/scans", perm: "scan.read" },
-      { label: "Vulnerabilities", path: "/assess/vulnerabilities", to: "/triage", perm: "finding.read" },
-      { label: "SAST", path: "/assess/sast", data: "none" },
-      { label: "DAST", path: "/assess/dast", data: "none" },
+      {
+        id: "assess/scans",
+        label: "Scans",
+        children: [
+          { label: "All Scans", path: "/assess/scans/all", to: "/scans", perm: "scan.read" },
+          // The Scans screen opens on its new-scan form; here it is reached as
+          // its own page, so the leaf is active rather than All Scans.
+          { label: "Create Scan", path: "/assess/scans/create", perm: "scan.create", screen: <Scans /> },
+          { label: "Scheduled Scans", path: "/assess/scans/scheduled", data: "none" },
+          { label: "Running Scans", path: "/assess/scans/running", data: "partial" },
+          { label: "Scan History", path: "/assess/scans/history", data: "partial" },
+          { label: "Scan Profiles", path: "/assess/scans/profiles", data: "partial" },
+          { label: "Scan Targets", path: "/assess/scans/targets", data: "partial" },
+        ],
+      },
+      {
+        id: "assess/vulnerabilities",
+        label: "Vulnerabilities",
+        children: [
+          { label: "All Vulnerabilities", path: "/assess/vulnerabilities/all", to: "/triage", perm: "finding.read" },
+          { label: "By Severity", path: "/assess/vulnerabilities/by-severity", data: "partial" },
+          { label: "Vulnerability Trends", path: "/assess/vulnerabilities/trends", data: "partial" },
+          { label: "Remediation", path: "/assess/vulnerabilities/remediation", data: "partial" },
+          { label: "Exceptions / Suppression", path: "/assess/vulnerabilities/exceptions", data: "none" },
+          { label: "Baselines", path: "/assess/vulnerabilities/baselines", data: "none" },
+          { label: "CVE / CWE Intelligence", path: "/assess/vulnerabilities/intelligence", data: "partial" },
+        ],
+      },
+      {
+        id: "assess/sast",
+        label: "SAST",
+        children: [
+          { label: "SAST Scans", path: "/assess/sast/scans", data: "none" },
+          { label: "Findings", path: "/assess/sast/findings", data: "none" },
+          { label: "Repositories", path: "/assess/sast/repositories", data: "none" },
+          { label: "Projects", path: "/assess/sast/projects", data: "none" },
+          { label: "Rules", path: "/assess/sast/rules", data: "none" },
+          { label: "Baselines", path: "/assess/sast/baselines", data: "none" },
+          { label: "Suppressions", path: "/assess/sast/suppressions", data: "none" },
+          { label: "Remediation", path: "/assess/sast/remediation", data: "none" },
+        ],
+      },
+      {
+        id: "assess/dast",
+        label: "DAST",
+        children: [
+          { label: "Web Applications", path: "/assess/dast/web-applications", data: "none" },
+          { label: "API Targets", path: "/assess/dast/api-targets", data: "none" },
+          { label: "Findings", path: "/assess/dast/findings", data: "none" },
+          { label: "Crawl Results", path: "/assess/dast/crawl-results", data: "none" },
+          { label: "Authentication Profiles", path: "/assess/dast/authentication-profiles", data: "none" },
+          { label: "Scan Policies", path: "/assess/dast/scan-policies", data: "none" },
+        ],
+      },
+    ],
+  },
+  {
+    id: "manage",
+    label: "Manage",
+    icon: icons.manage,
+    children: [
+      {
+        id: "manage/risk",
+        label: "Risk",
+        children: [
+          { label: "Risk Overview", path: "/manage/risk/overview", data: "partial" },
+          { label: "Asset Risk", path: "/manage/risk/asset-risk", data: "partial" },
+          { label: "Business Risk", path: "/manage/risk/business-risk", data: "none" },
+          { label: "Exposure Analysis", path: "/manage/risk/exposure-analysis", to: "/exposure", perm: "finding.read" },
+          { label: "Risk Trends", path: "/manage/risk/trends", data: "partial" },
+          { label: "Prioritization", path: "/manage/risk/prioritization", data: "partial" },
+        ],
+      },
+      {
+        id: "manage/remediation",
+        label: "Remediation",
+        children: [
+          { label: "Open Remediation", path: "/manage/remediation/open", data: "partial" },
+          { label: "Assigned to Me", path: "/manage/remediation/assigned-to-me", data: "none" },
+          { label: "SLA", path: "/manage/remediation/sla", data: "none" },
+          { label: "Overdue", path: "/manage/remediation/overdue", data: "none" },
+          { label: "Verified Fixes", path: "/manage/remediation/verified-fixes", data: "partial" },
+          { label: "Remediation History", path: "/manage/remediation/history", data: "partial" },
+        ],
+      },
+      {
+        id: "manage/reports",
+        label: "Reports",
+        children: [
+          { label: "Executive Reports", path: "/manage/reports/executive", data: "none" },
+          { label: "Technical Reports", path: "/manage/reports/technical", data: "partial" },
+          { label: "Developer Reports", path: "/manage/reports/developer", data: "none" },
+          { label: "Compliance Reports", path: "/manage/reports/compliance", data: "none" },
+          { label: "Scheduled Reports", path: "/manage/reports/scheduled", data: "none" },
+          { label: "Custom Reports", path: "/manage/reports/custom", data: "none" },
+        ],
+      },
+    ],
+  },
+  {
+    id: "platform",
+    label: "Platform",
+    icon: icons.platform,
+    children: [
+      {
+        id: "platform/policies",
+        label: "Policies",
+        children: [
+          { label: "Scan Policies", path: "/platform/policies/scan", data: "partial" },
+          { label: "Security Policies", path: "/platform/policies/security", data: "none" },
+          { label: "Risk Policies", path: "/platform/policies/risk", data: "none" },
+          { label: "SLA Policies", path: "/platform/policies/sla", data: "none" },
+          { label: "Compliance Policies", path: "/platform/policies/compliance", data: "none" },
+        ],
+      },
+    ],
+  },
+  {
+    id: "administration",
+    label: "Administration",
+    icon: icons.administration,
+    children: [
+      {
+        id: "administration/administration",
+        label: "Administration",
+        children: [
+          { label: "Users", path: "/administration/users", data: "none" },
+          { label: "Roles & Permissions", path: "/administration/roles", data: "none" },
+          { label: "Organizations / Tenants", path: "/administration/tenants", data: "none" },
+          { label: "Credentials / Secrets", path: "/administration/credentials", data: "partial" },
+          { label: "Audit Logs", path: "/administration/audit-logs", data: "none" },
+          { label: "System Configuration", path: "/administration/system-configuration", data: "none" },
+        ],
+      },
+      {
+        id: "administration/settings",
+        label: "Settings",
+        children: [
+          // The existing Settings screen (identity trust, host-key pins, your
+          // password) is the general settings page.
+          { label: "General", path: "/administration/settings/general", to: "/settings" },
+          { label: "Notifications", path: "/administration/settings/notifications", data: "none" },
+          { label: "Data Retention", path: "/administration/settings/data-retention", data: "none" },
+          { label: "Appearance", path: "/administration/settings/appearance", data: "none" },
+        ],
+      },
     ],
   },
 ];
 
-function navLeaves(nodes: (NavGroup | NavLeaf)[]): NavLeaf[] {
-  return nodes.flatMap((n) => (isGroup(n) ? navLeaves(n.children) : [n]));
-}
+const navLeaves = (): NavLeaf[] => NAV.flatMap((s) => s.children.flatMap((g) => g.children));
 
-// Ids of every group on the path to a leaf matching `pathname`.
-function activeGroups(nodes: (NavGroup | NavLeaf)[], pathname: string): string[] {
-  return nodes.flatMap((n) => {
-    if (!isGroup(n)) return [];
-    const inner = activeGroups(n.children, pathname);
-    const direct = n.children.some((c) => !isGroup(c) && routeMatches(leafTarget(c), pathname));
-    return direct || inner.length > 0 ? [n.id, ...inner] : [];
-  });
-}
+// Ids of the modules holding a leaf that matches `pathname`.
+const activeGroups = (pathname: string): string[] =>
+  NAV.flatMap((s) => s.children)
+    .filter((g) => g.children.some((l) => routeMatches(leafTarget(l), pathname)))
+    .map((g) => g.id);
+
+// Paths a previous build linked to directly, before their modules gained
+// children. Bookmarks keep landing somewhere real.
+const LEGACY_REDIRECTS: [string, string][] = [
+  ["/assess/scans", "/scans"],
+  ["/assess/vulnerabilities", "/triage"],
+  ["/assess/sast", "/assess/sast/scans"],
+  ["/assess/dast", "/assess/dast/web-applications"],
+];
 
 export function App() {
   const { session, loading, mustChange, logout } = useAuth();
@@ -246,11 +383,11 @@ export function App() {
     return next;
   };
 
-  // Arriving at a grouped route opens the groups that hold it, so the active
-  // leaf is never hidden. Only opens: a group the operator closed elsewhere
+  // Arriving at a grouped route opens the module that holds it, so the active
+  // leaf is never hidden. Only opens: a module the operator closed elsewhere
   // stays closed until they navigate into it.
   useEffect(() => {
-    const need = activeGroups(NAV_GROUPS, pathname);
+    const need = activeGroups(pathname);
     setOpenGroups((cur) => (need.every((g) => cur.includes(g)) ? cur : persistGroups([...new Set([...cur, ...need])])));
   }, [pathname]);
 
@@ -292,39 +429,25 @@ export function App() {
   };
   const hideTip = () => setTip(null);
 
-  // On the collapsed rail a group's children have no room to show, so its
-  // header expands the sidebar (the hamburger's own persisted path) with the
-  // group open, rather than toggling a list nobody can see.
+  // Expanding or collapsing one module leaves its siblings as they are.
   const toggleGroup = (id: string) => {
-    if (collapsed) {
-      setTip(null);
-      toggleSidebar();
-      setOpenGroups((cur) => (cur.includes(id) ? cur : persistGroups([...cur, id])));
-      return;
-    }
     setOpenGroups((cur) => persistGroups(cur.includes(id) ? cur.filter((g) => g !== id) : [...cur, id]));
+  };
+
+  // On the collapsed rail a section's modules have no room to show, so its
+  // icon expands the sidebar through the hamburger's own persisted path.
+  const expandFromRail = () => {
+    setTip(null);
+    toggleSidebar();
   };
 
   if (loading) return <div className="center">Loading…</div>;
   if (mustChange) return <ChangePassword />;
   if (!session) return <Login />;
 
-  // The console's five surfaces (design spec, backlog #12): landing first,
-  // triage as the centre of gravity, health as its own place. Nav items reflect
-  // the session's permissions as a courtesy: every route is enforced server-side,
-  // and each screen surfaces a 403 if a control was shown that should not have
-  // been. Hiding is never the only gate.
-  const canFindings = has(session, "finding.read");
-  const nav: [string, string, boolean, ReactNode][] = [
-    ["/", "Dashboard", true, icons.dashboard],
-    ["/triage", "Triage", canFindings, icons.triage],
-    ["/assets", "Systems", has(session, "asset.read"), icons.systems],
-    ["/scans", "Scans", has(session, "scan.read"), icons.scans],
-    ["/health", "Health", has(session, "scan.read"), icons.health],
-    ["/identity", "Identity", has(session, "asset.read"), icons.identity],
-    ["/knowledge", "Knowledge", canFindings, icons.knowledge],
-  ];
-
+  // Nav items reflect the session's permissions as a courtesy: every route is
+  // enforced server-side, and each screen surfaces a 403 if a control was shown
+  // that should not have been. Hiding is never the only gate.
   const sideItem = (to: string, label: string, icon: ReactNode | null, extra = "") => (
     <NavLink
       key={to}
@@ -341,23 +464,20 @@ export function App() {
   );
 
   const visibleLeaf = (l: NavLeaf) => !l.perm || has(session, l.perm);
-  const renderGroup = (g: NavGroup, top: boolean): ReactNode => {
+  const holds = (leaves: NavLeaf[]) => leaves.some((l) => routeMatches(leafTarget(l), pathname));
+
+  const renderGroup = (g: NavGroup): ReactNode => {
     const open = openGroups.includes(g.id);
-    const holdsActive = navLeaves(g.children).some((l) => routeMatches(leafTarget(l), pathname));
-    const bodyId = `side-group-${g.id.replace("/", "-")}`;
+    const bodyId = `side-group-${g.id.replace(/\//g, "-")}`;
     return (
       <div key={g.id} className="side-group">
         <button
           type="button"
-          className={"side-item side-group-head" + (holdsActive ? " holds-active" : "") + (top ? "" : " side-group-sub")}
+          className={"side-item side-group-head side-group-sub" + (holds(g.children) ? " holds-active" : "")}
           aria-expanded={open}
           aria-controls={bodyId}
-          aria-label={collapsed ? g.label : undefined}
           onClick={() => toggleGroup(g.id)}
-          onMouseEnter={showTip(g.label)}
-          onMouseLeave={hideTip}
         >
-          {g.icon && <span className="side-icon">{g.icon}</span>}
           <span className="side-label">{g.label}</span>
           <span className={open ? "side-chevron open" : "side-chevron"} aria-hidden="true">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -367,11 +487,34 @@ export function App() {
         </button>
         {open && (
           <div className="side-children" id={bodyId} role="group" aria-label={g.label}>
-            {g.children.map((c) =>
-              isGroup(c) ? renderGroup(c, false) : visibleLeaf(c) && sideItem(leafTarget(c), c.label, null, " side-leaf"),
-            )}
+            {g.children.filter(visibleLeaf).map((l) => sideItem(leafTarget(l), l.label, null, " side-leaf"))}
           </div>
         )}
+      </div>
+    );
+  };
+
+  // A section is a heading over its modules, always open. Only on the icon
+  // rail is it a control, because there its modules cannot show.
+  const renderSection = (s: NavSection): ReactNode => {
+    const cls = "side-item side-group-head side-section-head" + (holds(s.children.flatMap((g) => g.children)) ? " holds-active" : "");
+    const inner = (
+      <>
+        <span className="side-icon">{s.icon}</span>
+        <span className="side-label">{s.label}</span>
+      </>
+    );
+    return (
+      <div key={s.id} className="side-group side-section" role="group" aria-label={s.label}>
+        {collapsed ? (
+          <button type="button" className={cls} aria-label={s.label} onClick={expandFromRail}
+            onMouseEnter={showTip(s.label)} onMouseLeave={hideTip}>
+            {inner}
+          </button>
+        ) : (
+          <div className={cls}>{inner}</div>
+        )}
+        <div className="side-children">{s.children.map(renderGroup)}</div>
       </div>
     );
   };
@@ -394,11 +537,8 @@ export function App() {
           <span className="brand">CVAP</span>
         </div>
         <nav className="side-nav">
-          {/* Dashboard, then the Discover / Assess groups, then the flat
-              modules exactly as before. */}
-          {nav.slice(0, 1).filter(([, , ok]) => ok).map(([to, label, , icon]) => sideItem(to, label, icon))}
-          {NAV_GROUPS.map((g) => renderGroup(g, true))}
-          {nav.slice(1).filter(([, , ok]) => ok).map(([to, label, , icon]) => sideItem(to, label, icon))}
+          {sideItem("/", "Dashboard", icons.dashboard)}
+          {NAV.map(renderSection)}
         </nav>
         <div className="sidebar-bottom">
           <NavLink
@@ -485,15 +625,18 @@ export function App() {
             <Route path="/exposure" element={<Exposure />} />
             <Route path="/knowledge" element={<Knowledge />} />
             <Route path="/settings" element={<Settings />} />
-            {/* Discover / Assess. A leaf with its own screen renders it; one
-                that is an existing screen redirects to it; the rest are shells
-                until their data exists. */}
-            {navLeaves(NAV_GROUPS).map((l) => (
+            {/* The sidebar hierarchy. A leaf with its own screen renders it;
+                one that is an existing screen redirects to it; the rest are
+                shells until their data exists. */}
+            {navLeaves().map((l) => (
               <Route
                 key={l.path}
                 path={l.path}
                 element={l.screen ?? (l.to ? <Navigate to={l.to} replace /> : <Pending title={l.label} data={l.data ?? "none"} />)}
               />
+            ))}
+            {LEGACY_REDIRECTS.map(([from, to]) => (
+              <Route key={from} path={from} element={<Navigate to={to} replace />} />
             ))}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
