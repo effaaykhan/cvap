@@ -9,6 +9,7 @@ import (
 
 	scanpointv1 "github.com/effaaykhan/cvap/gen/cybersentinel/scanpoint/v1"
 	"github.com/effaaykhan/cvap/internal/enginewire"
+	"github.com/effaaykhan/cvap/internal/target"
 )
 
 // Mutations, declared beside the tests that must kill them.
@@ -106,7 +107,7 @@ func TestIntrusiveModeIsTheOnlyOneThatSupplies(t *testing.T) {
 // could act on it — which is what the h.cmd assertion is for.
 func TestAJobWhoseModeAndProbesDisagreeIsRefused(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	h := newEngineHost(log, "/nonexistent", "job-1", []string{"192.0.2.0/24"}, nil)
+	h := newEngineHost(log, "/nonexistent", "job-1", []string{"192.0.2.0/24"}, nil, target.CoreEndpoints{})
 
 	err := h.start(t.Context(),
 		[]enginewire.Target{{TaskID: "t1", Value: "192.0.2.5"}},

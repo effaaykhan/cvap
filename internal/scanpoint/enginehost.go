@@ -106,6 +106,11 @@ type engineHost struct {
 	allowed    []string
 	exclusions []string
 
+	// core is where Core can be reached (ADR-110). Never a scan target, whatever
+	// the scope says: the kernel packet ceiling exempts these addresses, so a
+	// scan of one would be a scan outside the ceiling.
+	core target.CoreEndpoints
+
 	cmd  *exec.Cmd
 	in   io.WriteCloser
 	out  *enginewire.Reader
@@ -179,13 +184,14 @@ var ErrOutOfScope = errors.New("scanpoint: a target is outside the job's authori
 // switch or by the lease watchdog. Two independent reviews reproduced it.
 var errStopBeforeStart = errors.New("scanpoint: the job was stopped before its engine started")
 
-func newEngineHost(log *slog.Logger, binary, jobID string, allowed, exclusions []string) *engineHost {
+func newEngineHost(log *slog.Logger, binary, jobID string, allowed, exclusions []string, core target.CoreEndpoints) *engineHost {
 	return &engineHost{
 		log:        log,
 		binary:     binary,
 		jobID:      jobID,
 		allowed:    allowed,
 		exclusions: exclusions,
+		core:       core,
 		reaped:     make(chan struct{}),
 	}
 }
@@ -236,6 +242,11 @@ func (h *engineHost) authorise(raw string) (bool, string) {
 	c, ok := target.Matches(raw)
 	if !ok {
 		return false, "target is not in canonical form: " + raw
+	}
+	// Ahead of the scope rules and independent of them: no allowlist entry can
+	// authorise a scan of Core (ADR-110).
+	if h.core.Contains(c) {
+		return false, "target is, or covers, a Core endpoint address, which is never a scan target (ADR-110): " + raw
 	}
 	return scope.Permits(c, h.allowed, h.exclusions)
 }

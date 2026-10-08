@@ -105,7 +105,18 @@ type Service struct {
 	// (ADR-020, ADR-091). Nil means no credentialed job can be dispatched;
 	// see UseSecretResolver.
 	secrets credsource.Resolver
+
+	// core is where Core itself is reached (ADR-110). No task may target it,
+	// whatever the scope says; see SetCoreEndpoints.
+	core target.CoreEndpoints
 }
+
+// SetCoreEndpoints installs the addresses Core is reached at, which no job may
+// target (ADR-110). The Scan Point's kernel packet ceiling exempts traffic to
+// Core, so a scan of Core would run outside the ceiling; this is site one of the
+// refusal, and the runtime's engineHost is site two. cmd/cvap-core always sets
+// it and refuses to start when it cannot build a non-empty set.
+func (s *Service) SetCoreEndpoints(c target.CoreEndpoints) { s.core = c }
 
 // The dispatch path's budget, and the ingest path's (ADR-101).
 //
@@ -1241,7 +1252,12 @@ func (s *Service) offerWork(ctx context.Context, sess *session, out chan<- *scan
 				// comparison again on its own machine (ADR-024, ADR-044).
 				canon, canonical := target.Matches(t.TaskTarget)
 				ok, why := canonical, "target is not in canonical form"
-				if canonical {
+				switch {
+				case canonical && s.core.Contains(canon):
+					// Ahead of the scope rules and independent of them: no
+					// allowlist entry can authorise a scan of Core (ADR-110).
+					ok, why = false, "target is, or covers, a Core endpoint address, which is never a scan target (ADR-110)"
+				case canonical:
 					ok, why = scope.Permits(canon, constraints.GetAllowedTargets(), constraints.GetExclusions())
 				}
 				if ok {

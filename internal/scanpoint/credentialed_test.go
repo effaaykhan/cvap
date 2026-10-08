@@ -20,6 +20,7 @@ import (
 	scanpointv1 "github.com/effaaykhan/cvap/gen/cybersentinel/scanpoint/v1"
 	"github.com/effaaykhan/cvap/internal/enginewire"
 	"github.com/effaaykhan/cvap/internal/hostkeytrust"
+	"github.com/effaaykhan/cvap/internal/target"
 )
 
 // ============================================================================
@@ -280,7 +281,7 @@ func TestEngineReceivesTheAgentSocketOnFD3AndCanSign(t *testing.T) {
 		id: "job-fd", epoch: 1,
 		constraints: &scanpointv1.ScanConstraints{AllowedTargets: []string{"192.0.2.0/24"}},
 		tasks:       []*scanpointv1.Task{{TaskId: "t1", Target: "192.0.2.7"}},
-		host:        newEngineHost(discard, script, "job-fd", []string{"192.0.2.0/24"}, nil),
+		host:        newEngineHost(discard, script, "job-fd", []string{"192.0.2.0/24"}, nil, target.CoreEndpoints{}),
 		done:        make(chan struct{}), terminated: make(chan struct{}),
 		needsCred: true, credUser: "lab", knownHosts: known, trust: hostkeytrust.SourceOperator,
 		credReady: make(chan struct{}),

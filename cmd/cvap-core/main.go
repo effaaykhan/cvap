@@ -30,9 +30,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -50,6 +52,7 @@ import (
 	"github.com/effaaykhan/cvap/internal/dispatch"
 	"github.com/effaaykhan/cvap/internal/logging"
 	"github.com/effaaykhan/cvap/internal/store"
+	"github.com/effaaykhan/cvap/internal/target"
 
 	// Embedded IANA timezone database.
 	//
@@ -165,6 +168,29 @@ func run(log *slog.Logger) error {
 
 	enrollSvc := enrollment.New(db, authority, endpoints, versions, log)
 	dispatchSvc := dispatch.New(db, versions, log)
+
+	// Core is never a scan target (ADR-110). The Scan Point's kernel packet
+	// ceiling exempts traffic to Core, so a job that scanned Core would run
+	// outside the ceiling; dispatch refuses any task that names it. The set is
+	// everywhere Core says it can be reached: the endpoints it hands scan
+	// points, its listeners, and the hosts its server certificate is issued for
+	// (wildcards excepted - they name no address). Resolved once, now; a Core
+	// that cannot build a non-empty set refuses to start.
+	coreEPs := []string{endpoints.Dispatch, endpoints.Ingest, endpoints.RulePacks,
+		os.Getenv("CVAP_CORE_ENROLL_LISTEN"), os.Getenv("CVAP_CORE_API_LISTEN")}
+	for _, h := range splitHosts(hosts) {
+		if !strings.HasPrefix(h, "*.") {
+			coreEPs = append(coreEPs, net.JoinHostPort(h, "0"))
+		}
+	}
+	core, err := target.NewCoreEndpoints(ctx, coreEPs, func(ctx context.Context, host string) ([]netip.Addr, error) {
+		return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	})
+	if err != nil {
+		return fmt.Errorf("cvap-core: Core endpoints (ADR-110): %w", err)
+	}
+	dispatchSvc.SetCoreEndpoints(core)
+	log.Info("Core endpoints are never scan targets", slog.Any("addresses", core.Addrs()))
 	ingestSvc := dispatch.NewIngest(db, log)
 
 	// Where a credential profile's secret_ref resolves to bytes at grant time

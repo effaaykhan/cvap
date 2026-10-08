@@ -63,7 +63,7 @@ func TestRuntimeSiteAgreesWithTheSharedTable(t *testing.T) {
 				return
 			}
 
-			h := newEngineHost(log, "/nonexistent", "job-1", tc.Allowed, tc.Exclusions)
+			h := newEngineHost(log, "/nonexistent", "job-1", tc.Allowed, tc.Exclusions, target.CoreEndpoints{})
 			got, why := h.authorise(canon.Value)
 			if got != tc.Want {
 				t.Errorf("runtime verdict for %q (canonical %q) = %v (%s), want %v. Core "+
@@ -102,7 +102,7 @@ func TestTheRuntimeRecomputesRatherThanValidating(t *testing.T) {
 		"CORP.example",           // case survived planning
 		" 192.0.2.5",             // whitespace was reintroduced on the wire
 	} {
-		h := newEngineHost(log, "/nonexistent", "job-1", allowed, nil)
+		h := newEngineHost(log, "/nonexistent", "job-1", allowed, nil, target.CoreEndpoints{})
 		if ok, _ := h.authorise(raw); ok {
 			t.Errorf("the runtime accepted %q, which is not its own canonical form of "+
 				"itself. Accepting it means the second site validated Core's answer "+
@@ -112,7 +112,7 @@ func TestTheRuntimeRecomputesRatherThanValidating(t *testing.T) {
 	}
 
 	// The control: an in-scope target in the form planning actually writes.
-	h := newEngineHost(log, "/nonexistent", "job-1", allowed, nil)
+	h := newEngineHost(log, "/nonexistent", "job-1", allowed, nil, target.CoreEndpoints{})
 	if ok, why := h.authorise("192.0.2.5"); !ok {
 		t.Errorf("the runtime refused a canonical in-scope target: %s", why)
 	}
@@ -127,7 +127,7 @@ func TestTheRuntimeRecomputesRatherThanValidating(t *testing.T) {
 // not willing to do.
 func TestAnUnauthorisedTargetRefusesTheWholeJob(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	h := newEngineHost(log, "/nonexistent", "job-1", []string{"192.0.2.0/24"}, nil)
+	h := newEngineHost(log, "/nonexistent", "job-1", []string{"192.0.2.0/24"}, nil, target.CoreEndpoints{})
 
 	err := h.start(t.Context(), []enginewire.Target{
 		{TaskID: "t1", Value: "192.0.2.5"},
@@ -156,7 +156,7 @@ func TestAnUnauthorisedTargetRefusesTheWholeJob(t *testing.T) {
 // switch or by the lease watchdog.
 func TestAStopBeforeStartRefusesTheSpawn(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	h := newEngineHost(log, "/bin/sh", "job-1", []string{"192.0.2.0/24"}, nil)
+	h := newEngineHost(log, "/bin/sh", "job-1", []string{"192.0.2.0/24"}, nil, target.CoreEndpoints{})
 
 	// The stop arrives first, with no process yet — stop() records the request
 	// precisely so start() can see it.

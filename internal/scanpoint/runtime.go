@@ -17,6 +17,7 @@ import (
 	"github.com/effaaykhan/cvap/internal/enginewire"
 	"github.com/effaaykhan/cvap/internal/hostkeytrust"
 	"github.com/effaaykhan/cvap/internal/logging"
+	"github.com/effaaykhan/cvap/internal/target"
 )
 
 // Runtime is the scan point.
@@ -51,6 +52,11 @@ type Runtime struct {
 	cfg      Config
 	log      *slog.Logger
 	identity *Identity
+
+	// core is where Core can be reached, resolved once at startup from the
+	// endpoints this scan point enrolled with. Every engineHost refuses it as a
+	// target (ADR-110).
+	core target.CoreEndpoints
 
 	submit *Submitter
 
@@ -92,7 +98,7 @@ type Runtime struct {
 	out chan *scanpointv1.ScanPointMessage
 }
 
-func NewRuntime(cfg Config, log *slog.Logger, id *Identity, engines *EngineSet, submit *Submitter) *Runtime {
+func NewRuntime(cfg Config, log *slog.Logger, id *Identity, engines *EngineSet, submit *Submitter, core target.CoreEndpoints) *Runtime {
 	corpus, packStatus := LoadCorpus(cfg, log)
 	return &Runtime{
 		corpus:     corpus,
@@ -100,6 +106,7 @@ func NewRuntime(cfg Config, log *slog.Logger, id *Identity, engines *EngineSet, 
 		cfg:        cfg,
 		log:        log,
 		identity:   id,
+		core:       core,
 		submit:     submit,
 		engineCaps: engines.Capabilities(),
 		engines:    engines,
@@ -500,7 +507,7 @@ func (r *Runtime) onAssignment(ctx context.Context, a *scanpointv1.JobAssignment
 		cancel:       cancel,
 		corpus:       r.corpus,
 		host: newEngineHost(r.log, binary, id,
-			c.GetAllowedTargets(), c.GetExclusions()),
+			c.GetAllowedTargets(), c.GetExclusions(), r.core),
 		done:       make(chan struct{}),
 		terminated: make(chan struct{}),
 		needsCred:  needsCred,

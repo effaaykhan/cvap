@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -74,6 +75,17 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	// Core is never a scan target (ADR-110): the kernel packet ceiling exempts
+	// traffic to Core, so a scan of it would run outside the ceiling. The set is
+	// what this scan point enrolled against, resolved now; a scan point that
+	// cannot build it refuses to start rather than run with a refusal that
+	// matches nothing.
+	core, err := scanpoint.CoreEndpoints(ctx, cfg, id)
+	if err != nil {
+		return fmt.Errorf("cvap-scanpoint: Core endpoints (ADR-110): %w", err)
+	}
+	log.Info("Core endpoints are never scan targets", slog.Any("addresses", core.Addrs()))
+
 	mtls, err := scanpoint.MutualTLS(cfg.DataDir, cfg.CABundlePath)
 	if err != nil {
 		return err
@@ -107,7 +119,7 @@ func run(log *slog.Logger) error {
 			slog.String("engine_version", c.GetEngineVersion()))
 	}
 
-	rt := scanpoint.NewRuntime(cfg, log, id, engines, submitter)
+	rt := scanpoint.NewRuntime(cfg, log, id, engines, submitter, core)
 	go rotateLoop(ctx, log, cfg, id)
 
 	client := scanpointv1.NewDispatchClient(dispatchConn)

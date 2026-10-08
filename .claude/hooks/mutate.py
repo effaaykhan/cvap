@@ -107,6 +107,10 @@ GO_SUITES = [
     "internal/control/api/oidc_test.go",
     "internal/dispatch/scope_conformance_test.go",
     "internal/scanpoint/scope_conformance_test.go",
+    # Core is never a scan target (ADR-110): each enforcement site's Core check
+    # removed alone, with everything else in scope, must fail its own test.
+    "internal/dispatch/core_target_test.go",
+    "internal/scanpoint/core_target_test.go",
     "internal/scanpoint/safetymode_test.go",
     "internal/engines/enginerate/ratebudget_test.go",
     "internal/engines/fingerprint/tls_test.go",

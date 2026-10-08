@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/effaaykhan/cvap/internal/enginewire"
+	"github.com/effaaykhan/cvap/internal/target"
 )
 
 // ============================================================================
@@ -67,6 +68,11 @@ type SafetyJob struct {
 	// renewal refusal. The trigger — a narrowing turning into a lost lease — is
 	// asserted in internal/dispatch; this is the half that reaches a wire.
 	StopAfterMS uint32 `json:"stop_after_ms,omitempty"`
+
+	// CoreEndpoints, when set, are the Core endpoints (IP:port literals; this
+	// harness resolves no names) the runtime refuses as targets (ADR-110), so
+	// the gate can put that refusal on a wire.
+	CoreEndpoints []string `json:"core_endpoints,omitempty"`
 }
 
 // SafetyResult is what SafetyDrive reports for diagnostics. The gate's assertion
@@ -86,7 +92,14 @@ type SafetyResult struct {
 // engine binary. A returned Refused=true is the whole-job scope halt
 // (ErrOutOfScope); any other error is a harness failure, not a scope decision.
 func SafetyDrive(ctx context.Context, log *slog.Logger, binary string, j SafetyJob) (SafetyResult, error) {
-	h := newEngineHost(log, binary, j.JobID, j.Allowed, j.Exclusions)
+	var core target.CoreEndpoints
+	if len(j.CoreEndpoints) > 0 {
+		var err error
+		if core, err = target.NewCoreEndpoints(ctx, j.CoreEndpoints, nil); err != nil {
+			return SafetyResult{}, err
+		}
+	}
+	h := newEngineHost(log, binary, j.JobID, j.Allowed, j.Exclusions, core)
 
 	// The SAME ADR-024 clamp job.budget applies, so the harness cannot drive the
 	// real engine past a ceiling the runtime would hold — a fragile target here
