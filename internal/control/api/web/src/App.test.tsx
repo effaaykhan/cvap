@@ -26,6 +26,7 @@ vi.mock("./screens/NetworkDiscovery", () => ({ NetworkDiscovery: () => <h1>Netwo
 vi.mock("./screens/WebDiscovery", () => ({ WebDiscovery: () => <h1>Web &amp; API Discovery</h1> }));
 vi.mock("./screens/Databases", () => ({ Databases: () => <h1>Databases</h1> }));
 vi.mock("./screens/UnknownAssets", () => ({ UnknownAssets: () => <h1>Unknown Assets</h1> }));
+vi.mock("./screens/RunningScans", () => ({ RunningScans: () => <h1>Running Scans</h1> }));
 
 import { App } from "./App";
 
@@ -62,7 +63,6 @@ const shells: [string, string, "none" | "partial"][] = [
   ["/discover/attack-surface/shadow-it", "Shadow IT", "none"],
   ["/discover/attack-surface/unknown-unmanaged", "Unknown / Unmanaged Assets", "partial"],
   ["/assess/scans/scheduled", "Scheduled Scans", "none"],
-  ["/assess/scans/running", "Running Scans", "partial"],
   ["/assess/vulnerabilities/by-severity", "By Severity", "partial"],
   ["/assess/vulnerabilities/exceptions", "Exceptions / Suppression", "none"],
   ["/assess/vulnerabilities/intelligence", "CVE / CWE Intelligence", "partial"],
@@ -118,6 +118,13 @@ describe("App navigation", () => {
     renderAt(path);
     expect(heading()).toBe(screenHeading);
     expect(within(sideNav()).getByRole("link", { name: leaf })).toHaveClass("active");
+  });
+
+  it("Running Scans is its own screen, active in the nav", () => {
+    renderAt("/assess/scans/running");
+    expect(heading()).toBe("Running Scans");
+    expect(screen.queryByText(/Not built yet/)).toBeNull();
+    expect(within(sideNav()).getByRole("link", { name: "Running Scans" })).toHaveClass("active");
   });
 
   it("Create Scan is the existing Scans screen at its own address", () => {

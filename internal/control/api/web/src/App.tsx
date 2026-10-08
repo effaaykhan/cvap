@@ -22,6 +22,7 @@ import { NetworkDiscovery } from "./screens/NetworkDiscovery";
 import { WebDiscovery } from "./screens/WebDiscovery";
 import { Databases } from "./screens/Databases";
 import { UnknownAssets } from "./screens/UnknownAssets";
+import { RunningScans } from "./screens/RunningScans";
 
 function readTheme(): "dark" | "light" {
   try {
@@ -209,7 +210,7 @@ const NAV: NavSection[] = [
           // its own page, so the leaf is active rather than All Scans.
           { label: "Create Scan", path: "/assess/scans/create", perm: "scan.create", screen: <Scans /> },
           { label: "Scheduled Scans", path: "/assess/scans/scheduled", data: "none" },
-          { label: "Running Scans", path: "/assess/scans/running", data: "partial" },
+          { label: "Running Scans", path: "/assess/scans/running", perm: "scan.read", screen: <RunningScans /> },
           { label: "Scan History", path: "/assess/scans/history", data: "partial" },
           { label: "Scan Profiles", path: "/assess/scans/profiles", data: "partial" },
           { label: "Scan Targets", path: "/assess/scans/targets", data: "partial" },

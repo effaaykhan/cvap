@@ -22,7 +22,7 @@
   --nav-accent:#4c9df0;
   /* Wide enough that a third-level label ("Asset Relationships / Topology")
      sits on one line beside its two indents and a scrollbar. */
-  --sidebar-w:288px; --sidebar-w-collapsed:60px;
+  --sidebar-w:280px; --sidebar-w-collapsed:60px;
 
   /* Severity is its own scale, never the accent. Each value clears 4.5:1 on
      --surface so the word itself passes AA; colour only reinforces the word,
@@ -1009,4 +1009,65 @@ td.attack-cell.unmapped { color:var(--faint); }
   .hide-sm { display:none; }
   .disc-toolbar input { width:100%; }
   .cap-list .chip { min-width:0; }
+}
+
+/* ---- running scans: summary tiles, filters, table, drawer, cancel ------- */
+.rs-refresh { display:flex; align-items:center; gap:.75rem; flex:none; }
+.rs-refreshed { color:var(--faint); font-size:.74rem; white-space:nowrap; }
+.rs-summary { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:.75rem; margin-bottom:1rem; }
+.rs-tile { padding:.65rem .85rem; display:flex; flex-direction:column; gap:.3rem; }
+.rs-tile .lbl { display:flex; align-items:center; gap:.4rem; }
+.rs-count { font:650 1.35rem/1 var(--sans); font-variant-numeric:tabular-nums; letter-spacing:-.02em; }
+.rs-count-pending { color:var(--sev-medium); }
+.rs-count-planning { color:var(--accent); }
+.rs-count-running { color:var(--ok); }
+.rs-count-blocked { color:var(--danger); }
+.rs-filters { display:flex; flex-wrap:wrap; align-items:flex-end; gap:.6rem; margin-bottom:.6rem; }
+.rs-filters label { display:flex; flex-direction:column; gap:.2rem; }
+.rs-filters select { background:var(--surface-2); font-size:.78rem; min-width:9rem; }
+.rs-filters .filt { align-self:flex-end; }
+.rs-table { padding-bottom:.6rem; }
+.rs-table td { white-space:nowrap; }
+.rs-status { display:inline-flex; gap:.3rem; align-items:center; }
+.rs-actions-h { text-align:right; }
+.rs-actions { text-align:right; }
+.rs-actions .rs-btn + .rs-btn { margin-left:.35rem; }
+.rs-notice { margin:.4rem 0 0; }
+/* Secondary buttons beside the console's one filled accent button. */
+.rs-btn {
+  padding:.22rem .6rem; font-size:.74rem; font-weight:600;
+  background:transparent; color:var(--fg); border:1px solid var(--line-strong);
+}
+.rs-btn:hover { background:var(--surface-2); }
+.rs-btn-danger { color:var(--danger); border-color:color-mix(in oklab, var(--danger), transparent 55%); }
+.rs-btn-danger:hover { background:color-mix(in oklab, var(--danger), transparent 88%); }
+.rs-btn-solid { background:var(--danger); color:var(--on-accent); border-color:var(--danger); }
+.rs-btn-solid:hover { background:color-mix(in oklab, var(--danger), black 12%); }
+.rs-backdrop { position:fixed; inset:0; z-index:30; background:rgba(0,0,0,.45); }
+.rs-drawer {
+  position:fixed; z-index:31; top:0; right:0; bottom:0; width:min(440px, 100vw);
+  overflow-y:auto; padding:1rem 1.2rem 1.5rem;
+  background:var(--surface); border-left:1px solid var(--line); box-shadow:-8px 0 24px rgba(0,0,0,.35);
+}
+.rs-drawer:focus { outline:none; }
+.rs-drawer-head { display:flex; justify-content:space-between; align-items:center; gap:.75rem; margin-bottom:.8rem; }
+.rs-drawer-head h2 { margin:0; font-size:1rem; }
+.rs-facts { margin:0; display:grid; gap:0; border:1px solid var(--line); border-radius:var(--radius); }
+.rs-facts > div { display:grid; grid-template-columns:9.5rem minmax(0,1fr); gap:.75rem; padding:.45rem .7rem; border-bottom:1px solid var(--line); }
+.rs-facts > div:last-child { border-bottom:none; }
+.rs-facts dt { color:var(--muted); font-size:.78rem; }
+.rs-facts dd { margin:0; min-width:0; overflow-wrap:anywhere; }
+.rs-sub { font-size:.82rem; margin:1.2rem 0 .55rem; }
+.rs-observed { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:.6rem; margin-bottom:.5rem; }
+.rs-dialog {
+  position:fixed; z-index:31; top:18vh; left:50%; transform:translateX(-50%);
+  width:min(460px, calc(100vw - 2rem)); padding:1rem 1.1rem; display:flex; flex-direction:column; gap:.55rem;
+}
+.rs-dialog h2 { margin:0; font-size:1rem; }
+.rs-dialog textarea { width:100%; box-sizing:border-box; resize:vertical; }
+.rs-dialog-actions { display:flex; justify-content:flex-end; gap:.5rem; margin-top:.2rem; }
+@media (max-width:1000px) { .rs-summary { grid-template-columns:repeat(2, minmax(0, 1fr)); } }
+@media (max-width:640px) {
+  .page-head:has(.rs-refresh) { flex-wrap:wrap; }
+  .rs-facts > div { grid-template-columns:1fr; gap:.1rem; }
 }
