@@ -21,9 +21,9 @@
      everywhere; status colours stay their own scale. */
   --nav-accent:#4c9df0;
   /* The narrowest rail on which every label sits on one line: the longest
-     third-level label ("Unknown / Unmanaged Assets", measured at 253px in the
-     widest fallback font) plus a classic 15px scrollbar for an overflowing nav. */
-  --sidebar-w:268px; --sidebar-w-collapsed:60px;
+     third-level label ("Unknown / Unmanaged Assets", measured at 235px in the
+     widest fallback font, indent included) plus the nav's 6px scrollbar. */
+  --sidebar-w:242px; --sidebar-w-collapsed:60px;
 
   /* Severity is its own scale, never the accent. Each value clears 4.5:1 on
      --surface so the word itself passes AA; colour only reinforces the word,
@@ -99,6 +99,17 @@ code, .mono { font-family:var(--mono); }
   flex:1 1 auto; overflow-y:auto; overflow-x:hidden;
   display:flex; flex-direction:column; gap:2px; padding:.6rem .4rem;
 }
+/* A 6px scrollbar that stays out of the way: the thumb is faint until the
+   rail is hovered. WebKit/Blink take the pseudo-elements; Chrome ignores them
+   once scrollbar-width is set, so the standard property is only for engines
+   without them (Firefox, where "thin" is its narrowest). */
+.side-nav::-webkit-scrollbar { width:6px; }
+.side-nav::-webkit-scrollbar-track { background:transparent; }
+.side-nav::-webkit-scrollbar-thumb { background:transparent; border-radius:3px; }
+.sidebar:hover .side-nav::-webkit-scrollbar-thumb { background:var(--line-strong); }
+@supports not selector(::-webkit-scrollbar) {
+  .side-nav { scrollbar-width:thin; scrollbar-color:var(--line-strong) transparent; }
+}
 .sidebar-bottom {
   flex:none; display:flex; flex-direction:column; gap:2px;
   padding:.6rem .4rem; border-top:1px solid var(--line); /* divider above the pinned pair */
@@ -146,8 +157,8 @@ code, .mono { font-family:var(--mono); }
 
 /* Nav groups: a section (Discover, Assess, …) heads its modules (Discovery,
    Scans, …), which expand on their own. A header is a .side-item, so hover and
-   spacing are the flat items' own. Children hang off a hairline guide under
-   the parent's icon. Only a leaf takes .active; a header marks the group that
+   spacing are the flat items' own. Children are indented under their
+   parent, with no guide line. Only a leaf takes .active; a header marks the group that
    holds the active leaf only on the icon rail, where the leaf cannot show. */
 .side-group { display:flex; flex-direction:column; gap:2px; }
 .side-section { margin-top:.45rem; }
@@ -157,13 +168,13 @@ div.side-section-head { cursor:default; }
 div.side-section-head:hover { color:var(--muted); background:transparent; }
 .side-chevron { flex:none; display:grid; place-items:center; margin-left:auto; color:var(--faint); transform:rotate(-90deg); }
 .side-chevron.open { transform:none; }
+/* No guide lines: indentation alone carries the hierarchy, each level
+   stepping in .6rem from the one above. */
 .side-children {
   display:flex; flex-direction:column; gap:2px;
-  margin-left:1.15rem; padding-left:.25rem; border-left:1px solid var(--line);
+  margin-left:.6rem;
 }
-/* A module's pages need no icon-width indent: their guide sits just inside
-   the module name, which keeps the rail as narrow as its longest label. */
-.side-children .side-children { margin-left:.55rem; }
+.side-children .side-children { margin-left:.6rem; }
 /* The rail is sized so no current leaf wraps; a longer one, or a wider
    fallback font, wraps rather than ellipsises — a name cut in half is
    unreadable. */
