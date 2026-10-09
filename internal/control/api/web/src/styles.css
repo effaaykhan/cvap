@@ -1045,6 +1045,15 @@ td.attack-cell.unmapped { color:var(--faint); }
 .rs-filters .filt { align-self:flex-end; }
 .rs-table { padding-bottom:.6rem; }
 .rs-table td { white-space:nowrap; }
+/* The table's own horizontal scrollbar, the sidebar's in miniature: 6px, no
+   track, the thumb shown while the table is hovered. */
+.rs-table .table-wrap::-webkit-scrollbar { height:6px; }
+.rs-table .table-wrap::-webkit-scrollbar-track { background:transparent; }
+.rs-table .table-wrap::-webkit-scrollbar-thumb { background:transparent; border-radius:3px; }
+.rs-table:hover .table-wrap::-webkit-scrollbar-thumb { background:var(--line-strong); }
+@supports not selector(::-webkit-scrollbar) {
+  .rs-table .table-wrap { scrollbar-width:thin; scrollbar-color:var(--line-strong) transparent; }
+}
 .rs-table thead th, .rs-table tbody td { padding-left:.55rem; padding-right:.55rem; }
 /* A long policy name must not set the table's width; the cell's title holds it whole. */
 .rs-table td.rs-policy { max-width:14rem; overflow:hidden; text-overflow:ellipsis; }
