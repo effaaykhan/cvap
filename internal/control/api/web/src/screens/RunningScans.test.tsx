@@ -114,7 +114,7 @@ describe("Running Scans", () => {
     expect(within(drawer).getByText("Observed Results (So Far)")).toBeInTheDocument();
     const hosts = within(drawer).getByText("Hosts Observed").closest(".rs-tile") as HTMLElement;
     expect(await within(hosts).findByText("1")).toBeInTheDocument();
-    expect(within(within(drawer).getByText("Open Ports Observed").closest(".rs-tile") as HTMLElement).getByText("2")).toBeInTheDocument();
+    expect(within(within(drawer).getByText("Open-Port Observations").closest(".rs-tile") as HTMLElement).getByText("2")).toBeInTheDocument();
     expect(within(drawer).getByText("Partial and current observations. Subject to change.")).toBeInTheDocument();
     expect(api.scanResults).toHaveBeenCalledWith(S1);
     await user.click(within(drawer).getByRole("button", { name: "Close" }));
@@ -165,3 +165,156 @@ describe("Running Scans", () => {
     expect(await screen.findByText("No scans are pending, planning or running.")).toBeInTheDocument();
   });
 });
+
+describe("Running Scans main table (unchanged by the drawer)", () => {
+  it("keeps its ten columns, in order, and View and Cancel on every row", async () => {
+    show();
+    await screen.findByRole("table");
+    expect(within(table()).getAllByRole("columnheader").map((h) => h.textContent)).toEqual([
+      "Scan ID", "Type", "Status", "Safety Mode", "Policy", "Requested By", "Requested At", "Started At", "Waiting / Running", "Actions",
+    ]);
+    for (const row of within(table()).getAllByRole("row").slice(1)) {
+      expect(within(row).getByRole("button", { name: /^View scan / })).toBeInTheDocument();
+      expect(within(row).getByRole("button", { name: /^Cancel scan / })).toBeInTheDocument();
+    }
+  });
+});
+
+describe("Running Scans view drawer", () => {
+  const open = async (short: string) => {
+    const user = userEvent.setup();
+    show();
+    await screen.findByRole("table");
+    await user.click(screen.getByRole("button", { name: `View scan ${short}` }));
+    return screen.getByRole("dialog");
+  };
+  const tile = (drawer: HTMLElement, label: string) => within(drawer).getByText(label).closest(".rs-tile") as HTMLElement;
+  const port = (address: string, p: number, observed_at = "2026-10-08T10:05:00Z") => ({ address, port: p, protocol: "tcp", observed_at });
+  const results = (ports: object[], extra = {}) => ({ scan_id: S1, ports, hosts: new Set(ports.map((x) => (x as { address: string }).address)).size, truncated: false, limit: 2000, ephemeral: true, ...extra });
+
+  it("leads with results: hosts, observations, ports grouped by host, latest observation", async () => {
+    api.scanResults.mockResolvedValue(results([port("10.10.0.6", 443), port("10.10.0.5", 80, "2026-10-08T10:07:00Z"), port("10.10.0.5", 22)]));
+    const drawer = await open("3f2a91c0");
+    expect(await within(tile(drawer, "Hosts Observed")).findByText("2")).toBeInTheDocument();
+    expect(within(tile(drawer, "Open-Port Observations")).getByText("3")).toBeInTheDocument();
+    expect(within(drawer).queryByText(/Unique Open Ports/)).toBeNull();
+    const hosts = within(drawer).getByRole("list", { name: "Ports by host" });
+    expect(within(hosts).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["10.10.0.6 → 443/TCP", "10.10.0.5 → 22/TCP, 80/TCP"]);
+    expect(within(drawer).getByText(/Latest observation/).textContent).toContain(new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date("2026-10-08T10:07:00Z")));
+    expect(within(drawer).getByRole("link", { name: "Open full results →" })).toHaveAttribute("href", `/scans/${S1}`);
+  });
+
+  it("marks both counts N+ when truncated and says only the first records are shown", async () => {
+    api.scanResults.mockResolvedValue(results([port("10.10.0.5", 22), port("10.10.0.6", 22)], { truncated: true }));
+    const drawer = await open("3f2a91c0");
+    expect(await within(tile(drawer, "Hosts Observed")).findByText("2+")).toBeInTheDocument();
+    expect(within(tile(drawer, "Open-Port Observations")).getByText("2+")).toBeInTheDocument();
+    expect(within(drawer).getByText(/Showing only the first 2,000 records/)).toBeInTheDocument();
+  });
+
+  it("shows at most ten hosts and counts the omitted hosts, not rows", async () => {
+    const rows = Array.from({ length: 12 }, (_, i) => [port(`10.10.0.${i + 1}`, 22), port(`10.10.0.${i + 1}`, 80)]).flat();
+    api.scanResults.mockResolvedValue(results(rows));
+    const drawer = await open("3f2a91c0");
+    const hosts = await within(drawer).findByRole("list", { name: "Ports by host" });
+    expect(within(hosts).getAllByRole("listitem")).toHaveLength(10);
+    expect(within(drawer).getByText("+2 more hosts")).toBeInTheDocument();
+  });
+
+  it("never invents a latest time when no observation carries a valid one", async () => {
+    api.scanResults.mockResolvedValue(results([port("10.10.0.5", 22, ""), port("10.10.0.5", 80, "not-a-date")]));
+    const drawer = await open("3f2a91c0");
+    await within(drawer).findByRole("list", { name: "Ports by host" });
+    expect(within(drawer).queryByText(/Latest observation/)).toBeNull();
+  });
+
+  it("shows Loading… while results are pending", async () => {
+    api.scanResults.mockReturnValue(new Promise(() => {}));
+    const drawer = await open("3f2a91c0");
+    expect(within(drawer).getByText("Loading…")).toBeInTheDocument();
+    expect(within(drawer).queryByText("Hosts Observed")).toBeNull();
+  });
+
+  it("shows a failed request as a failure, never as zero", async () => {
+    api.scanResults.mockRejectedValue(new ApiError(404, "not_found", "scan not found"));
+    const drawer = await open("3f2a91c0");
+    expect(await within(drawer).findByRole("alert")).toHaveTextContent("Could not load results: scan not found");
+    expect(within(drawer).queryByText("Hosts Observed")).toBeNull();
+    expect(within(drawer).queryByText("0")).toBeNull();
+  });
+
+  it("explains an empty in-flight discovery scan as not yet ingested", async () => {
+    api.scanResults.mockResolvedValue(results([]));
+    const drawer = await open("3f2a91c0");
+    expect(await within(drawer).findByText("Nothing observed yet; results appear once accepted by ingest.")).toBeInTheDocument();
+    expect(within(drawer).queryByText("Hosts Observed")).toBeNull();
+  });
+
+  it("explains an empty result for a scan type that records no port observations", async () => {
+    api.scanResults.mockResolvedValue(results([]));
+    const drawer = await open("8b11e7d4"); // fingerprint
+    expect(await within(drawer).findByText("This scan type records no open-port observations.")).toBeInTheDocument();
+  });
+
+  it("explains an empty result for a discovery scan that has since finished", async () => {
+    api.scanResults.mockResolvedValue(results([]));
+    api.getScan.mockResolvedValue(scan(S1, { status: "completed", started_at: "2026-10-08T10:02:00Z", completed_at: "2026-10-08T10:30:00Z" }));
+    const drawer = await open("3f2a91c0");
+    expect(await within(drawer).findByText("No open-port observations remain (none recorded, or aged out).")).toBeInTheDocument();
+  });
+
+  it("shows the blocked reason and engine only for a scan health reports blocked", async () => {
+    const blockedDrawer = await open("0d4cc2a8");
+    const alert = within(blockedDrawer).getAllByRole("note").find((n) => n.textContent?.includes("Blocked"))!;
+    expect(alert).toHaveTextContent("no capable scan point online");
+    expect(alert).toHaveTextContent("engine rules");
+  });
+
+  it("does not show a blocked note for an unblocked scan", async () => {
+    const drawer = await open("3f2a91c0");
+    expect(within(drawer).queryByText(/engine/)).toBeNull();
+  });
+
+  it("shows policy limits with policy.read", async () => {
+    const drawer = await open("3f2a91c0");
+    expect(within(drawer).getByText("Policy limits")).toBeInTheDocument();
+    expect(within(drawer).getByText("100 pps")).toBeInTheDocument();
+    expect(within(drawer).getByText("Max concurrent per target").nextElementSibling).toHaveTextContent("1");
+  });
+
+  it("hides policy limits without policy.read", async () => {
+    session.permissions = ["scan.read", "scan.cancel"];
+    const drawer = await open("3f2a91c0");
+    expect(within(drawer).queryByText("Policy limits")).toBeNull();
+  });
+
+  it("shows only kill switches that provably cover the scan: its own or tenant-wide, never zone-scoped", async () => {
+    api.health.mockResolvedValue({ blocked_scans: [], active_kills: [
+      { id: "k1", scope: "scan", scan_id: S1, reason: "stop this one", unacknowledged: 1, issued_at: "" },
+      { id: "k2", scope: "scan", scan_id: S2, reason: "a different scan", unacknowledged: 0, issued_at: "" },
+      { id: "k3", scope: "zone", zone_id: "z1", reason: "zone wide", unacknowledged: 0, issued_at: "" },
+      { id: "k4", scope: "tenant", reason: "everything", unacknowledged: 0, issued_at: "" },
+    ] });
+    const drawer = await open("3f2a91c0");
+    const notes = within(drawer).getAllByRole("note").map((n) => n.textContent);
+    expect(notes.some((t) => t?.includes("stop this one") && t.includes("1 scan point not yet acknowledged"))).toBe(true);
+    expect(notes.some((t) => t?.includes("everything"))).toBe(true);
+    expect(notes.some((t) => t?.includes("a different scan"))).toBe(false);
+    expect(notes.some((t) => t?.includes("zone wide"))).toBe(false);
+  });
+
+  it("drops the facts the table already shows, keeping full ids", async () => {
+    const drawer = await open("3f2a91c0");
+    const terms = within(drawer).getAllByRole("term").map((t) => t.textContent);
+    for (const gone of ["Started At", "Type", "Status", "Safety Mode", "Waiting / Running"]) expect(terms).not.toContain(gone);
+    expect(terms).toEqual(expect.arrayContaining(["Scan ID", "Policy", "Requested By", "Requested At"]));
+    expect(within(drawer).getByText(S1)).toBeInTheDocument();
+    expect(within(drawer).getByText(`· ${P1}`)).toBeInTheDocument();
+    // Status, type and safety still lead the drawer, in its header line.
+    const meta = within(drawer).getByLabelText("Scan summary");
+    expect(meta).toHaveTextContent("Running");
+    expect(meta).toHaveTextContent("discovery");
+    expect(meta).toHaveTextContent("safe");
+  });
+});
+

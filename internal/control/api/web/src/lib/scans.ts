@@ -1,7 +1,8 @@
 // Pure helpers behind the Running Scans page. No I/O. Every value here comes
 // from a field /v1/scans serves (ScanResponse); nothing estimates progress,
 // because the scan record carries none.
-import type { Scan, ScanList } from "./api";
+import type { Scan, ScanList, ScanPort } from "./api";
+import { groupPorts } from "./console";
 import { fmtSpan } from "./discovery";
 
 // The three statuses a scan holds before it finishes (scan_status enum,
@@ -65,3 +66,78 @@ export function newestFirst(rows: Scan[]): Scan[] {
 }
 
 export const distinct = (values: string[]): string[] => [...new Set(values)].sort();
+
+// ---------------------------------------------------------------- drawer
+// The View drawer's reading of /v1/scans/{id}/results. Every number here is a
+// count of the rows the server returned, nothing more: the rows are NOT
+// de-duplicated (one address:port seen twice is two observations), and past
+// the server's cap `truncated` says the set is incomplete, so both counts then
+// read "N+".
+export const DRAWER_HOST_LIMIT = 10;
+
+type ResultRow = Pick<ScanPort, "address" | "port" | "protocol" | "observed_at">;
+export type ResultSummary = {
+  hosts: string;
+  observations: string;
+  groups: [string, ResultRow[]][];
+  shown: [string, ResultRow[]][];
+  more: number;
+  latest: string | null;
+};
+
+export function summarizeResults(r: { ports: ResultRow[]; hosts: number; truncated: boolean }, limit = DRAWER_HOST_LIMIT): ResultSummary {
+  // Grouped across EVERY returned row before the display limit applies, so
+  // "+N more" counts hosts, not rows.
+  const groups = groupPorts(r.ports, (p) => p.address);
+  let latest: string | null = null;
+  let latestMs = -Infinity;
+  for (const p of r.ports) {
+    const ms = new Date(p.observed_at).getTime();
+    if (Number.isFinite(ms) && ms > latestMs) {
+      latestMs = ms;
+      latest = p.observed_at;
+    }
+  }
+  const plus = r.truncated ? "+" : "";
+  return {
+    hosts: `${r.hosts}${plus}`,
+    observations: `${r.ports.length}${plus}`,
+    groups,
+    shown: groups.slice(0, limit),
+    more: Math.max(0, groups.length - limit),
+    latest,
+  };
+}
+
+// "22/TCP, 443/TCP" — one host's ports, ascending as groupPorts leaves them.
+export const portList = (rows: ResultRow[]): string => rows.map((p) => `${p.port}/${(p.protocol || "tcp").toUpperCase()}`).join(", ");
+
+// Only the discovery engine records `port` observations
+// (internal/engines/discovery/discovery.go is the one observation(taskID,
+// "port", …) in internal/engines), so for any other scan type an empty result
+// is structural, not "nothing found".
+export const RECORDS_PORT_OBSERVATIONS: ReadonlySet<string> = new Set(["discovery"]);
+
+// What an empty, successful results read means for this scan. Never "found
+// nothing": zero rows can be pending ingest, aged out, or a type that records
+// no ports at all.
+export function emptyResultMessage(s: Pick<Scan, "scan_type" | "status">): string {
+  if (!RECORDS_PORT_OBSERVATIONS.has(s.scan_type)) return "This scan type records no open-port observations.";
+  if (isInFlight(s.status)) return "Nothing observed yet; results appear once accepted by ingest.";
+  return "No open-port observations remain (none recorded, or aged out).";
+}
+
+// Kill switches that provably cover this scan: one naming it, or a
+// tenant-wide one ("halts everything this tenant is running"). A zone-scoped
+// kill is never matched — a scan carries no zone, so applicability would be a
+// guess.
+export function killsFor<K extends { scope: string; scan_id?: string | null }>(scanID: string, kills: K[]): K[] {
+  return kills.filter((k) => k.scope === "tenant" || (k.scope === "scan" && k.scan_id === scanID));
+}
+
+// The drawer's requester: the full user id where the table shortens it.
+export function requesterFull(requestedBy: string | null | undefined, sessionUserID: string | undefined): string {
+  if (!requestedBy) return "system";
+  if (sessionUserID && requestedBy === sessionUserID) return "You";
+  return requestedBy;
+}

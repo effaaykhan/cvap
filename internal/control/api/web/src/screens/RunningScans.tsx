@@ -1,14 +1,16 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, ApiError, has, type Scan } from "../lib/api";
+import { api, ApiError, has, type BlockedScan, type Health, type Policy, type Scan } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { PageHead } from "../components/PageHead";
 import { Pager, PAGE_ROWS, TableWrap } from "../components/Discovery";
 import { shortDate } from "../lib/discovery";
+import { ago } from "../lib/console";
 import {
-  countLabel, distinct, elapsedLabel, filterScans, IN_FLIGHT, IN_FLIGHT_CHIP, IN_FLIGHT_LABEL, isInFlight,
-  newestFirst, requesterLabel, SCAN_PAGE, type InFlight, type RunningFilter,
+  countLabel, distinct, elapsedLabel, emptyResultMessage, filterScans, IN_FLIGHT, IN_FLIGHT_CHIP, IN_FLIGHT_LABEL,
+  isInFlight, killsFor, newestFirst, portList, requesterFull, requesterLabel, SCAN_PAGE, summarizeResults,
+  type InFlight, type RunningFilter,
 } from "../lib/scans";
 
 // Running Scans: every scan requested and not yet finished, from /v1/scans —
@@ -48,8 +50,10 @@ export function RunningScans() {
   const rows = filterScans(all, filter, session?.user_id);
   const visible = rows.slice(page * PAGE_ROWS, (page + 1) * PAGE_ROWS);
 
-  const blocked = new Map((health.data?.blocked_scans ?? []).map((b) => [b.id, b.reason]));
-  const policyName = new Map((policies.data?.policies ?? []).map((p) => [p.id, p.name]));
+  const blockedScans = new Map((health.data?.blocked_scans ?? []).map((b) => [b.id, b]));
+  const blocked = new Map([...blockedScans].map(([id, b]) => [id, b.reason]));
+  const policyByID = new Map((policies.data?.policies ?? []).map((p) => [p.id, p]));
+  const policyName = new Map([...policyByID].map(([id, p]) => [id, p.name]));
   const policyLabel = (id: string) => policyName.get(id) ?? id.slice(0, 8);
 
   const loading = lists.some((l) => l.isLoading);
@@ -178,8 +182,9 @@ export function RunningScans() {
       </div>
 
       {viewing && (
-        <ScanDrawer scan={viewing} now={now} policyLabel={policyLabel} blockedReason={blocked.get(viewing.id)}
-          requester={requesterLabel(viewing.requested_by, session?.user_id)} onClose={() => setViewing(null)} />
+        <ScanDrawer scan={viewing} now={now} policyLabel={policyLabel} blocked={blockedScans.get(viewing.id)}
+          policy={has(session, "policy.read") ? policyByID.get(viewing.policy_id) : undefined}
+          kills={health.data?.active_kills ?? []} sessionUserID={session?.user_id} onClose={() => setViewing(null)} />
       )}
       {cancelling && (
         <CancelDialog
@@ -214,9 +219,11 @@ function SafetyChip({ mode }: { mode: string }) {
 
 // The View drawer. The row is the starting point; the scan is re-read so a
 // state change while it is open (a scan finishing) shows rather than a stale
-// row. Results are the scan's own observations so far.
-function ScanDrawer({ scan, now, policyLabel, requester, blockedReason, onClose }: {
-  scan: Scan; now: number; policyLabel: (id: string) => string; requester: string; blockedReason?: string; onClose: () => void;
+// row. Observed results lead: they are the one thing the table cannot show.
+// Facts the table already carries collapse into the header line.
+function ScanDrawer({ scan, now, policyLabel, blocked, policy, kills, sessionUserID, onClose }: {
+  scan: Scan; now: number; policyLabel: (id: string) => string; blocked?: BlockedScan; policy?: Policy;
+  kills: Health["active_kills"]; sessionUserID?: string; onClose: () => void;
 }) {
   const titleId = useId();
   const ref = useRef<HTMLDivElement>(null);
@@ -229,6 +236,8 @@ function ScanDrawer({ scan, now, policyLabel, requester, blockedReason, onClose 
     refetchInterval: isInFlight(s.status) ? 10_000 : false,
   });
   const r = results.data;
+  const sum = r ? summarizeResults(r) : null;
+  const applying = killsFor(s.id, kills);
   return (
     <>
       <div className="rs-backdrop" onClick={onClose} />
@@ -238,38 +247,83 @@ function ScanDrawer({ scan, now, policyLabel, requester, blockedReason, onClose 
           <h2 id={titleId}>Scan <span className="data">{s.id.slice(0, 8)}</span></h2>
           <button type="button" className="rs-btn" onClick={onClose} aria-label="Close">Close</button>
         </div>
-        <dl className="rs-facts">
-          <div><dt>Scan ID</dt><dd className="data">{s.id}</dd></div>
-          <div><dt>Type</dt><dd className="data">{s.scan_type}</dd></div>
-          <div><dt>Status</dt><dd><StatusChips scan={s} blockedReason={blockedReason} /></dd></div>
-          {blockedReason !== undefined && <div><dt>Blocked because</dt><dd>{blockedReason}</dd></div>}
-          <div><dt>Safety Mode</dt><dd><SafetyChip mode={s.safety_mode} /></dd></div>
-          <div><dt>Policy</dt><dd className="data">{policyLabel(s.policy_id)}</dd></div>
-          <div><dt>Requested By</dt><dd className="data">{requester}</dd></div>
-          <div><dt>Requested At</dt><dd className="data">{shortDate(s.created_at)}</dd></div>
-          <div><dt>Started At</dt><dd className="data">{shortDate(s.started_at)}</dd></div>
-          <div><dt>Waiting / Running</dt><dd className="data">{isInFlight(s.status) ? elapsedLabel(s, now) : `finished · ${s.status}`}</dd></div>
-        </dl>
+        <div className="rs-drawer-meta" aria-label="Scan summary">
+          <StatusChips scan={s} blockedReason={blocked?.reason} />
+          <span className="chip chip-muted data">{s.scan_type}</span>
+          <SafetyChip mode={s.safety_mode} />
+          <span className="data rs-drawer-elapsed">{isInFlight(s.status) ? elapsedLabel(s, now) : `finished · ${s.status}`}</span>
+        </div>
+
+        {applying.map((k) => (
+          <div key={k.id} className="rs-alert" role="note">
+            <b>Kill switch active ({k.scope})</b> — {k.reason}
+            {k.unacknowledged > 0 && <> · {k.unacknowledged} scan point{k.unacknowledged === 1 ? "" : "s"} not yet acknowledged</>}
+          </div>
+        ))}
+        {blocked && (
+          <div className="rs-alert" role="note">
+            <b>Blocked</b> — {blocked.reason} <span className="faint">· engine <span className="data">{blocked.engine}</span></span>
+          </div>
+        )}
 
         <h3 className="rs-sub">Observed Results (So Far)</h3>
         {results.error ? (
-          <p className="error small">Could not load this scan's results.</p>
-        ) : !r ? (
+          <p className="error small" role="alert">
+            Could not load results{results.error instanceof ApiError && results.error.message ? `: ${results.error.message}` : "."}
+          </p>
+        ) : !r || !sum ? (
           <p className="muted small">Loading…</p>
+        ) : r.ports.length === 0 ? (
+          <p className="muted small rs-empty-results">{emptyResultMessage(s)}</p>
         ) : (
-          <div className="rs-observed">
-            <div className="card rs-tile">
-              <span className="lbl">Hosts Observed</span>
-              <span className="rs-count">{r.hosts}</span>
+          <>
+            <div className="rs-observed">
+              <div className="card rs-tile">
+                <span className="lbl">Hosts Observed</span>
+                <span className="rs-count">{sum.hosts}</span>
+              </div>
+              <div className="card rs-tile">
+                <span className="lbl">Open-Port Observations</span>
+                <span className="rs-count">{sum.observations}</span>
+              </div>
             </div>
-            <div className="card rs-tile">
-              <span className="lbl">Open Ports Observed</span>
-              <span className="rs-count">{r.truncated ? `${r.ports.length}+` : r.ports.length}</span>
-            </div>
-          </div>
+            {sum.latest && (
+              <p className="small rs-latest">Latest observation <span className="data">{ago(sum.latest)}</span>
+                <span className="faint"> · {shortDate(sum.latest)}</span></p>
+            )}
+            <ul className="rs-hosts" aria-label="Ports by host">
+              {sum.shown.map(([address, ports]) => (
+                <li key={address}><span className="data">{address}</span> <span className="faint">→</span> <span className="data">{portList(ports)}</span></li>
+              ))}
+            </ul>
+            {sum.more > 0 && <p className="faint small">+{sum.more} more host{sum.more === 1 ? "" : "s"}</p>}
+            {r.truncated && (
+              <p className="faint small">Showing only the first {r.limit.toLocaleString()} records; the counts above may be incomplete.</p>
+            )}
+          </>
         )}
         <p className="muted small">Partial and current observations. Subject to change.</p>
-        <p className="small"><Link to={`/scans/${s.id}`}>Open the scan page →</Link></p>
+        <p className="faint small">Results appear once accepted by ingest and age out over time.</p>
+        <p className="small"><Link to={`/scans/${s.id}`}>Open full results →</Link></p>
+
+        <h3 className="rs-sub">Details</h3>
+        <dl className="rs-facts">
+          <div><dt>Scan ID</dt><dd className="data">{s.id}</dd></div>
+          <div><dt>Policy</dt><dd className="data">{policyLabel(s.policy_id)}<span className="faint"> · {s.policy_id}</span></dd></div>
+          <div><dt>Requested By</dt><dd className="data">{requesterFull(s.requested_by, sessionUserID)}</dd></div>
+          <div><dt>Requested At</dt><dd className="data">{shortDate(s.created_at)}</dd></div>
+        </dl>
+
+        {policy && (
+          <>
+            <h3 className="rs-sub">Policy limits</h3>
+            <dl className="rs-facts">
+              <div><dt>Safety ceiling</dt><dd><SafetyChip mode={policy.safety_mode} /></dd></div>
+              <div><dt>Max rate</dt><dd className="data">{policy.max_rate_pps != null ? `${policy.max_rate_pps} pps` : "not set"}</dd></div>
+              <div><dt>Max concurrent per target</dt><dd className="data">{policy.max_concurrent_per_target ?? "not set"}</dd></div>
+            </dl>
+          </>
+        )}
       </div>
     </>
   );

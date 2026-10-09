@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countLabel, elapsedLabel, filterScans, newestFirst, requesterLabel } from "./scans";
+import { countLabel, elapsedLabel, emptyResultMessage, filterScans, killsFor, newestFirst, portList, requesterFull, requesterLabel, summarizeResults } from "./scans";
 import type { Scan } from "./api";
 
 const scan = (id: string, extra: Partial<Scan> = {}): Scan => ({
@@ -48,3 +48,58 @@ describe("Running Scans helpers", () => {
     expect(newestFirst(rows).map((s) => s.id)).toEqual(["old", "new", "mid"]);
   });
 });
+
+describe("View drawer helpers", () => {
+  const row = (address: string, port: number, observed_at = "", protocol = "tcp") => ({ address, port, protocol, observed_at });
+
+  it("summarises returned rows without de-duplicating, grouping every row before the host limit", () => {
+    const rows = [row("10.0.0.2", 80), row("10.0.0.1", 443), row("10.0.0.1", 22), row("10.0.0.1", 22), row("10.0.0.3", 25)];
+    const s = summarizeResults({ ports: rows, hosts: 3, truncated: false }, 2);
+    expect(s.hosts).toBe("3");
+    expect(s.observations).toBe("5");
+    expect(s.groups.map(([a]) => a)).toEqual(["10.0.0.2", "10.0.0.1", "10.0.0.3"]);
+    expect(s.shown.map(([a]) => a)).toEqual(["10.0.0.2", "10.0.0.1"]);
+    expect(s.more).toBe(1);
+    expect(portList(s.groups[1][1])).toBe("22/TCP, 22/TCP, 443/TCP");
+  });
+
+  it("appends + to both counts when the server truncated", () => {
+    const s = summarizeResults({ ports: [row("10.0.0.1", 22)], hosts: 1, truncated: true });
+    expect([s.hosts, s.observations]).toEqual(["1+", "1+"]);
+  });
+
+  it("takes the latest valid observed_at and never invents one", () => {
+    const valid = summarizeResults({ ports: [row("a", 1, "2026-10-08T10:00:00Z"), row("a", 2, "2026-10-08T11:00:00Z"), row("a", 3, "bad")], hosts: 1, truncated: false });
+    expect(valid.latest).toBe("2026-10-08T11:00:00Z");
+    expect(summarizeResults({ ports: [row("a", 1, ""), row("a", 2, "bad")], hosts: 1, truncated: false }).latest).toBeNull();
+    expect(summarizeResults({ ports: [], hosts: 0, truncated: false }).latest).toBeNull();
+  });
+
+  it("chooses the empty-results message from scan type, then status", () => {
+    for (const t of ["fingerprint", "rules", "host"]) {
+      expect(emptyResultMessage({ scan_type: t, status: "running" })).toBe("This scan type records no open-port observations.");
+    }
+    for (const st of ["pending", "planning", "running"]) {
+      expect(emptyResultMessage({ scan_type: "discovery", status: st })).toBe("Nothing observed yet; results appear once accepted by ingest.");
+    }
+    for (const st of ["completed", "failed", "cancelled", "killed"]) {
+      expect(emptyResultMessage({ scan_type: "discovery", status: st })).toBe("No open-port observations remain (none recorded, or aged out).");
+    }
+  });
+
+  it("matches kill switches by scan id or tenant scope, never zone", () => {
+    const kills = [
+      { id: "a", scope: "scan", scan_id: "s1" }, { id: "b", scope: "scan", scan_id: "s2" },
+      { id: "c", scope: "zone", zone_id: "z" }, { id: "d", scope: "tenant" },
+    ];
+    expect(killsFor("s1", kills).map((k) => k.id)).toEqual(["a", "d"]);
+  });
+
+  it("shows the full requester id in the drawer, You for the session, system for none", () => {
+    const id = "1c9e4a77-0000-4000-8000-000000000000";
+    expect(requesterFull(id, "u1")).toBe(id);
+    expect(requesterFull("u1", "u1")).toBe("You");
+    expect(requesterFull(undefined, "u1")).toBe("system");
+  });
+});
+
