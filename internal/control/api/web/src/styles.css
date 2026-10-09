@@ -20,9 +20,10 @@
      profile). Deliberately the same hex in both themes so chrome reads as CVAP
      everywhere; status colours stay their own scale. */
   --nav-accent:#4c9df0;
-  /* Wide enough that a third-level label ("Asset Relationships / Topology")
-     sits on one line beside its two indents and a scrollbar. */
-  --sidebar-w:280px; --sidebar-w-collapsed:60px;
+  /* The narrowest rail on which every label sits on one line: the longest
+     third-level label ("Unknown / Unmanaged Assets", measured at 253px in the
+     widest fallback font) plus a classic 15px scrollbar for an overflowing nav. */
+  --sidebar-w:268px; --sidebar-w-collapsed:60px;
 
   /* Severity is its own scale, never the accent. Each value clears 4.5:1 on
      --surface so the word itself passes AA; colour only reinforces the word,
@@ -96,11 +97,11 @@ code, .mono { font-family:var(--mono); }
 .hamburger:hover { background:color-mix(in srgb, var(--nav-accent) 12%, transparent); color:var(--fg); }
 .side-nav {
   flex:1 1 auto; overflow-y:auto; overflow-x:hidden;
-  display:flex; flex-direction:column; gap:2px; padding:.6rem .5rem;
+  display:flex; flex-direction:column; gap:2px; padding:.6rem .4rem;
 }
 .sidebar-bottom {
   flex:none; display:flex; flex-direction:column; gap:2px;
-  padding:.6rem .5rem; border-top:1px solid var(--line); /* divider above the pinned pair */
+  padding:.6rem .4rem; border-top:1px solid var(--line); /* divider above the pinned pair */
 }
 .side-item {
   position:relative; display:flex; align-items:center; gap:.65rem;
@@ -158,12 +159,15 @@ div.side-section-head:hover { color:var(--muted); background:transparent; }
 .side-chevron.open { transform:none; }
 .side-children {
   display:flex; flex-direction:column; gap:2px;
-  margin-left:1.15rem; padding-left:.35rem; border-left:1px solid var(--line);
+  margin-left:1.15rem; padding-left:.25rem; border-left:1px solid var(--line);
 }
+/* A module's pages need no icon-width indent: their guide sits just inside
+   the module name, which keeps the rail as narrow as its longest label. */
+.side-children .side-children { margin-left:.55rem; }
 /* The rail is sized so no current leaf wraps; a longer one, or a wider
    fallback font, wraps rather than ellipsises — a name cut in half is
    unreadable. */
-.side-leaf { white-space:normal; }
+.side-leaf { white-space:normal; padding-left:.45rem; padding-right:.45rem; }
 .side-leaf .side-label { overflow:visible; }
 .nav-collapsed .side-children, .nav-collapsed .side-chevron { display:none; }
 .nav-collapsed .side-group-head.holds-active {
@@ -466,7 +470,9 @@ code { background:var(--surface-2); padding:.06rem .35rem; border-radius:4px; fo
 /* ---- shell: tenant + operator in the top bar, five-item nav ------------- */
 .who .tenant { font-family:var(--mono); font-size:.74rem; color:var(--muted); }
 .who .sep { color:var(--faint); }
-main.console { max-width:1440px; padding:1.4rem 1.6rem; }
+/* No cap: the console takes whatever width the sidebar leaves, so collapsing
+   it gives the content the space back. Prose keeps its own measure. */
+main.console { max-width:none; padding:1.4rem 1.6rem; }
 
 /* ---- page head: title, one honest sentence, right-aligned meta ---------- */
 .page-head { display:flex; justify-content:space-between; align-items:baseline; gap:1rem; margin-bottom:1.25rem; }
@@ -1028,6 +1034,9 @@ td.attack-cell.unmapped { color:var(--faint); }
 .rs-filters .filt { align-self:flex-end; }
 .rs-table { padding-bottom:.6rem; }
 .rs-table td { white-space:nowrap; }
+.rs-table thead th, .rs-table tbody td { padding-left:.55rem; padding-right:.55rem; }
+/* A long policy name must not set the table's width; the cell's title holds it whole. */
+.rs-table td.rs-policy { max-width:14rem; overflow:hidden; text-overflow:ellipsis; }
 .rs-status { display:inline-flex; gap:.3rem; align-items:center; }
 .rs-actions-h { text-align:right; }
 .rs-actions { text-align:right; }

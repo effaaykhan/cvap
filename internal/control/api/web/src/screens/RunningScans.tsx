@@ -158,7 +158,7 @@ export function RunningScans() {
                     <td className="data">{s.scan_type}</td>
                     <td><StatusChips scan={s} blockedReason={blocked.get(s.id)} /></td>
                     <td><SafetyChip mode={s.safety_mode} /></td>
-                    <td className="data" title={s.policy_id}>{policyLabel(s.policy_id)}</td>
+                    <td className="data rs-policy" title={`${policyLabel(s.policy_id)} · ${s.policy_id}`}>{policyLabel(s.policy_id)}</td>
                     <td className="data" title={s.requested_by ?? "requested by Core"}>{requesterLabel(s.requested_by, session?.user_id)}</td>
                     <td className="data">{shortDate(s.created_at)}</td>
                     <td className="data">{shortDate(s.started_at)}</td>
