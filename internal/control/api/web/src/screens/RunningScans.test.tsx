@@ -1,8 +1,8 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const session = { user_id: "u-me", permissions: [] as string[] };
 vi.mock("../lib/auth", () => ({ useAuth: () => ({ session }) }));
@@ -22,11 +22,19 @@ const P2 = "bbbbbbbb-0000-4000-8000-0000000000p2";
 const scan = (id: string, extra = {}) => ({
   id, policy_id: P1, scan_type: "discovery", status: "pending", safety_mode: "safe", created_at: "2026-10-08T10:00:00Z", ...extra,
 });
-const byStatus: Record<string, object[]> = {
-  pending: [scan(S3, { requested_by: undefined, policy_id: P2, scan_type: "rules" })],
-  planning: [scan(S2, { status: "planning", requested_by: "1c9e4a77-0000-4000-8000-000000000000", safety_mode: "intrusive", scan_type: "fingerprint" })],
+// The page's clock, two hours after the fixtures were requested: every
+// fixture is inside the 24-hour window unless a test moves it out.
+const NOW = new Date("2026-10-08T12:00:00Z");
+const DAY = 24 * 60 * 60 * 1000;
+const at = (ms: number) => new Date(ms).toISOString();
+let byStatus: Record<string, object[]>;
+const fixtures = (): Record<string, object[]> => ({
+  pending: [
+    scan(S3, { requested_by: undefined, policy_id: P2, scan_type: "rules" }),
+    scan(S2, { requested_by: "1c9e4a77-0000-4000-8000-000000000000", safety_mode: "intrusive", scan_type: "fingerprint" }),
+  ],
   running: [scan(S1, { status: "running", requested_by: "u-me", started_at: "2026-10-08T10:02:00Z" })],
-};
+});
 const health = (blocked: object[] = []) => ({ blocked_scans: blocked, active_kills: [] });
 
 function show() {
@@ -38,6 +46,11 @@ const rowIds = () => within(table()).getAllByRole("row").slice(1).map((r) => wit
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Only Date is faked: the window's reference time is deterministic while
+  // React Query's and userEvent's timers stay real.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW);
+  byStatus = fixtures();
   session.permissions = ["scan.read", "scan.cancel", "policy.read"];
   api.listScans.mockImplementation((q: string) => Promise.resolve({ scans: byStatus[new URLSearchParams(q).get("status")!] ?? [] }));
   api.health.mockResolvedValue(health([{ id: S3, scan_type: "rules", status: "pending", policy_id: P2, engine: "rules", reason: "no capable scan point online" }]));
@@ -46,21 +59,31 @@ beforeEach(() => {
   api.scanResults.mockResolvedValue({ scan_id: S1, ports: [{ address: "10.10.0.5", port: 22, protocol: "tcp", observed_at: "" }, { address: "10.10.0.5", port: 80, protocol: "tcp", observed_at: "" }], hosts: 1, truncated: false, limit: 2000, ephemeral: true });
 });
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+const summary = () => screen.getByLabelText("Status summary");
+const tileCount = (label: string) => (within(summary()).getByText(label).closest(".rs-tile") as HTMLElement).querySelector(".rs-count")!.textContent;
+
 describe("Running Scans", () => {
-  it("asks for each in-flight status separately, never a multi-status filter", async () => {
+  it("asks for pending and running separately, never planning and never a multi-status filter", async () => {
     show();
     await screen.findByRole("table");
     const asked = api.listScans.mock.calls.map(([q]) => new URLSearchParams(q as string).getAll("status"));
-    expect(asked).toEqual([["pending"], ["planning"], ["running"]]);
+    expect(asked).toEqual([["pending"], ["running"]]);
+  });
+
+  it("says which window it shows", async () => {
+    show();
+    await screen.findByRole("table");
+    expect(screen.getByText("Showing scans requested in the last 24 hours.")).toBeInTheDocument();
   });
 
   it("shows only real fields: counts, blocked from health, requester and policy labels", async () => {
     show();
     await screen.findByRole("table");
-    const summary = screen.getByLabelText("Status summary");
-    for (const [label, n] of [["Pending", "1"], ["Planning", "1"], ["Running", "1"], ["Blocked", "1"]]) {
-      expect(within(within(summary).getByText(label).closest(".rs-tile") as HTMLElement).getByText(n)).toBeInTheDocument();
-    }
+    for (const [label, n] of [["Pending", "2"], ["Running", "1"], ["Blocked", "1"]]) expect(tileCount(label)).toBe(n);
     // Same request time, so the endpoint's own tie-break: id descending.
     expect(rowIds()).toEqual(["8b11e7d4", "3f2a91c0", "0d4cc2a8"]);
     const t = table();
@@ -159,10 +182,155 @@ describe("Running Scans", () => {
     expect(btn).toHaveAttribute("title", expect.stringContaining("scan.cancel"));
   });
 
-  it("says so when nothing is in flight", async () => {
+  it("says so when nothing is in flight, and counts a genuine zero as 0", async () => {
     api.listScans.mockResolvedValue({ scans: [] });
     show();
-    expect(await screen.findByText("No scans are pending, planning or running.")).toBeInTheDocument();
+    expect(await screen.findByText("No scans are pending or running in the last 24 hours.")).toBeInTheDocument();
+    expect(tileCount("Pending")).toBe("0");
+    expect(tileCount("Running")).toBe("0");
+    expect(tileCount("Blocked")).toBe("0");
+  });
+});
+
+describe("Running Scans 24-hour window", () => {
+  const ids = () => (screen.queryByRole("table") ? rowIds() : []);
+  const tiles = () => ({ pending: tileCount("Pending"), running: tileCount("Running") });
+
+  it("keeps a scan requested exactly 24 hours ago, drops one a millisecond older, keeps a future one", async () => {
+    const edge = NOW.getTime() - DAY;
+    byStatus = {
+      pending: [
+        scan("aaaa0001-0000-4000-8000-000000000000", { created_at: at(edge) }),
+        scan("aaaa0002-0000-4000-8000-000000000000", { created_at: at(edge - 1) }),
+        // The same boundary instant written in another zone is the same instant.
+        scan("aaaa0003-0000-4000-8000-000000000000", { created_at: "2026-10-07T17:30:00+05:30" }),
+        // Ahead of the browser's clock (skew with Core): in, not hidden.
+        scan("aaaa0004-0000-4000-8000-000000000000", { created_at: at(NOW.getTime() + 60 * 60 * 1000) }),
+      ],
+      running: [
+        scan("bbbb0001-0000-4000-8000-000000000000", { status: "running", created_at: at(edge + 1), started_at: at(edge + 1) }),
+        scan("bbbb0002-0000-4000-8000-000000000000", { status: "running", created_at: "2026-10-05T09:00:00Z", started_at: "2026-10-05T09:01:00Z" }),
+      ],
+    };
+    show();
+    await screen.findByRole("table");
+    expect(ids().sort()).toEqual(["aaaa0001", "aaaa0003", "aaaa0004", "bbbb0001"]);
+    expect(tiles()).toEqual({ pending: "3", running: "1" });
+  });
+
+  it("shows the empty state, and zero counts, when every in-flight scan is older than 24 hours", async () => {
+    byStatus = {
+      pending: [scan(S3, { created_at: "2026-10-01T10:00:00Z" })],
+      running: [scan(S1, { status: "running", created_at: "2026-09-25T10:00:00Z", started_at: "2026-09-25T10:01:00Z" })],
+    };
+    show();
+    expect(await screen.findByText("No scans are pending or running in the last 24 hours.")).toBeInTheDocument();
+    expect(tiles()).toEqual({ pending: "0", running: "0" });
+    // The blocked scan is outside the window, so it is not counted either.
+    expect(tileCount("Blocked")).toBe("0");
+  });
+
+  it("never shows or counts planning, even if a read returned it", async () => {
+    byStatus.pending = [...byStatus.pending, scan("cccc0001-0000-4000-8000-000000000000", { status: "planning" })];
+    byStatus.running = [...byStatus.running, scan("cccc0002-0000-4000-8000-000000000000", { status: "planning" })];
+    show();
+    await screen.findByRole("table");
+    expect(ids()).not.toContain("cccc0001");
+    expect(ids()).not.toContain("cccc0002");
+    expect(tiles()).toEqual({ pending: "2", running: "1" });
+    expect(screen.queryByText(/planning/i)).toBeNull();
+    const status = within(screen.getByRole("group", { name: "Filters" })).getByLabelText("Status");
+    expect(within(status).getAllByRole("option").map((o) => o.textContent)).toEqual(["All", "Pending", "Running"]);
+  });
+
+  it("counts exactly the rows the table shows, per status", async () => {
+    const user = userEvent.setup();
+    byStatus.pending = [...byStatus.pending, scan("dddd0001-0000-4000-8000-000000000000", { created_at: "2026-10-06T10:00:00Z" })];
+    show();
+    await screen.findByRole("table");
+    expect(rowIds().length).toBe(Number(tileCount("Pending")) + Number(tileCount("Running")));
+    const filter = within(screen.getByRole("group", { name: "Filters" })).getByLabelText("Status");
+    await user.selectOptions(filter, "pending");
+    expect(rowIds().length).toBe(Number(tileCount("Pending")));
+    await user.selectOptions(filter, "running");
+    expect(rowIds().length).toBe(Number(tileCount("Running")));
+  });
+
+  it("marks a count N+ only when a further page could still hold scans inside the window", async () => {
+    byStatus = {
+      pending: [scan(S3), scan(S2)],
+      running: [scan(S1, { status: "running" }), scan("eeee0001-0000-4000-8000-000000000000", { status: "running", created_at: "2026-10-01T00:00:00Z" })],
+    };
+    api.listScans.mockImplementation((q: string) => Promise.resolve({ scans: byStatus[new URLSearchParams(q).get("status")!], next_before: "c", next_id: "x" }));
+    show();
+    await screen.findByRole("table");
+    // Pending's page ends inside the window: more may follow. Running's page
+    // already reached an older scan, so later pages are older still.
+    expect(tiles()).toEqual({ pending: "2+", running: "1" });
+  });
+
+  it("judges the window again, at a fresh time, on the next refresh", async () => {
+    const user = userEvent.setup();
+    show();
+    await screen.findByRole("table");
+    expect(rowIds()).toContain("0d4cc2a8");
+    // 22h later every fixture is 24h + 1ms old except S2, re-requested.
+    vi.setSystemTime(NOW.getTime() + 22 * 60 * 60 * 1000 + 1);
+    byStatus.pending = [scan(S3), scan(S2, { created_at: at(NOW.getTime() + 60 * 60 * 1000) })];
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(rowIds()).toEqual(["8b11e7d4"]));
+    expect(tiles()).toEqual({ pending: "1", running: "0" });
+  });
+
+  it("shows Loading… and no counts, no zero and no empty state while the reads are pending", async () => {
+    api.listScans.mockReturnValue(new Promise(() => {}));
+    show();
+    expect(await screen.findByText("Loading…")).toBeInTheDocument();
+    expect(tiles()).toEqual({ pending: "—", running: "—" });
+    expect(within(summary()).queryByText("Blocked")).toBeNull();
+    expect(screen.queryByText(/No scans are pending/)).toBeNull();
+    expect(screen.queryByText("0")).toBeNull();
+  });
+
+  it("shows a failed read as an error, never as zero or as nothing in flight", async () => {
+    api.listScans.mockRejectedValue(new ApiError(500, "internal", "boom"));
+    show();
+    expect(await screen.findByText(/Could not load every in-flight status/)).toBeInTheDocument();
+    expect(tiles()).toEqual({ pending: "—", running: "—" });
+    expect(within(summary()).queryByText("Blocked")).toBeNull();
+    expect(screen.queryByText(/No scans are pending/)).toBeNull();
+    expect(screen.queryByText("0")).toBeNull();
+  });
+
+  it("stops counting a read that fails on refresh, rather than showing its last count", async () => {
+    const user = userEvent.setup();
+    show();
+    await screen.findByRole("table");
+    expect(tiles()).toEqual({ pending: "2", running: "1" });
+    api.listScans.mockImplementation((q: string) =>
+      new URLSearchParams(q).get("status") === "pending" ? Promise.reject(new ApiError(500, "internal", "boom")) : Promise.resolve({ scans: byStatus.running }));
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText(/Could not load every in-flight status/)).toBeInTheDocument();
+    expect(tiles()).toEqual({ pending: "—", running: "1" });
+    expect(within(summary()).queryByText("Blocked")).toBeNull();
+  });
+
+  it("keeps the permission message for a 403", async () => {
+    api.listScans.mockRejectedValue(new ApiError(403, "forbidden", "no"));
+    show();
+    expect(await screen.findByText("This account cannot read scans (it lacks the scan.read permission).")).toBeInTheDocument();
+    expect(screen.queryByText(/No scans are pending/)).toBeNull();
+  });
+
+  it("with one read failed, counts only the one that answered and still shows its rows", async () => {
+    api.listScans.mockImplementation((q: string) =>
+      new URLSearchParams(q).get("status") === "pending" ? Promise.reject(new ApiError(500, "internal", "boom")) : Promise.resolve({ scans: byStatus.running }));
+    show();
+    await screen.findByRole("table");
+    expect(tiles()).toEqual({ pending: "—", running: "1" });
+    expect(rowIds()).toEqual(["3f2a91c0"]);
+    expect(within(summary()).queryByText("Blocked")).toBeNull();
+    expect(screen.getByText(/Could not load every in-flight status/)).toBeInTheDocument();
   });
 });
 

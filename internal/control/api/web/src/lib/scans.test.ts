@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countLabel, elapsedLabel, emptyResultMessage, filterScans, killsFor, newestFirst, portList, requesterFull, requesterLabel, summarizeResults } from "./scans";
+import { elapsedLabel, emptyResultMessage, filterScans, inWindow, killsFor, newestFirst, portList, requesterFull, requesterLabel, summarizeResults, WINDOW_MS, windowCountLabel, windowed } from "./scans";
 import type { Scan } from "./api";
 
 const scan = (id: string, extra: Partial<Scan> = {}): Scan => ({
@@ -21,10 +21,31 @@ describe("Running Scans helpers", () => {
     expect(elapsedLabel(scan("a", { status: "running", started_at: "2026-10-08T10:30:00Z" }), now)).toBe("Running 9m");
   });
 
-  it("calls a count exact only when the server returned no further page", () => {
-    expect(countLabel(undefined)).toBe("—");
-    expect(countLabel({ scans: [scan("a"), scan("b")] })).toBe("2");
-    expect(countLabel({ scans: [scan("a"), scan("b")], next_before: "x", next_id: "b" })).toBe("2+");
+  it("keeps the last 24 hours inclusive of the boundary, whatever the zone, and future times", () => {
+    const now = new Date("2026-10-08T12:00:00Z").getTime();
+    expect(WINDOW_MS).toBe(86_400_000);
+    expect(inWindow("2026-10-07T12:00:00Z", now)).toBe(true);
+    expect(inWindow("2026-10-07T11:59:59.999Z", now)).toBe(false);
+    expect(inWindow("2026-10-07T17:30:00+05:30", now)).toBe(true);
+    expect(inWindow("2026-10-07T07:59:59.999-04:00", now)).toBe(false);
+    expect(inWindow("2026-10-07T12:00:00.000000001Z", now)).toBe(true);
+    expect(inWindow("2026-10-01T10:00:00Z", now)).toBe(false);
+    expect(inWindow("2026-10-08T13:00:00Z", now)).toBe(true);
+    expect(inWindow("not-a-date", now)).toBe(false);
+    expect(inWindow("", now)).toBe(false);
+  });
+
+  it("windows one status's read and calls its count exact unless a further page could still be inside", () => {
+    const now = new Date("2026-10-08T12:00:00Z").getTime();
+    const fresh = scan("a", { created_at: "2026-10-08T11:00:00Z" });
+    const old = scan("b", { created_at: "2026-10-06T11:00:00Z" });
+    const planning = scan("c", { status: "planning", created_at: "2026-10-08T11:30:00Z" });
+    expect(windowed({ scans: [planning, fresh, old] }, "pending", now)).toEqual({ scans: [fresh], more: false });
+    expect(windowed({ scans: [fresh], next_before: "x", next_id: "a" }, "pending", now).more).toBe(true);
+    expect(windowed({ scans: [fresh, old], next_before: "x", next_id: "b" }, "pending", now).more).toBe(false);
+    expect(windowCountLabel(undefined)).toBe("—");
+    expect(windowCountLabel({ scans: [], more: false })).toBe("0");
+    expect(windowCountLabel({ scans: [fresh], more: true })).toBe("1+");
   });
 
   it("filters by status, type, policy and requester together", () => {

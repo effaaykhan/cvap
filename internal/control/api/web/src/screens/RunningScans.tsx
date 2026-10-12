@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, has, type BlockedScan, type Health, type Policy, type Scan } from "../lib/api";
@@ -8,23 +8,23 @@ import { Pager, PAGE_ROWS, TableWrap } from "../components/Discovery";
 import { shortDate } from "../lib/discovery";
 import { ago } from "../lib/console";
 import {
-  countLabel, distinct, elapsedLabel, emptyResultMessage, filterScans, IN_FLIGHT, IN_FLIGHT_CHIP, IN_FLIGHT_LABEL,
-  isInFlight, killsFor, newestFirst, portList, requesterFull, requesterLabel, SCAN_PAGE, summarizeResults,
-  type InFlight, type RunningFilter,
+  distinct, elapsedLabel, emptyResultMessage, filterScans, IN_FLIGHT_CHIP, IN_FLIGHT_LABEL, isInFlight, killsFor,
+  newestFirst, portList, requesterFull, requesterLabel, SCAN_PAGE, SHOWN, summarizeResults, windowCountLabel, windowed,
+  type RunningFilter, type Shown,
 } from "../lib/scans";
 
-// Running Scans: every scan requested and not yet finished, from /v1/scans —
-// one read per in-flight status, because the endpoint filters by one status at
-// a time. Core records a scan's state and timestamps, not its progress, so the
-// page shows how long each has waited or run and nothing that looks like a
-// percentage. Blocked is health's operational verdict on a scan, not a status.
+// Running Scans: pending and running scans requested in the last 24 hours,
+// from /v1/scans — one read per status, because the endpoint filters by one
+// status at a time. Core records a scan's state and timestamps, not its
+// progress, so the page shows how long each has waited or run and nothing that
+// looks like a percentage. Blocked is health's operational verdict on a scan, not a status.
 const POLL_MS = 15_000;
 
 export function RunningScans() {
   const { session } = useAuth();
   const qc = useQueryClient();
   const lists = useQueries({
-    queries: IN_FLIGHT.map((st) => {
+    queries: SHOWN.map((st) => {
       const q = `?status=${st}&limit=${SCAN_PAGE}`;
       return { queryKey: ["scans", q], queryFn: () => api.listScans(q), refetchInterval: POLL_MS };
     }),
@@ -45,10 +45,30 @@ export function RunningScans() {
     return () => clearInterval(t);
   }, []);
 
-  const byStatus = Object.fromEntries(IN_FLIGHT.map((st, i) => [st, lists[i]])) as Record<InFlight, (typeof lists)[number]>;
-  const all = newestFirst(lists.flatMap((l) => l.data?.scans ?? []).filter((s) => isInFlight(s.status)));
+  const loading = lists.some((l) => l.isLoading);
+  const failed = lists.filter((l) => l.error).map((l) => l.error);
+  const fetching = lists.some((l) => l.isFetching) || health.isFetching;
+  const refreshedAt = Math.max(0, ...lists.map((l) => l.dataUpdatedAt));
+
+  // The 24-hour window's reference time: taken once per refresh, so the
+  // tiles, the table and the empty state judge every row against the same
+  // instant, and moved on only when new data lands. The 5-second clock above
+  // drives the elapsed labels alone.
+  const windowNow = useMemo(() => Date.now(), [refreshedAt]);
+  // A status counts only when its read answered and has not since failed: an
+  // absent or failed read is "—", never 0.
+  const windows = SHOWN.map((st, i) => {
+    const l = lists[i];
+    return l.data && !l.error ? windowed(l.data, st, windowNow) : undefined;
+  });
+  const byStatus = Object.fromEntries(SHOWN.map((st, i) => [st, windows[i]])) as Record<Shown, (typeof windows)[number]>;
+  // The table is the same windowed rows the tiles count, and nothing else. A
+  // read that failed after loading keeps its last rows (the error says so)
+  // but drops out of the counts.
+  const all = newestFirst(SHOWN.flatMap((st, i) => (lists[i].data ? windowed(lists[i].data, st, windowNow).scans : [])));
   const rows = filterScans(all, filter, session?.user_id);
   const visible = rows.slice(page * PAGE_ROWS, (page + 1) * PAGE_ROWS);
+  const counted = !loading && failed.length === 0;
 
   const blockedScans = new Map((health.data?.blocked_scans ?? []).map((b) => [b.id, b]));
   const blocked = new Map([...blockedScans].map(([id, b]) => [id, b.reason]));
@@ -56,10 +76,6 @@ export function RunningScans() {
   const policyName = new Map([...policyByID].map(([id, p]) => [id, p.name]));
   const policyLabel = (id: string) => policyName.get(id) ?? id.slice(0, 8);
 
-  const loading = lists.some((l) => l.isLoading);
-  const failed = lists.filter((l) => l.error).map((l) => l.error);
-  const fetching = lists.some((l) => l.isFetching) || health.isFetching;
-  const refreshedAt = Math.max(0, ...lists.map((l) => l.dataUpdatedAt));
   const refresh = () => {
     setNotice("");
     void Promise.all([...lists.map((l) => l.refetch()), health.refetch()]);
@@ -73,7 +89,7 @@ export function RunningScans() {
     <section className="running-scans">
       <PageHead
         title="Running Scans"
-        sub="Monitor scans that are pending, planning, or currently running."
+        sub="Monitor scans that are pending or currently running."
         action={
           <div className="rs-refresh">
             <span className="rs-refreshed">
@@ -84,18 +100,24 @@ export function RunningScans() {
         }
       />
 
+      <p className="muted small rs-window">Showing scans requested in the last 24 hours.</p>
+
       <div className="rs-summary" aria-label="Status summary">
-        {IN_FLIGHT.map((st) => (
+        {SHOWN.map((st) => (
           <div key={st} className="card rs-tile">
-            <span className="lbl"><span className={`dot dot-${st === "pending" ? "medium" : st === "planning" ? "accent" : "ok"}`} /> {IN_FLIGHT_LABEL[st]}</span>
-            <span className={`rs-count rs-count-${st}`}>{byStatus[st].error ? "—" : countLabel(byStatus[st].data)}</span>
+            <span className="lbl"><span className={`dot dot-${st === "pending" ? "medium" : "ok"}`} /> {IN_FLIGHT_LABEL[st]}</span>
+            <span className={`rs-count rs-count-${st}`}>{windowCountLabel(byStatus[st])}</span>
           </div>
         ))}
-        {/* Only when health actually answered: an absent read is not zero. */}
-        {health.data && (
+        {/* Only when health and every scan read answered: blocked counts the
+            windowed rows health reports blocked, so it needs both, and an
+            absent read is not zero. */}
+        {health.data && counted && (
           <div className="card rs-tile" title="Scans no online, capable scan point in a permitted zone can run. A condition, not a status.">
             <span className="lbl"><span className="dot dot-danger" /> Blocked</span>
-            <span className="rs-count rs-count-blocked">{health.data.blocked_scans.length}</span>
+            <span className="rs-count rs-count-blocked">
+              {all.filter((s) => blockedScans.has(s.id)).length}{SHOWN.some((st) => byStatus[st]?.more) ? "+" : ""}
+            </span>
           </div>
         )}
       </div>
@@ -105,7 +127,7 @@ export function RunningScans() {
           <span className="lbl">Status</span>
           <select value={filter.status} onChange={(e) => setF({ status: e.target.value as RunningFilter["status"] })}>
             <option value="">All</option>
-            {IN_FLIGHT.map((st) => <option key={st} value={st}>{IN_FLIGHT_LABEL[st]}</option>)}
+            {SHOWN.map((st) => <option key={st} value={st}>{IN_FLIGHT_LABEL[st]}</option>)}
           </select>
         </label>
         <label>
@@ -143,9 +165,13 @@ export function RunningScans() {
         {loading ? (
           <p className="muted">Loading…</p>
         ) : rows.length === 0 ? (
-          <p className="empty">
-            {all.length === 0 ? "No scans are pending, planning or running." : "No in-flight scans match these filters."}
-          </p>
+          // Empty only when every read answered: a failed read is the error
+          // above, not "nothing in flight".
+          failed.length === 0 && (
+            <p className="empty">
+              {all.length === 0 ? "No scans are pending or running in the last 24 hours." : "No in-flight scans match these filters."}
+            </p>
+          )
         ) : (
           <TableWrap>
             <table>

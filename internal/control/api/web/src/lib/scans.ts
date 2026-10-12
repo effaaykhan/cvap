@@ -6,8 +6,9 @@ import { groupPorts } from "./console";
 import { fmtSpan } from "./discovery";
 
 // The three statuses a scan holds before it finishes (scan_status enum,
-// store/scans.go). The list endpoint filters by ONE status per request, so the
-// page asks for each separately rather than inventing a multi-status filter.
+// store/scans.go). The list endpoint filters by ONE status per request, so
+// Running Scans asks for each status it shows (SHOWN) separately rather than
+// inventing a multi-status filter.
 export const IN_FLIGHT = ["pending", "planning", "running"] as const;
 export type InFlight = (typeof IN_FLIGHT)[number];
 
@@ -17,14 +18,45 @@ export const IN_FLIGHT_CHIP: Record<InFlight, string> = { pending: "warn", plann
 
 export const isInFlight = (s: string): s is InFlight => (IN_FLIGHT as readonly string[]).includes(s);
 
+// The statuses Running Scans shows. Planning is left out on purpose: PlanScan
+// moves pending → planning → running in one transaction, so no read ever
+// returns it, and a tile or filter for it would only ever say 0.
+export const SHOWN = ["pending", "running"] as const;
+export type Shown = (typeof SHOWN)[number];
+
 // The page size the list endpoint allows at most.
 export const SCAN_PAGE = 200;
 
-// A count over one page is exact only when the server handed back no cursor;
-// otherwise it is "at least", and says so.
-export function countLabel(list: ScanList | undefined): string {
-  if (!list) return "—";
-  return list.next_before ? `${list.scans.length}+` : String(list.scans.length);
+// Running Scans shows scans requested in the last 24 hours. Older in-flight
+// scans stay where they are on the server; this is a view, not a cleanup.
+export const WINDOW_MS = 24 * 60 * 60 * 1000;
+
+// In the window when requested at or after now − 24h: exactly 24 hours ago is
+// in, a millisecond earlier is out. created_at is RFC 3339 with an offset, so
+// Date.parse compares instants whatever the zone. A request time ahead of the
+// browser's clock (skew between it and Core) is in, not hidden; one that does
+// not parse is out, because nothing shows it is recent.
+export function inWindow(createdAt: string, now: number): boolean {
+  const t = Date.parse(createdAt);
+  return Number.isFinite(t) && t >= now - WINDOW_MS;
+}
+
+// One status's read narrowed to the window, against ONE reference time so the
+// tile and the table agree. `more` says the server holds further rows that may
+// also be in the window: there is a cursor, and every row on this page is
+// still inside it. Pages run newest request first, so once a page reaches a
+// row older than the cutoff, every later page is older too and the count is
+// exact.
+export function windowed(list: ScanList, status: Shown, now: number): { scans: Scan[]; more: boolean } {
+  const scans = list.scans.filter((s) => s.status === status && inWindow(s.created_at, now));
+  const more = !!list.next_before && list.scans.every((s) => inWindow(s.created_at, now));
+  return { scans, more };
+}
+
+// "—" for a read that has not answered (loading or failed), never 0.
+export function windowCountLabel(w: { scans: Scan[]; more: boolean } | undefined): string {
+  if (!w) return "—";
+  return w.more ? `${w.scans.length}+` : String(w.scans.length);
 }
 
 // requested_by is a user id (absent for a scan Core requested itself). There
@@ -44,7 +76,7 @@ export function elapsedLabel(s: Pick<Scan, "status" | "created_at" | "started_at
   return `Waiting ${fmtSpan(now - new Date(s.created_at).getTime())}`;
 }
 
-export type RunningFilter = { status: "" | InFlight; type: string; policy: string; mine: boolean };
+export type RunningFilter = { status: "" | Shown; type: string; policy: string; mine: boolean };
 
 // Narrow the loaded rows. Type, policy and "mine" have no server-side filter,
 // so they apply to what the three reads returned; status picks which read.
