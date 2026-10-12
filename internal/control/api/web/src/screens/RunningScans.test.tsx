@@ -171,7 +171,7 @@ describe("Running Scans main table (unchanged by the drawer)", () => {
     show();
     await screen.findByRole("table");
     expect(within(table()).getAllByRole("columnheader").map((h) => h.textContent)).toEqual([
-      "Scan ID", "Type", "Status", "Safety Mode", "Policy", "Requested By", "Requested At", "Started At", "Waiting / Running", "Actions",
+      "Scan ID", "Type", "Status", "Safety Mode", "Policy", "Requested By", "Requested At", "Started At", "Time in Status", "Actions",
     ]);
     for (const row of within(table()).getAllByRole("row").slice(1)) {
       expect(within(row).getByRole("button", { name: /^View scan / })).toBeInTheDocument();

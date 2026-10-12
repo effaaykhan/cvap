@@ -152,7 +152,7 @@ export function RunningScans() {
               <thead>
                 <tr>
                   <th>Scan ID</th><th>Type</th><th>Status</th><th>Safety Mode</th><th>Policy</th><th>Requested By</th>
-                  <th>Requested At</th><th>Started At</th><th>Waiting / Running</th><th className="rs-actions-h">Actions</th>
+                  <th>Requested At</th><th>Started At</th><th>Time in Status</th><th className="rs-actions-h">Actions</th>
                 </tr>
               </thead>
               <tbody>
