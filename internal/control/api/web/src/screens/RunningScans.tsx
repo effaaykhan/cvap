@@ -164,14 +164,6 @@ export function RunningScans() {
         )}
         {loading ? (
           <p className="muted">Loading…</p>
-        ) : rows.length === 0 ? (
-          // Empty only when every read answered: a failed read is the error
-          // above, not "nothing in flight".
-          failed.length === 0 && (
-            <p className="empty">
-              {all.length === 0 ? "No scans are pending or running in the last 24 hours." : "No in-flight scans match these filters."}
-            </p>
-          )
         ) : (
           <TableWrap>
             <table>
@@ -182,6 +174,16 @@ export function RunningScans() {
                 </tr>
               </thead>
               <tbody>
+                {/* The table stays mounted with its header when nothing is
+                    shown. Empty only when every read answered: a failed read
+                    is the error above, not "nothing in flight". */}
+                {rows.length === 0 && failed.length === 0 && (
+                  <tr className="empty">
+                    <td colSpan={10}>
+                      {all.length === 0 ? "No scans are pending or running in the last 24 hours." : "No in-flight scans match these filters."}
+                    </td>
+                  </tr>
+                )}
                 {visible.map((s) => (
                   <tr key={s.id}>
                     <td className="data" title={s.id}>{s.id.slice(0, 8)}</td>

@@ -42,7 +42,8 @@ function show() {
   return render(<QueryClientProvider client={qc}><MemoryRouter><RunningScans /></MemoryRouter></QueryClientProvider>);
 }
 const table = () => screen.getByRole("table");
-const rowIds = () => within(table()).getAllByRole("row").slice(1).map((r) => within(r).getAllByRole("cell")[0].textContent);
+const scanRows = () => within(table()).getAllByRole("row").slice(1).filter((r) => !r.classList.contains("empty"));
+const rowIds = () => scanRows().map((r) => within(r).getAllByRole("cell")[0].textContent);
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -335,16 +336,70 @@ describe("Running Scans 24-hour window", () => {
 });
 
 describe("Running Scans main table (unchanged by the drawer)", () => {
+  const COLUMNS = ["Scan ID", "Type", "Status", "Safety Mode", "Policy", "Requested By", "Requested At", "Started At", "Time in Status", "Actions"];
+  const headers = () => within(table()).getAllByRole("columnheader").map((h) => h.textContent);
+  const bodyRows = () => within(table()).getAllByRole("row").slice(1);
+  // The empty table: every column header, and one row whose single cell spans them all.
+  const expectEmptyTable = (message: string) => {
+    expect(headers()).toEqual(COLUMNS);
+    const rows = bodyRows();
+    expect(rows).toHaveLength(1);
+    const cells = within(rows[0]).getAllByRole("cell");
+    expect(cells).toHaveLength(1);
+    expect(cells[0]).toHaveAttribute("colspan", String(COLUMNS.length));
+    expect(cells[0]).toHaveTextContent(message);
+    expect(within(table()).queryByRole("button")).toBeNull();
+  };
+
   it("keeps its ten columns, in order, and View and Cancel on every row", async () => {
     show();
     await screen.findByRole("table");
-    expect(within(table()).getAllByRole("columnheader").map((h) => h.textContent)).toEqual([
-      "Scan ID", "Type", "Status", "Safety Mode", "Policy", "Requested By", "Requested At", "Started At", "Time in Status", "Actions",
-    ]);
-    for (const row of within(table()).getAllByRole("row").slice(1)) {
+    expect(headers()).toEqual(COLUMNS);
+    expect(bodyRows()).toHaveLength(3);
+    for (const row of bodyRows()) {
+      expect(within(row).getAllByRole("cell")).toHaveLength(COLUMNS.length);
       expect(within(row).getByRole("button", { name: /^View scan / })).toBeInTheDocument();
       expect(within(row).getByRole("button", { name: /^Cancel scan / })).toBeInTheDocument();
     }
+    expect(within(table()).queryByText(/No scans are pending|No in-flight scans match/)).toBeNull();
+  });
+
+  it("keeps every column header with zero scans, the empty state inside the table", async () => {
+    api.listScans.mockResolvedValue({ scans: [] });
+    show();
+    await screen.findByRole("table");
+    expectEmptyTable("No scans are pending or running in the last 24 hours.");
+  });
+
+  it("keeps every column header when every scan is older than 24 hours", async () => {
+    byStatus = {
+      pending: [scan(S3, { created_at: "2026-10-01T10:00:00Z" })],
+      running: [scan(S1, { status: "running", created_at: "2026-09-25T10:00:00Z", started_at: "2026-09-25T10:01:00Z" })],
+    };
+    show();
+    await screen.findByRole("table");
+    expectEmptyTable("No scans are pending or running in the last 24 hours.");
+  });
+
+  it("keeps every column header when the filters match nothing, and brings the rows back", async () => {
+    const user = userEvent.setup();
+    show();
+    await screen.findByRole("table");
+    const filters = screen.getByRole("group", { name: "Filters" });
+    await user.selectOptions(within(filters).getByLabelText("Type"), "fingerprint");
+    await user.selectOptions(within(filters).getByLabelText("Status"), "running");
+    expectEmptyTable("No in-flight scans match these filters.");
+    await user.selectOptions(within(filters).getByLabelText("Status"), "");
+    await user.selectOptions(within(filters).getByLabelText("Type"), "");
+    expect(rowIds()).toEqual(["8b11e7d4", "3f2a91c0", "0d4cc2a8"]);
+  });
+
+  it("keeps the header, with no empty-state row, when the reads failed", async () => {
+    api.listScans.mockRejectedValue(new ApiError(500, "internal", "boom"));
+    show();
+    await screen.findByText(/Could not load every in-flight status/);
+    expect(headers()).toEqual(COLUMNS);
+    expect(bodyRows()).toHaveLength(0);
   });
 });
 
