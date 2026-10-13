@@ -579,6 +579,16 @@ safety: ## Scope-enforcement gate (full §6.3: engine egress + runtime send-path
 	@echo "  - Core planning-site refusals produce no wire traffic (unit-tested)"
 	@echo "  - a raw-socket engine, of which there is none yet (ADR-047)"
 	@echo ""
+	@echo "COVERS — SCAN POINT KERNEL PACKET CEILING (ADR-110, the real network-policy holder):"
+	@echo "  - packets leaving the Scan Point namespace, other than TCP to Core, captured on the"
+	@echo "    host side: <= 100 + 1000 x interval in every window from 1 ms to 3 s, at 1/5/10/20"
+	@echo "    connections (the wire decides; tc's buffer counters are reported, never trusted)"
+	@echo "  - SYN, data, ACK, RST and post-close traffic all counted; a lowered ceiling bites"
+	@echo "  - UDP_SEGMENT, large UDP and raw AF_PACKET frames put nothing on the wire"
+	@echo "  - the fingerprint corpus identifies and evidences the same from inside the namespace"
+	@echo "  - segmentation, protocol default-deny, zero capabilities, Core exclusion, forwarding"
+	@echo "    off: checked by the gate itself, and each one broken fails it (make safety-sabotage)"
+	@echo ""
 	@$(MAKE) --no-print-directory lab-up
 	python3 .github/scripts/safety_gate.py
 
@@ -605,9 +615,17 @@ safety-sabotage: ## Prove each safety case can fail INDEPENDENTLY
 			echo "  SURVIVED  $$c: passed while sabotaged"; fail=1; \
 		else echo "  ok        $$c: fails when sabotaged"; fi; \
 	done; \
+	for c in gso-segs seg-feature forwarding udp-default-deny udp-allowed netraw other-cap \
+			unpoliced-iface wide-exclusion core-target core-target-other-refusal; do \
+		if out=$$(CVAP_SAFETY_R2D_SABOTAGE=$$c python3 .github/scripts/safety_gate.py 2>&1); then \
+			echo "  SURVIVED  r2d $$c: the kernel-ceiling gate passed with a precondition broken"; fail=1; \
+		elif ! echo "$$out" | grep -q '^  r2d '; then \
+			echo "  ERROR     r2d $$c: the gate failed without an r2d finding, so the sabotage proved nothing"; fail=1; \
+		else echo "  ok        r2d $$c: fails when sabotaged"; fi; \
+	done; \
 	echo ""; \
 	if [ $$fail -ne 0 ]; then \
-		echo "A six-case suite where some case cannot fail is not a six-case suite."; \
+		echo "A suite where some case cannot fail is not a suite of that many cases."; \
 		exit 1; \
 	fi; \
 	echo "safety-sabotage: every case fails independently when its own guard is broken"

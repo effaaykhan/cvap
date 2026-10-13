@@ -280,6 +280,28 @@ def main():
         print("\nsafety: scope cases passed; engine phases skipped (scope-only run)")
         return 0
 
+    # R2-D fast path, for the same reason: a precondition sabotage (or
+    # CVAP_SAFETY_ONLY_R2D) runs only the kernel-ceiling gate (ADR-110).
+    only_r2d = (os.environ.get("CVAP_SAFETY_ONLY_R2D") == "1"
+                or bool(os.environ.get("CVAP_SAFETY_R2D_SABOTAGE")))
+    if only_r2d:
+        import safety_r2d
+        dump = subprocess.run(["go", "run", "./test/safety/corpusdump"], cwd=ROOT, capture_output=True, text=True)
+        if dump.returncode != 0:
+            print("safety: could not read the built-in fingerprint corpus", file=sys.stderr)
+            return 1
+        failures, lines = safety_r2d.run_r2d(work, capture_image, json.loads(dump.stdout),
+                                             TARGETS, FINGERPRINT_PORTS)
+        for ln in lines:
+            print(ln, file=(sys.stderr if failures else sys.stdout))
+        if failures:
+            print("\nsafety: FAILED (R2-D kernel ceiling only)", file=sys.stderr)
+            for f in failures:
+                print(f, file=sys.stderr)
+            return 1
+        print("\nsafety: R2-D kernel ceiling passed; other phases skipped (R2-D-only run)")
+        return 0
+
     # The REAL corpus, asked for rather than restated.
     #
     # A probe list written into this gate would drift from internal/scanpoint the
@@ -591,6 +613,13 @@ def main():
     wire_failures, wire_lines = safety_wire_ops.run_wire_ops(work, capture_image, corpus)
     failures.extend(wire_failures)
 
+    # The Scan Point's kernel packet ceiling (ADR-110): the real network-policy
+    # holder, a capability-less Scan Point in its namespace, hostile traffic,
+    # judged from outside the namespace. See safety_r2d.py.
+    import safety_r2d
+    r2d_failures, r2d_lines = safety_r2d.run_r2d(work, capture_image, corpus, TARGETS, FINGERPRINT_PORTS)
+    failures.extend(r2d_failures)
+
     if failures:
         print("\nsafety: FAILED", file=sys.stderr)
         for f in failures:
@@ -602,6 +631,10 @@ def main():
         if wire_lines:
             print("\nper-operation wire admission (for context):", file=sys.stderr)
             for ln in wire_lines:
+                print(ln, file=sys.stderr)
+        if r2d_lines:
+            print("\nScan Point kernel packet ceiling (for context):", file=sys.stderr)
+            for ln in r2d_lines:
                 print(ln, file=sys.stderr)
         return 1
 
@@ -619,6 +652,12 @@ def main():
     print("Kernel-response traffic (ACKs of peer data, retransmissions) is shown and is")
     print("R2-B's to bound, not this check's:")
     for ln in wire_lines:
+        print(ln)
+    print("\nScan Point kernel packet ceiling (ADR-110): packets leaving the namespace, other")
+    print("than TCP to Core, <= 100 + 1000*D in every window, captured on the host side of the")
+    print("namespace's veth (every packet, every protocol), equal to the policer's own count;")
+    print("a lowered ceiling bites; the corpus is unchanged; all five preconditions hold:")
+    for ln in r2d_lines:
         print(ln)
     print("\nThe capture filter is 'tcp or udp port 53' — this engine's traffic plus resolver")
     print("lookups. It MUST widen when an engine gains a method; a raw sender would not appear.")
