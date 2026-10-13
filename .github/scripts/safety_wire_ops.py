@@ -215,14 +215,21 @@ def _cases(corpus):
     ]
 
 
+# Attempts per case, for the "exercised" condition ONLY. large-peer-response
+# races the engine's own close (connect-and-close; read-one-chunk-and-close)
+# against the peer's slow start at MSS 536, so whether a run gets BIG_BYTES // 2
+# out before the engine's RST varies run to run (measured: 3 in 30 short with a
+# peer that no longer aborts itself). Every attempt is still judged against
+# admission, and a violation fails the case at once - it is never retried away.
+ATTEMPTS = {"large-peer-response": 3}
+
+
 def run_wire_ops(work, capture_image, corpus):
     failures, lines = [], []
     if not _start_big(work, capture_image):
         return ["  wire-ops: could not start the large-response responder; the case would be empty"], lines
     try:
         for name, job, kill_after, ops, exercised in _cases(corpus):
-            phase = f"wireops-{name}"
-            (work / f"job-{phase}.json").write_text(json.dumps(job) + "\n")
             adm = subprocess.run(["go", "run", "./test/safety/admissiondump"], input=json.dumps(job),
                                  cwd=ROOT, capture_output=True, text=True)
             if adm.returncode != 0:
@@ -230,37 +237,49 @@ def run_wire_ops(work, capture_image, corpus):
                 continue
             admitted = json.loads(adm.stdout)
             env = ["-e", f"KILL_AFTER={kill_after}"] if kill_after else []
-            run = subprocess.run(
-                ["docker", "run", "--rm", "--network", NET, "--cap-add=NET_RAW", "--cap-add=NET_ADMIN",
-                 *env, "-v", f"{work}:/w", capture_image, "/w/run-wireops.sh",
-                 "cvap-engine-fingerprint", phase],
-                capture_output=True, text=True)
-            if run.returncode != 0:
-                failures.append(f"  wire-ops {name}: capture failed, nothing proven: "
-                                f"{(run.stderr or run.stdout)[-300:]}")
-                continue
-            text = subprocess.run(
-                ["docker", "run", "--rm", "-v", f"{work}:/w", capture_image, "sh", "-c",
-                 f"tcpdump -n -tt -r /w/out/capture-{phase}.pcap 2>/dev/null"],
-                capture_output=True, text=True).stdout
-            flows = [(k, *_classify(p)) for k, p in _flows(text)]
-            if len(flows) != len(ops):
-                failures.append(f"  wire-ops {name}: {len(flows)} connection(s) captured, "
-                                f"expected {len(ops)}; operations cannot be attributed")
-                continue
-            why = exercised([(k, e, d) for k, e, r, d in flows])
-            if why:
-                failures.append(f"  wire-ops {name}: did not exercise what it is named for: {why}")
-            for (key, engine, response, detail), (kind, probe) in zip(flows, ops):
-                limit = admitted["port"] if kind == "port" else admitted["probes"][probe]
-                op = "connection" if kind == "port" else probe
-                lines.append(f"  {name:<22} {op:<14} admitted {limit:>3}  engine {engine:>3}  "
-                             f"diff {limit - engine:>+4}   (kernel-response {response}, "
-                             f"total {engine + response}, in {detail['in_bytes']}B)")
-                if engine > limit:
-                    failures.append(
-                        f"  wire-ops {name}: {op} to {key[0]}:{key[1]} put {engine} engine-originated "
-                        f"packet(s) on the wire against {limit} admitted before it began (R2a)")
+            tries, short = ATTEMPTS.get(name, 1), []
+            for attempt in range(1, tries + 1):
+                phase = f"wireops-{name}" + (f"-a{attempt}" if attempt > 1 else "")
+                tag = f" [attempt {attempt}/{tries}]" if tries > 1 else ""
+                (work / f"job-{phase}.json").write_text(json.dumps(job) + "\n")
+                run = subprocess.run(
+                    ["docker", "run", "--rm", "--network", NET, "--cap-add=NET_RAW", "--cap-add=NET_ADMIN",
+                     *env, "-v", f"{work}:/w", capture_image, "/w/run-wireops.sh",
+                     "cvap-engine-fingerprint", phase],
+                    capture_output=True, text=True)
+                if run.returncode != 0:
+                    failures.append(f"  wire-ops {name}{tag}: capture failed, nothing proven: "
+                                    f"{(run.stderr or run.stdout)[-300:]}")
+                    break
+                text = subprocess.run(
+                    ["docker", "run", "--rm", "-v", f"{work}:/w", capture_image, "sh", "-c",
+                     f"tcpdump -n -tt -r /w/out/capture-{phase}.pcap 2>/dev/null"],
+                    capture_output=True, text=True).stdout
+                flows = [(k, *_classify(p)) for k, p in _flows(text)]
+                if len(flows) != len(ops):
+                    failures.append(f"  wire-ops {name}{tag}: {len(flows)} connection(s) captured, "
+                                    f"expected {len(ops)}; operations cannot be attributed")
+                    break
+                violated = False
+                for (key, engine, response, detail), (kind, probe) in zip(flows, ops):
+                    limit = admitted["port"] if kind == "port" else admitted["probes"][probe]
+                    op = "connection" if kind == "port" else probe
+                    lines.append(f"  {name:<22} {op:<14} admitted {limit:>3}  engine {engine:>3}  "
+                                 f"diff {limit - engine:>+4}   (kernel-response {response}, "
+                                 f"total {engine + response}, in {detail['in_bytes']}B){tag}")
+                    if engine > limit:
+                        violated = True
+                        failures.append(
+                            f"  wire-ops {name}{tag}: {op} to {key[0]}:{key[1]} put {engine} engine-originated "
+                            f"packet(s) on the wire against {limit} admitted before it began (R2a)")
+                why = exercised([(k, e, d) for k, e, r, d in flows])
+                if why:
+                    short.append(f"attempt {attempt}: " + ", ".join(f"{d['in_bytes']}B" for k, e, r, d in flows))
+                if violated or not why or attempt == tries:
+                    if why:
+                        failures.append(f"  wire-ops {name}: did not exercise what it is named for: {why}"
+                                        + (f" in any of {attempt} attempt(s) ({'; '.join(short)})" if tries > 1 else ""))
+                    break
     finally:
         subprocess.run(["docker", "rm", "-f", BIG_NAME], capture_output=True)
     return failures, lines
