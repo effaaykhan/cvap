@@ -17,6 +17,7 @@ import { Exposure } from "./screens/Exposure";
 import { Knowledge } from "./screens/Knowledge";
 import { Settings } from "./screens/Settings";
 import { Pending } from "./screens/Pending";
+import { CategoryView, DashboardSearch, RecentAssetsList, RecentFindingsList } from "./screens/DashboardViews";
 import { AssetInventory } from "./screens/AssetInventory";
 import { NetworkDiscovery } from "./screens/NetworkDiscovery";
 import { WebDiscovery } from "./screens/WebDiscovery";
@@ -612,6 +613,10 @@ export function App() {
         <main className="console">
           <Routes>
             <Route path="/" element={<Overview />} />
+            <Route path="/dashboard/recent-assets" element={<RecentAssetsList />} />
+            <Route path="/dashboard/recent-findings" element={<RecentFindingsList />} />
+            <Route path="/dashboard/search" element={<DashboardSearch />} />
+            <Route path="/dashboard/categories/:key" element={<CategoryView />} />
             <Route path="/triage" element={<Findings />} />
             {/* The old table-per-screen paths keep working: bookmarks and the
                 detail crumbs land on the console surface that absorbed them. */}

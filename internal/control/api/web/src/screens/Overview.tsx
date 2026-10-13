@@ -1,328 +1,197 @@
-import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { api, has, type ChangedFinding } from "../lib/api";
+import { useState, type FormEvent } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { has } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { PageHead } from "../components/PageHead";
-import { Trend } from "../components/Trend";
-import { HBars, SegmentBar, Sparkline, type SegmentSpec } from "../components/Charts";
-import { ago, attention, groupPorts, kevInversion, score } from "../lib/console";
+import { CategoryIcon } from "../components/CategoryIcon";
+import {
+  CATEGORIES, distribution, fmtCount, fmtShare, inRange, measure, newestBy, rangeFor, RANGES, share, UNCLASSIFIED,
+  type Category, type CategoryKey, type Measure, type Range,
+} from "../lib/dashboard";
+import { AssetTable, FindingTable, useAllFindings, useInventory } from "./DashboardViews";
 
-// The operator landing (console rung 2): what is worst right now, what changed,
-// what is not working, and the trend (rung 5). Every number is served by Core
-// from the same rows the lists page over — the summary read counts exactly,
-// the change window is a fixed number of days, and the series is derived from
-// first_seen and resolved_at — so nothing here has a life of its own.
-const WINDOW = 7;
-const TREND = 30;
-const SEVERITIES = ["critical", "high", "medium", "low", "info"] as const;
+// Security Overview: the operator landing. The twelve cards, their shares and
+// the distribution are the CURRENT inventory and ignore the selected period;
+// the period filters only the two recent panels, by each record's own
+// first_seen. Every number is read from Core. A category Core holds no data
+// for keeps its card and reads "—", and so does anything still loading or
+// failed — a 0 is shown only when Core measured zero.
+const RECENT_ROWS = 5;
 
 export function Overview() {
   const { session } = useAuth();
-  const canFindings = has(session, "finding.read");
-  const canScans = has(session, "scan.read");
   const canAssets = has(session, "asset.read");
+  const canFindings = has(session, "finding.read");
+  const [params, setParams] = useSearchParams();
+  const range = rangeFor(params.get("range"));
+  const navigate = useNavigate();
+  const [q, setQ] = useState("");
 
-  const stats = useQuery({
-    queryKey: ["finding-summary", WINDOW, TREND],
-    queryFn: () => api.findingSummary(`?days=${WINDOW}&trend_days=${TREND}`),
-    enabled: canFindings,
-  });
-  const worstQ = useQuery({ queryKey: ["findings", "?status=open&limit=5"], queryFn: () => api.listFindings("?status=open&limit=5"), enabled: canFindings });
-  const exposure = useQuery({ queryKey: ["exposure"], queryFn: () => api.exposure(), enabled: canFindings });
-  const points = useQuery({ queryKey: ["scan-points"], queryFn: () => api.listScanPoints(), enabled: canScans });
-  const health = useQuery({ queryKey: ["health"], queryFn: () => api.health(), enabled: canScans });
-  const feeds = useQuery({ queryKey: ["knowledge-freshness"], queryFn: () => api.knowledgeFreshness(), enabled: canFindings });
-  // Attack surface, which the overview could not show at all before ADR-103:
-  // discovery's open ports were in observations, which are ephemeral, and no
-  // route reached them.
-  const ports = useQuery({ queryKey: ["open-ports"], queryFn: () => api.openPorts(), enabled: canAssets });
-  const scans = useQuery({ queryKey: ["scans", "?limit=50"], queryFn: () => api.listScans("?limit=50"), enabled: canScans });
+  const inv = useInventory(canAssets);
+  const findings = useAllFindings(canFindings);
+  const now = Date.now();
 
-  const s = stats.data;
-  const worst = worstQ.data?.findings ?? [];
-  const sps = points.data?.scan_points ?? [];
-  const issues = attention(sps, feeds.data?.feeds ?? [], scans.data?.scans ?? [], health.data);
-  const anyLoaded = !!(points.data || feeds.data || health.data);
-  const fleet: SegmentSpec[] = [
-    { key: "healthy", label: "healthy", value: sps.filter((p) => p.health === "healthy").length, tone: "ok" },
-    { key: "degraded", label: "degraded", value: sps.filter((p) => p.health === "degraded").length, tone: "warn" },
-    { key: "offline", label: "offline", value: sps.filter((p) => p.health === "offline").length, tone: "danger" },
-    { key: "other", label: "pending/disabled", value: sps.filter((p) => !["healthy", "degraded", "offline"].includes(p.health)).length, tone: "muted" },
-  ];
-  const severity: SegmentSpec[] = SEVERITIES.map((k) => ({ key: k, label: k, value: s?.by_severity[k] ?? 0, tone: k }));
+  const ms = measure({ assets: inv.assets.data?.assets, addresses: inv.assets.data?.addresses, openPorts: inv.ports.data });
+  const total = ms.total.count;
+
+  const search = (e: FormEvent) => {
+    e.preventDefault();
+    if (q.trim()) navigate(`/dashboard/search?${new URLSearchParams({ q: q.trim() })}`);
+  };
+  const setRange = (key: string) => {
+    const next = new URLSearchParams(params);
+    next.set("range", key);
+    setParams(next, { replace: true });
+  };
 
   return (
-    <section>
-      <PageHead
-        title="Dashboard"
-        sub={`Exact counts from the finding set; changes over the last ${WINDOW} days; the series from each finding's first-seen and resolved dates.`}
-        meta={<>as of {new Date().toISOString().slice(0, 16).replace("T", " ")}Z</>}
-      />
+    <section className="so">
+      <div className="so-top">
+        <form className="so-search" role="search" onSubmit={search}>
+          <CategoryIcon name="search" size={16} />
+          <input type="search" value={q} onChange={(e) => setQ(e.target.value)}
+                 placeholder="Search assets, vulnerabilities, findings..." aria-label="Search assets, vulnerabilities, findings" />
+        </form>
+        <label className="so-range">
+          <CategoryIcon name="calendar" size={16} />
+          <select value={range.key} onChange={(e) => setRange(e.target.value)} aria-label="Time range">
+            {RANGES.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
+          </select>
+        </label>
+      </div>
 
-      <div className="metric-strip">
-        <div className="card metric">
-          <div className="lbl">KEV on fleet</div>
-          <div className="row tile">
-            <span className={`value${s && s.kev_open > 0 ? " danger" : ""}`}>{s ? s.kev_open : "—"}</span>
-            {s && <Sparkline values={s.trend.map((p) => p.kev)} tone="critical" />}
-          </div>
-          <div className="foot">
-            {s && s.kev_listed_since > 0 ? <span className="delta delta-up">▲ {s.kev_listed_since} newly listed in {WINDOW}d</span> : "known-exploited, open · exact"}
-          </div>
-        </div>
-        <div className="card metric">
-          <div className="lbl">Open findings</div>
-          <div className="row tile">
-            <span className="value">{s ? s.open : "—"}</span>
-            {s && <Sparkline values={s.trend.map((p) => p.open)} tone="accent" />}
-          </div>
-          <div className="foot">
-            {s ? (
-              <span className="delta">
-                {s.new_since > 0 && <span className="delta-up">▲ {s.new_since} new</span>}
-                {s.new_since > 0 && s.resolved_since > 0 && " · "}
-                {s.resolved_since > 0 && <span className="delta-down">▼ {s.resolved_since} resolved</span>}
-                {s.new_since === 0 && s.resolved_since === 0 && <span className="faint">no change in {WINDOW}d</span>}
-              </span>
-            ) : "ordered by priority, not severity"}
-          </div>
-        </div>
-        <div className="card metric">
-          <div className="lbl">Scan points</div>
-          <div className="row tile">
-            <span className="value">{points.data ? fleet[0].value : "—"}</span>
-            <span className="qual">{points.data ? `of ${sps.length} healthy` : ""}</span>
-          </div>
-          {points.data && <div className="fleet"><SegmentBar segments={fleet} height={6} /></div>}
-        </div>
-        <div className={`card metric${issues.length ? " attention" : ""}`}>
-          <div className={`lbl${issues.length ? " warn" : ""}`}>Not working</div>
-          <div className="row tile">
-            <span className={`value${issues.length ? " warn" : ""}`}>{anyLoaded ? issues.length : "—"}</span>
-            <span className="qual">{issues.length === 1 ? "issue" : "issues"}</span>
-          </div>
-          <div className="foot">
-            {health.data?.blocked_scans.length ? `${health.data.blocked_scans.length} blocked · ` : ""}
-            {health.data?.kill_switch_state === "active" ? "kill switch ACTIVE · " : ""}
-            kill switch, scans, backlog, fleet, feeds
-          </div>
+      <h1 className="so-title">Security Overview</h1>
+      <p className="so-sub">Real-time visibility of your assets, security posture, and application security across your environment.</p>
+
+      {!canAssets && <p className="muted small so-status">This account cannot read assets (it lacks the asset.read permission), so every count reads —.</p>}
+      {canAssets && inv.assets.isLoading && <p className="muted small so-status">Loading the asset inventory…</p>}
+      {canAssets && inv.assets.error && <p className="error small so-status">Could not load the asset inventory, so its counts read —.</p>}
+
+      <div className="so-cards" aria-label="Asset categories">
+        {CATEGORIES.map((c) => <CategoryCard key={c.key} c={c} m={ms[c.key]} total={total} />)}
+      </div>
+
+      <div className="so-row">
+        <Distribution ms={ms} total={total} />
+        <div className="card so-panel so-map" aria-label="Asset Map">
+          <div className="so-panel-head"><h2>Asset Map</h2></div>
+          <div className="so-map-body" />
         </div>
       </div>
 
-      {s && s.worst_assets.length > 0 && (
-        <div className="card section" style={{ marginBottom: "1.1rem" }}>
-          <div className="card-head">
-            <span className="lbl">Systems at risk</span>
-            <span className="aside">KEV first, then worst severity, then count · <Link to="/assets">all systems →</Link></span>
-          </div>
-          <HBars unit="open findings" rows={s.worst_assets.map((a) => ({
-            key: a.id, to: `/assets/${a.id}`, label: a.hostname || a.address || a.id.slice(0, 8), sub: a.kev ? `${a.kev} KEV` : undefined,
-            segments: [
-              { key: "critical", label: "critical", value: a.critical, tone: "critical" },
-              { key: "high", label: "high", value: a.high, tone: "high" },
-              { key: "medium", label: "medium", value: a.medium, tone: "medium" },
-              { key: "low", label: "low", value: a.low, tone: "low" },
-              { key: "info", label: "info", value: a.open - a.critical - a.high - a.medium - a.low, tone: "info" },
-            ],
-          }))} />
-          <div className="segbar-legend" style={{ marginTop: ".5rem" }}>
-            {SEVERITIES.map((k) => <span className="lane" key={k}><span className={`cdot tone-${k}`} />{k}</span>)}
-            <span className="end">open findings per system; click a system for the findings and their evidence</span>
-          </div>
-        </div>
-      )}
-
-      <div className="dist-grid">
-        <div className="card section">
-          <div className="card-head">
-            <span className="lbl">Open findings by severity</span>
-            <span className="aside">{s ? `${s.open} open · exact` : ""}</span>
-          </div>
-          {stats.isLoading && <p className="muted">Loading…</p>}
-          {s && <SegmentBar segments={severity} height={12} />}
-          <div className="foot-note">Severity is the rule's own scale. It orders nothing here: the triage list is ordered by priority, where a KEV listing outranks severity.</div>
-        </div>
-        <div className="card section">
-          <div className="card-head">
-            <span className="lbl">Exposure by zone</span>
-            <span className="aside"><Link to="/exposure">full table →</Link></span>
-          </div>
-          {exposure.isLoading && <p className="muted">Loading…</p>}
-          {exposure.error && <p className="error">Could not load exposure.</p>}
-          {exposure.data && exposure.data.zones.length > 0 && (
-            <HBars rows={exposure.data.zones.map((z) => ({
-              key: z.zone_id, label: z.zone_name || z.zone_id.slice(0, 8), sub: z.zone_type,
-              segments: SEVERITIES.map((k) => ({ key: k, label: k, value: z[k], tone: k })),
-            }))} />
-          )}
-          {exposure.data && exposure.data.zones.length === 0 && <p className="empty">No open findings are visible from any zone.</p>}
-          <div className="foot-note">Distinct open findings visible from each zone, by severity. Not summable across zones, and zone-derived: which vantage points observed a finding, never a reachability probe.</div>
-        </div>
-      </div>
-
-      <div className="overview">
-        <div className="card section">
-          <div className="card-head">
-            <span className="lbl">Worst right now</span>
-            <span className="aside">priority order · <Link to="/triage">open triage →</Link></span>
-          </div>
-          {worstQ.isLoading && <p className="muted">Loading…</p>}
-          {worstQ.error && <p className="error">Could not load findings.</p>}
-          {!canFindings && <p className="muted">This account cannot read findings.</p>}
-          {worstQ.data && (
-            <div className="worst">
-              {worst.map((f) => (
-                <div className="frow-line" key={f.id}>
-                  <span className={`rail rail-${f.severity}`} />
-                  <div>
-                    <div className="line1">
-                      {f.kev && <span className={`kev-badge${f.kev_ransomware ? " kev-ransomware" : ""}`}>KEV</span>}
-                      <Link to={`/findings/${f.id}`}>{f.rule}</Link>
-                      <span className="muted small">{f.category}</span>
-                    </div>
-                    <div className="line2">
-                      {f.asset_hostname || f.asset_id}
-                      {f.instance_locator ? ` · ${f.instance_locator}` : ""} · EPSS {score(f.epss, 5)}
-                      {f.kev ? "" : " · not in KEV"}
-                    </div>
-                  </div>
-                  <div className="right">
-                    <span className={`sev sev-${f.severity}`}>{f.severity}</span>
-                    <div className="faint">CVSS {score(f.cvss, 1)}</div>
-                  </div>
-                </div>
-              ))}
-              {worst.length === 0 && <p className="empty">No open findings. That is a real verdict only where feeds are current and releases are in coverage — see Knowledge.</p>}
-            </div>
-          )}
-          {kevInversion(worst) && (
-            <div className="foot-note">A KEV-listed finding above outranks a higher-CVSS one below it. Priority, not severity; that inversion is the point.</div>
-          )}
-
-          <div className="card-head" style={{ marginTop: "1.25rem" }}>
-            <span className="lbl">Open findings — {TREND} days</span>
-            {s && <span className="aside">from first-seen and resolved dates · no rollup</span>}
-          </div>
-          {stats.isLoading && <p className="muted">Loading…</p>}
-          {stats.error && <p className="error">Could not load the summary.</p>}
-          {s && <Trend points={s.trend} days={s.trend_days} windowDays={WINDOW} />}
-        </div>
-
-        <div className="stack">
-          <div className="card section">
-            <div className="card-head">
-              <span className="lbl">Changed in the last {WINDOW} days</span>
-              {s && <span className="aside">fixed window, same list for everyone</span>}
-            </div>
-            {s && (
-              <>
-                <div className="change-tiles">
-                  <div className={`change-tile${s.new_since ? " warn" : ""}`}><div className="n">{s.new_since}</div><div className="k">new</div></div>
-                  <div className={`change-tile${s.resolved_since ? " ok" : ""}`}><div className="n">{s.resolved_since}</div><div className="k">resolved</div></div>
-                  <div className={`change-tile${s.reopened_since ? " warn" : ""}`}><div className="n">{s.reopened_since}</div><div className="k">reopened</div></div>
-                  <div className={`change-tile${s.kev_listed_since ? " danger" : ""}`}><div className="n">{s.kev_listed_since}</div><div className="k">KEV listed</div></div>
-                </div>
-                <div className="changed">
-                  {s.kev_listed_items.map((f) => <Changed key={"k" + f.id} f={f} dot="danger" note="newly listed in KEV — re-ranked" />)}
-                  {s.new_items.filter((n) => !s.kev_listed_items.some((k) => k.id === n.id)).map((f) => <Changed key={f.id} f={f} dot={f.severity === "critical" || f.severity === "high" ? "warn" : "medium"} note="new" />)}
-                  {s.new_since === 0 && s.resolved_since === 0 && s.reopened_since === 0 && s.kev_listed_since === 0 && (
-                    <div className="item"><span className="dot dot-muted" /><span className="muted">Nothing changed in the window.</span></div>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-
-          <div className={`card section${issues.length ? " attention" : ""}`}>
-            <div className="card-head">
-              <span className={`lbl${issues.length ? " warn" : ""}`}>Not working{issues.length ? " — attention" : ""}</span>
-              <span className="aside"><Link to="/health">health →</Link></span>
-            </div>
-            {(points.error || feeds.error || health.error) && <p className="error">Could not load fleet, feed or pipeline state.</p>}
-            <div className="attn">
-              {issues.map((a, i) => (
-                <div className="item" key={i}>
-                  <span className={`dot dot-${a.level}`} />
-                  <span>
-                    <Link to={a.to}>{a.text}</Link>
-                    {a.detail && <span className="detail"> — {a.detail}</span>}
-                  </span>
-                </div>
-              ))}
-              {issues.length === 0 && anyLoaded && (
-                <div className="item"><span className="dot dot-ok" /><span className="muted">Nothing is failing: scan points, feeds, scans, ingest and the kill switch all read clean.</span></div>
-              )}
-            </div>
-            {health.data && (
-              <div className="foot-note">
-                Kill switch {health.data.kill_switch_state} · ingest backlog {health.data.ingest_backlog} · computed {ago(health.data.computed_at)}. A blocked scan is a silent-success class; it is named here, not hidden as "nothing found".
-              </div>
-            )}
-          </div>
-
-          {canAssets && (
-            <div className="card section">
-              <div className="card-head">
-                <span className="lbl">Open ports</span>
-                <span className="aside"><Link to="/assets">assets →</Link></span>
-              </div>
-              {ports.error && <p className="error">Could not load open ports.</p>}
-              {ports.data && ports.data.ports.length === 0 && (
-                <p className="muted">
-                  No open ports recorded. A discovery scan fills this in; until one has run,
-                  the platform knows hosts exist and nothing about their surface.
-                </p>
-              )}
-              {ports.data && ports.data.ports.length > 0 && (
-                <>
-                  <table>
-                    <thead><tr><th>Host</th><th>Open ports</th></tr></thead>
-                    <tbody>
-                      {groupPorts(ports.data.ports, (p) => p.asset_id).map(([key, rows]) => (
-                        <tr key={key}>
-                          <td className="data">
-                            <Link to={`/assets/${rows[0].asset_id}`}>{rows[0].hostname || rows[0].address || key}</Link>
-                          </td>
-                          <td className="data">
-                            {rows.map((p, i) => (
-                              <span key={i} className={p.identified ? "" : "unknown"}>
-                                {i > 0 && ", "}
-                                {p.port}/{p.protocol}
-                                {p.identified && p.product ? ` (${p.product})` : ""}
-                              </span>
-                            ))}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <div className="foot-note">
-                    Greyed ports are open and UNIDENTIFIED — a discovery scan saw them answer and
-                    nothing has probed them since, so they are attack surface rather than a
-                    recognised service. Run a fingerprint scan to identify them.
-                    {ports.data.truncated && <> Showing the {ports.data.limit} most recently seen.</>}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-        </div>
+      <div className="so-row">
+        <RecentAssets range={range} now={now} can={canAssets} q={inv} />
+        <RecentFindings range={range} now={now} can={canFindings} q={findings} />
       </div>
     </section>
   );
 }
 
-function Changed({ f, dot, note }: { f: ChangedFinding; dot: string; note: string }) {
+function CategoryCard({ c, m, total }: { c: Category; m: Measure; total: number | null }) {
+  const pct = share(c, m, total);
+  const integrated = !!c.to;
+  const title = !integrated ? `Not yet integrated. ${c.gap ?? ""}`.trim() : m.count === null && m.note ? m.note : undefined;
   return (
-    <div className="item">
-      <span className={`dot dot-${dot}`} />
-      <span>
-        {f.kev && <span className="kev-badge">KEV</span>}{" "}
-        <Link to={`/findings/${f.id}`} className="data">{f.rule}</Link>
-        {f.asset_hostname && <span className="muted"> · {f.asset_hostname}</span>}
-        <span className="detail faint"> — {note}</span>{" "}
-        <span className="when">{ago(f.at)}</span>
-      </span>
+    <Link className={`card so-card${integrated ? "" : " so-card-gap"}`} to={c.to ?? `/dashboard/categories/${c.key}`} title={title}
+          data-category={c.key} aria-label={`${c.label}: ${fmtCount(m)}${integrated ? "" : ", not yet integrated"}`}>
+      <span className="so-card-icon" style={{ color: c.color, background: `${c.color}1f` }}><CategoryIcon name={c.icon} color={c.color} /></span>
+      <span className="so-card-name">{c.label}</span>
+      <span className="so-card-count">{fmtCount(m)}</span>
+      <span className="so-card-share">{fmtShare(pct)}</span>
+    </Link>
+  );
+}
+
+// The distribution: a ring whose arcs are each slice's share of the WHOLE
+// inventory, so an unmeasured category leaves its part of the ring empty
+// rather than being absorbed by the others. The legend repeats the card
+// values exactly.
+function Distribution({ ms, total }: { ms: Record<CategoryKey, Measure>; total: number | null }) {
+  const segs = distribution(ms, total);
+  const size = 168, thick = 20, r = (size - thick) / 2, circ = 2 * Math.PI * r;
+  let offset = 0;
+  const unclassified = segs.find((s) => s.key === "unclassified");
+  return (
+    <div className="card so-panel so-dist" aria-label="Asset Distribution">
+      <div className="so-panel-head"><h2>Asset Distribution</h2><span className="so-aside">current inventory</span></div>
+      <div className="so-dist-body">
+        <svg className="so-ring" viewBox={`0 0 ${size} ${size}`} width={size} height={size} role="img"
+             aria-label={segs.length ? segs.map((s) => `${s.label} ${s.value}`).join(", ") : "No classified assets to draw"}>
+          <circle cx={size / 2} cy={size / 2} r={r} className="so-ring-track" strokeWidth={thick} fill="none" />
+          {total !== null && total > 0 && segs.map((s) => {
+            const len = (s.value / total) * circ;
+            const el = (
+              <circle key={s.key} data-segment={s.key} cx={size / 2} cy={size / 2} r={r} fill="none" stroke={s.color} strokeWidth={thick}
+                      strokeDasharray={`${len} ${circ - len}`} strokeDashoffset={-offset} transform={`rotate(-90 ${size / 2} ${size / 2})`}>
+                <title>{`${s.label}: ${s.value.toLocaleString()} (${fmtShare((100 * s.value) / total)})`}</title>
+              </circle>
+            );
+            offset += len;
+            return el;
+          })}
+          <text x="50%" y="48%" textAnchor="middle" className="so-ring-value">{total === null ? "—" : total.toLocaleString()}</text>
+          <text x="50%" y="62%" textAnchor="middle" className="so-ring-caption">Total Assets</text>
+        </svg>
+        <ul className="so-legend" aria-label="Distribution legend">
+          {CATEGORIES.map((c) => (
+            <li key={c.key} data-category={c.key} title={c.to ? undefined : "Not yet integrated"}>
+              <span className="so-swatch" style={{ background: c.color }} />
+              <span className="so-legend-name">{c.label}</span>
+              <span className="so-legend-count">{fmtCount(ms[c.key])}</span>
+              <span className="so-legend-share">{fmtShare(share(c, ms[c.key], total))}</span>
+            </li>
+          ))}
+          {unclassified && total !== null && (
+            <li data-category="unclassified">
+              <span className="so-swatch" style={{ background: UNCLASSIFIED.color }} />
+              <span className="so-legend-name">{UNCLASSIFIED.label}</span>
+              <span className="so-legend-count">{unclassified.value.toLocaleString()}</span>
+              <span className="so-legend-share">{fmtShare((100 * unclassified.value) / total)}</span>
+            </li>
+          )}
+        </ul>
+      </div>
+      {total !== null && segs.length === 0 && (
+        <p className="so-note">
+          The ring has no segments: Core does not classify assets by kind yet, so no share of the {total.toLocaleString()} assets can be
+          drawn. Shares are each category's count over the whole inventory.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function RecentAssets({ range, now, can, q }: { range: Range; now: number; can: boolean; q: ReturnType<typeof useInventory> }) {
+  const all = q.assets.data?.assets;
+  const rows = all ? newestBy(all.filter((a) => inRange(a.first_seen, range.days, now)), (a) => a.first_seen) : [];
+  // Environment is an operator-set tag; with none set anywhere the column
+  // would be a column of blanks, so it is left out.
+  const showEnv = !!all?.some((a) => a.environment);
+  return (
+    <div className="card so-panel" aria-label="Recently Discovered Assets">
+      <div className="so-panel-head">
+        <h2>Recently Discovered Assets</h2>
+        <Link className="so-viewall" to={`/dashboard/recent-assets?range=${range.key}`}>View All →</Link>
+      </div>
+      {!can ? <p className="muted">This account cannot read assets.</p>
+        : q.assets.isLoading ? <p className="muted">Loading…</p>
+        : q.assets.error ? <p className="error">Could not load assets.</p>
+        : <AssetTable rows={rows.slice(0, RECENT_ROWS)} showEnv={showEnv} ports={q.ports.data?.ports} empty={`No assets were first seen in the ${range.label.toLowerCase()}.`} />}
+    </div>
+  );
+}
+
+function RecentFindings({ range, now, can, q }: { range: Range; now: number; can: boolean; q: ReturnType<typeof useAllFindings> }) {
+  const rows = q.data ? newestBy(q.data.filter((f) => inRange(f.first_seen, range.days, now)), (f) => f.first_seen) : [];
+  return (
+    <div className="card so-panel" aria-label="Recent Security Findings">
+      <div className="so-panel-head">
+        <h2>Recent Security Findings</h2>
+        <Link className="so-viewall" to={`/dashboard/recent-findings?range=${range.key}`}>View All →</Link>
+      </div>
+      {!can ? <p className="muted">This account cannot read findings.</p>
+        : q.isLoading ? <p className="muted">Loading…</p>
+        : q.error ? <p className="error">Could not load findings.</p>
+        : <FindingTable rows={rows.slice(0, RECENT_ROWS)} empty={`No findings were first seen in the ${range.label.toLowerCase()}.`} />}
     </div>
   );
 }
