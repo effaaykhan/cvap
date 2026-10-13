@@ -18,6 +18,7 @@ import { Knowledge } from "./screens/Knowledge";
 import { Settings } from "./screens/Settings";
 import { Pending } from "./screens/Pending";
 import { CategoryView, DashboardSearch, RecentAssetsList, RecentFindingsList } from "./screens/DashboardViews";
+import { HeaderSearch } from "./components/HeaderSearch";
 import { AssetInventory } from "./screens/AssetInventory";
 import { NetworkDiscovery } from "./screens/NetworkDiscovery";
 import { WebDiscovery } from "./screens/WebDiscovery";
@@ -572,6 +573,7 @@ export function App() {
       )}
       <div className="main-col" onClick={collapseOnOutsideClick}>
         <header>
+          {(has(session, "asset.read") || has(session, "finding.read")) && <HeaderSearch />}
           <span className="who">
             {has(session, "scan.create") && <Link className="new-scan" to="/scans">New scan</Link>}
             <span className="theme-seg" role="group" aria-label="Theme">

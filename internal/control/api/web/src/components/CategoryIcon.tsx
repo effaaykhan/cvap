@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import type { IconName } from "../lib/dashboard";
 
 // Line icons for the Security Overview, drawn the way the shell's own nav
@@ -86,6 +86,13 @@ const PATHS: Record<IconName | "search" | "calendar", ReactNode> = {
       <circle cx="17.5" cy="17.5" r="3.5" />
     </>
   ),
+  help: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+      <path d="M12 17h.01" />
+    </>
+  ),
   search: (
     <>
       <circle cx="11" cy="11" r="8" />
@@ -108,5 +115,17 @@ export function CategoryIcon({ name, color, size = 18 }: { name: IconName | "sea
          stroke={color ?? "currentColor"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       {PATHS[name]}
     </svg>
+  );
+}
+
+// The filled tile a category's icon sits on: the category colour running to
+// its darker shade, with the glyph in white. One component for the cards and
+// the asset rows, so the two can never drift apart.
+export function IconTile({ name, color, dark, size = 34, label }: { name: IconName; color: string; dark?: string; size?: number; label?: string }) {
+  const style = { "--c": color, "--c-dark": dark ?? color, width: size, height: size } as CSSProperties;
+  return (
+    <span className="so-tile" style={style} data-color={color} title={label} role={label ? "img" : undefined} aria-label={label}>
+      <CategoryIcon name={name} color="#FFFFFF" size={Math.round(size * 0.56)} />
+    </span>
   );
 }

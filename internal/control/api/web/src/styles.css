@@ -1120,19 +1120,23 @@ td.attack-cell.unmapped { color:var(--faint); }
    sidebar expanding and collapsing. Cards sit on the theme's own surface and
    line tokens; only the category accents are fixed colours. */
 .so { container-type:inline-size; }
-.so-top { display:flex; align-items:center; gap:.75rem; margin-bottom:1.1rem; }
-.so-search { flex:1 1 auto; max-width:44rem; display:flex; align-items:center; gap:.5rem; background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:0 .7rem; color:var(--faint); }
-.so-search:focus-within { border-color:var(--accent); }
-.so-search input { flex:1; border:0; background:transparent; padding:.55rem 0; font-size:.86rem; color:var(--fg); outline:none; margin:0; }
-.so-range { margin-left:auto; display:flex; align-items:center; gap:.45rem; background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:0 .3rem 0 .6rem; color:var(--faint); }
-.so-range select { border:0; background:transparent; color:var(--fg); font-size:.82rem; padding:.5rem .3rem; }
-.so-title { font-size:1.35rem; font-weight:650; letter-spacing:-.01em; margin:0 0 .25rem; }
+.so-head { display:flex; align-items:center; justify-content:space-between; gap:.75rem 1rem; flex-wrap:wrap; margin-bottom:.25rem; }
+.so-title { font-size:1.35rem; font-weight:650; letter-spacing:-.01em; margin:0; }
 .so-sub { color:var(--muted); font-size:.86rem; margin:0 0 1.1rem; }
 .so-status { margin:-.5rem 0 .8rem; }
-.so-cards { display:grid; grid-template-columns:repeat(6, minmax(0, 1fr)); gap:.75rem; margin-bottom:1.1rem; }
+/* Eleven cards: six to a row, and a short last row grows to the full width
+   rather than leaving a hole. --per sets the row length at each width. */
+.so-cards { --per:6; --gap:.75rem; display:flex; flex-wrap:wrap; gap:var(--gap); margin-bottom:1.1rem; }
+.so-cards > .so-card { flex:1 1 calc((100% - (var(--per) - 1) * var(--gap)) / var(--per)); }
 .so-card { display:grid; grid-template-columns:auto 1fr; grid-template-areas:"icon name" "count count" "share share"; align-items:center; column-gap:.55rem; row-gap:.35rem; padding:.8rem .9rem; color:inherit; text-decoration:none; box-shadow:0 1px 2px rgb(0 0 0 / .18); transition:border-color .12s; min-width:0; }
 .so-card:hover { border-color:var(--line-strong); text-decoration:none; }
-.so-card-icon { grid-area:icon; display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:8px; flex:none; }
+.so-card-icon { grid-area:icon; display:inline-flex; }
+/* The filled category tile: the category colour running to its darker shade,
+   a white glyph, a soft lift. Shared by the cards and the asset rows. */
+.so-tile { display:inline-flex; align-items:center; justify-content:center; flex:none; border-radius:9px;
+  background:linear-gradient(135deg, var(--c), var(--c-dark)); box-shadow:0 2px 6px -2px var(--c-dark), inset 0 1px 0 rgb(255 255 255 / .22); }
+.so-tile .so-icon { filter:drop-shadow(0 1px 0 rgb(0 0 0 / .18)); }
+.so-name .so-tile { border-radius:6px; }
 .so-card-name { grid-area:name; color:var(--muted); font-size:.78rem; font-weight:550; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .so-card-count { grid-area:count; font:650 1.45rem/1.1 var(--sans); font-variant-numeric:tabular-nums; letter-spacing:-.02em; color:var(--fg); margin-top:.2rem; }
 .so-card-share { grid-area:share; color:var(--ok); font-size:.76rem; font-weight:600; font-variant-numeric:tabular-nums; }
@@ -1148,7 +1152,7 @@ td.attack-cell.unmapped { color:var(--faint); }
 .so-ring-track { stroke:var(--surface-2); }
 .so-ring-value { font:650 1.5rem var(--sans); fill:var(--fg); }
 .so-ring-caption { font-size:.62rem; fill:var(--muted); letter-spacing:.04em; text-transform:uppercase; }
-.so-legend { list-style:none; margin:0; padding:0; flex:1 1 15rem; display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:.3rem 1.1rem; font-size:.78rem; }
+.so-legend { list-style:none; margin:0; padding:0; flex:1 1 15rem; max-width:24rem; display:grid; grid-template-columns:1fr; gap:.45rem; font-size:.8rem; }
 .so-legend li { display:grid; grid-template-columns:auto 1fr auto 3.2rem; align-items:center; gap:.45rem; min-width:0; }
 .so-swatch { width:9px; height:9px; border-radius:3px; }
 .so-legend-name { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -1164,13 +1168,43 @@ td.attack-cell.unmapped { color:var(--faint); }
 .so-back { display:inline-block; font-size:.8rem; margin-bottom:.6rem; }
 .so-gap { display:flex; gap:.9rem; align-items:flex-start; }
 .so-gap p { margin:.1rem 0 .4rem; }
-@container (max-width:1180px) { .so-cards { grid-template-columns:repeat(4, minmax(0, 1fr)); } }
+@container (max-width:1180px) { .so-cards { --per:4; } }
 @container (max-width:980px) { .so-row { grid-template-columns:1fr; } }
-@container (max-width:760px) { .so-cards { grid-template-columns:repeat(3, minmax(0, 1fr)); } .so-legend { grid-template-columns:1fr; } }
+@container (max-width:760px) { .so-cards { --per:3; } .so-legend { grid-template-columns:1fr; } }
 @container (max-width:520px) {
-  .so-cards { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  .so-cards { --per:2; }
   .so-card-name { white-space:normal; line-height:1.25; }
-  .so-top { flex-wrap:wrap; }
-  .so-search { max-width:none; flex-basis:100%; }
-  .so-range { margin-left:0; }
 }
+
+/* ---- header search (top bar, every page) -------------------------------- */
+.header-search { flex:1 1 auto; max-width:34rem; min-width:0; display:flex; align-items:center; gap:.5rem; height:34px;
+  background:var(--surface-2); border:1px solid var(--line); border-radius:var(--radius); padding:0 .7rem; color:var(--faint); }
+.header-search:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.header-search input { flex:1; min-width:0; border:0; background:transparent; padding:0; height:100%; font-size:.84rem; color:var(--fg); outline:none; margin:0; box-shadow:none; }
+.header-search input::placeholder { color:var(--faint); }
+@media (max-width:640px) {
+  .main-col > header { gap:.6rem; }
+  .main-col > header .header-search { max-width:none; }
+  .main-col > header .who { gap:.5rem; }
+  .main-col > header .who .new-scan { white-space:nowrap; }
+  .header-search input::placeholder { color:transparent; }
+}
+
+/* ---- range picker: a listbox on the theme's tokens ---------------------- */
+.range-picker { position:relative; flex:none; }
+.range-trigger { display:inline-flex; align-items:center; gap:.5rem; height:34px; padding:0 .6rem 0 .7rem; cursor:pointer;
+  background:var(--surface); color:var(--fg); border:1px solid var(--line); border-radius:var(--radius); font:inherit; font-size:.82rem; }
+.range-trigger .so-icon, .range-chevron { color:var(--muted); }
+.range-trigger:hover { border-color:var(--line-strong); background:var(--surface-2); }
+.range-trigger:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+/* The list takes focus only to carry aria-activedescendant; the highlighted option marks the place. */
+.range-list:focus { outline:none; }
+.range-trigger[aria-expanded="true"] .range-chevron { transform:rotate(180deg); }
+.range-list { position:absolute; right:0; top:calc(100% + 6px); z-index:20; min-width:100%; width:max-content; max-width:calc(100vw - 32px);
+  margin:0; padding:.3rem; list-style:none; background:var(--surface); color:var(--fg); border:1px solid var(--line-strong);
+  border-radius:var(--radius); box-shadow:0 12px 28px -8px rgb(0 0 0 / .45); }
+.range-option { display:flex; align-items:center; justify-content:space-between; gap:1.5rem; padding:.42rem .6rem; border-radius:6px;
+  font-size:.82rem; cursor:pointer; color:var(--fg); white-space:nowrap; }
+.range-option.active { background:var(--raised); }
+.range-option[aria-selected="true"] { color:var(--accent); font-weight:600; }
+.range-option[aria-disabled="true"] { color:var(--faint); cursor:not-allowed; background:none; }

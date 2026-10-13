@@ -4,12 +4,11 @@ import { useQueries, useQuery } from "@tanstack/react-query";
 import { api, has, type AssetSummary, type FindingSummary } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { PageHead } from "../components/PageHead";
-import { CategoryIcon } from "../components/CategoryIcon";
+import { IconTile } from "../components/CategoryIcon";
 import { Pager, PAGE_ROWS } from "../components/Discovery";
-import { isDatabaseService, shortDate } from "../lib/discovery";
+import { shortDate } from "../lib/discovery";
 import {
-  allAssets, allFindings, categoryByKey, inRange, matchFinding, newestBy, rangeFor, SEVERITY_COLOR, SEVERITY_LABEL,
-  UNCLASSIFIED, type IconName,
+  allAssets, allFindings, assetKind, categoryByKey, inRange, matchFinding, newestBy, rangeFor, SEVERITY_COLOR, SEVERITY_LABEL,
 } from "../lib/dashboard";
 
 // The Security Overview's data and its drill-down views: the full listings
@@ -32,18 +31,6 @@ export function useAllFindings(enabled: boolean) {
   return useQuery({ queryKey: ["dashboard", "findings-all"], queryFn: () => allFindings((q) => api.listFindings(q)), enabled, staleTime: STALE });
 }
 
-// What an asset row's icon may claim. A host with a database service Core
-// identified is a database host — true even when the open-port read is capped,
-// because the capped read only misses hosts, never invents one. Everything
-// else is unclassified, since Core records no device type.
-export function assetKind(assetID: string, ports?: { asset_id: string; service?: string | null }[]): { icon: IconName; color: string; label: string } {
-  if (ports?.some((p) => p.asset_id === assetID && isDatabaseService(p.service))) {
-    const db = categoryByKey("databases")!;
-    return { icon: db.icon, color: db.color, label: db.label };
-  }
-  return { icon: UNCLASSIFIED.icon, color: UNCLASSIFIED.color, label: UNCLASSIFIED.label };
-}
-
 export function AssetTable({ rows, showEnv, ports, empty }: { rows: AssetSummary[]; showEnv: boolean; ports?: { asset_id: string; service?: string | null }[]; empty: string }) {
   const cols = showEnv ? 6 : 5;
   return (
@@ -55,16 +42,17 @@ export function AssetTable({ rows, showEnv, ports, empty }: { rows: AssetSummary
         <tbody>
           {rows.length === 0 && <tr className="empty"><td colSpan={cols}>{empty}</td></tr>}
           {rows.map((a) => {
-            const kind = assetKind(a.id, ports);
+            const kind = assetKind(a, ports);
             return (
               <tr key={a.id}>
                 <td>
+                  {/* The hostname when Core has one; otherwise the address, then the id — never an invented name. */}
                   <Link className="so-name" to={`/assets/${a.id}`} title={a.id}>
-                    <span title={kind.label}><CategoryIcon name={kind.icon} color={kind.color} size={15} /></span>
-                    <span className="data">{a.hostname || a.address || a.id.slice(0, 8)}</span>
+                    <IconTile name={kind.icon} color={kind.color} dark={kind.dark} size={22} label={kind.label} />
+                    <span className={a.hostname ? "" : "data"}>{a.hostname || a.address || a.id.slice(0, 8)}</span>
                   </Link>
                 </td>
-                <td>{a.device_type || "—"}</td>
+                <td className={kind.known ? "" : "muted"} data-kind={kind.label}>{kind.label}</td>
                 <td className="data">{a.address || "—"}</td>
                 {showEnv && <td>{a.environment || "—"}</td>}
                 <td className="data">{shortDate(a.first_seen)}</td>
@@ -228,7 +216,7 @@ export function CategoryView() {
       <Back />
       <PageHead title={c.label} sub="Not yet integrated" />
       <div className="card so-panel so-gap">
-        <span className="so-card-icon" style={{ color: c.color, background: `${c.color}1f` }}><CategoryIcon name={c.icon} color={c.color} /></span>
+        <IconTile name={c.icon} color={c.color} dark={c.dark} />
         <div>
           <p><b>Not yet integrated.</b> {c.gap}</p>
           <p className="muted small">The Security Overview shows — for this category until Core collects it. No figure is estimated.</p>

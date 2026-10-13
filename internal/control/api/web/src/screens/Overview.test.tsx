@@ -12,6 +12,7 @@ vi.mock("../lib/api", async (orig) => ({ ...(await orig<typeof import("../lib/ap
 import { ApiError } from "../lib/api";
 import { Overview } from "./Overview";
 import { CategoryView, DashboardSearch, RecentAssetsList, RecentFindingsList } from "./DashboardViews";
+import { HeaderSearch } from "../components/HeaderSearch";
 
 const NOW = new Date("2026-10-13T12:00:00Z");
 const HOUR = 60 * 60 * 1000;
@@ -42,6 +43,7 @@ function show(path = "/") {
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[path]}>
+        <header><HeaderSearch /></header>
         <Routes>
           <Route path="/" element={<Overview />} />
           <Route path="/dashboard/recent-assets" element={<RecentAssetsList />} />
@@ -58,6 +60,10 @@ function show(path = "/") {
 const cards = () => within(screen.getByLabelText("Asset categories")).getAllByRole("link");
 const card = (label: string) => cards().find((c) => c.querySelector(".so-card-name")?.textContent === label)!;
 const value = (label: string) => [card(label).querySelector(".so-card-count")!.textContent, card(label).querySelector(".so-card-share")!.textContent];
+const pickRange = async (user: ReturnType<typeof userEvent.setup>, label: string) => {
+  await user.click(screen.getByRole("button", { name: /^Time range/ }));
+  await user.click(within(screen.getByRole("listbox")).getByRole("option", { name: label }));
+};
 const loaded = () => waitFor(() => expect(value("Total Assets")[0]).not.toBe("—"));
 const panel = (name: string) => screen.getByLabelText(name);
 const bodyRows = (name: string) => within(panel(name)).getAllByRole("row").slice(1).filter((r) => !r.classList.contains("empty"));
@@ -67,7 +73,8 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(NOW);
   session.permissions = ["asset.read", "finding.read"];
-  assetPages = [[asset(1, 1), asset(2, 2), asset(3, 5), asset(4, 10)], [asset(5, 20), asset(6, 30), asset(7, 200)]];
+  // Seven assets over two pages; 6 and 7 hold no current address, 2 has a hostname.
+  assetPages = [[asset(1, 1), asset(2, 2, { hostname: "web-02" }), asset(3, 5), asset(4, 10)], [asset(5, 20), asset(6, 30, { address: "" }), asset(7, 200, { address: "" })]];
   presence = { present: 4, responder: 1, unknown: 3, total: 8, statement: "" };
   findings = [finding(1, 3, "critical"), finding(2, 1, "low"), finding(3, 50, "medium"), finding(4, 23, "info"), finding(5, 6, "high"), finding(6, 12, "high"), finding(8, 4, "medium"), finding(7, 2000)];
   openPorts = { ports: [port(1, "mysql"), port(1, "postgresql"), port(3, "ssh")], truncated: false, limit: 500 };
@@ -84,29 +91,41 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("Security Overview layout", () => {
-  it("leads with the search bar and the period, then the exact heading and description", async () => {
+  it("puts the period beside the heading, the description below it, and no search box in the page", async () => {
+    const user = userEvent.setup();
     show();
-    expect(screen.getByRole("searchbox")).toHaveAttribute("placeholder", "Search assets, vulnerabilities, findings...");
-    const range = screen.getByLabelText("Time range") as HTMLSelectElement;
-    expect(range.selectedOptions[0].textContent).toBe("Last 24 Hours");
-    expect([...range.options].map((o) => o.textContent)).toEqual(["Last 24 Hours", "Last 3 Days", "Last 7 Days", "Last 15 Days", "Last 30 Days", "Last 60 Days", "Last 90 Days"]);
-    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(/^Security Overview$/);
-    expect(screen.getByText("Real-time visibility of your assets, security posture, and application security across your environment.")).toBeInTheDocument();
+    const head = screen.getByRole("heading", { level: 1 });
+    expect(head).toHaveTextContent(/^Security Overview$/);
+    const trigger = screen.getByRole("button", { name: /^Time range/ });
+    expect(trigger).toHaveTextContent("Last 24 Hours");
+    // Same row: the heading and the trigger share one container.
+    expect(head.parentElement).toBe(trigger.closest(".range-picker")!.parentElement);
+    expect(head.parentElement!.nextElementSibling).toHaveTextContent(/^Real-time visibility of your assets, security posture, and application security across your environment\.$/);
+    // The search lives in the header, not in the page.
+    expect(within(head.closest("section")!).queryByRole("searchbox")).toBeNull();
+    expect(within(screen.getByRole("banner")).getByRole("searchbox")).toHaveAttribute("placeholder", "Search assets, vulnerabilities, findings...");
+    await user.click(trigger);
+    expect(within(screen.getByRole("listbox")).getAllByRole("option").map((o) => o.textContent)).toEqual(["Last 24 Hours", "Last 3 Days", "Last 7 Days", "Last 15 Days", "Last 30 Days", "Last 60 Days", "Last 90 Days"]);
     await loaded();
   });
 
-  it("shows the twelve cards in order, each with its icon in its colour", async () => {
+  it("shows exactly eleven cards in order, Other Assets gone, each icon on its own filled colour tile", async () => {
     show();
     await loaded();
     expect(cards().map((c) => c.querySelector(".so-card-name")!.textContent)).toEqual([
       "Total Assets", "IP Addresses", "Servers", "Laptops", "APIs", "Web Applications",
-      "Docker Containers", "Kubernetes Clusters", "Databases", "Cloud Assets", "Network Devices", "Other Assets",
+      "Docker Containers", "Kubernetes Clusters", "Databases", "Cloud Assets", "Network Devices",
     ]);
+    expect(cards()).toHaveLength(11);
+    expect(screen.queryByText("Other Assets")).toBeNull();
     expect(cards().map((c) => c.querySelector("svg")!.getAttribute("data-icon"))).toEqual([
-      "boxes", "network", "server", "laptop", "plug", "globe", "container", "layers", "database", "cloud", "router", "shapes",
+      "boxes", "network", "server", "laptop", "plug", "globe", "container", "layers", "database", "cloud", "router",
     ]);
-    expect(card("Databases").querySelector("svg")).toHaveAttribute("stroke", "#F43F5E");
-    expect(card("Network Devices").querySelector("svg")).toHaveAttribute("stroke", "#06B6D4");
+    // Filled: a colour tile behind a white glyph, a different colour per card.
+    const tiles = cards().map((c) => c.querySelector(".so-tile") as HTMLElement);
+    expect(tiles.every((t) => t.querySelector("svg")!.getAttribute("stroke") === "#FFFFFF")).toBe(true);
+    expect(new Set(tiles.map((t) => t.dataset.color)).size).toBe(11);
+    expect(card("Databases").querySelector(".so-tile")).toHaveAttribute("data-color", "#F43F5E");
   });
 
   it("keeps the Asset Map panel blank", async () => {
@@ -120,28 +139,49 @@ describe("Security Overview layout", () => {
 });
 
 describe("Security Overview counts and shares", () => {
-  it("counts every asset page, the address total, and database hosts; the rest read —", async () => {
+  it("counts every asset page, the address total, and database hosts; shares are of the 7 assets; the rest read —", async () => {
     show();
     await loaded();
-    expect(value("Total Assets")).toEqual(["7", "100%"]);
-    expect(value("IP Addresses")).toEqual(["8", "—"]);
+    // Total is the base the shares are taken over: no 100% of its own.
+    expect(value("Total Assets")).toEqual(["7", "—"]);
+    // 8 addresses held by 5 of the 7 assets: the share follows the assets, and 7 + 8 is never formed.
+    expect(value("IP Addresses")).toEqual(["8", "71%"]);
+    expect(card("IP Addresses")).toHaveAttribute("title", expect.stringContaining("held by 5 of the 7 assets"));
     // One host with two database engines is one database host: 1 of 7.
     expect(value("Databases")).toEqual(["1", "14%"]);
-    for (const l of ["Servers", "Laptops", "APIs", "Web Applications", "Docker Containers", "Kubernetes Clusters", "Cloud Assets", "Network Devices", "Other Assets"]) {
+    for (const l of ["Servers", "Laptops", "APIs", "Web Applications", "Docker Containers", "Kubernetes Clusters", "Cloud Assets", "Network Devices"]) {
       expect(value(l)).toEqual(["—", "—"]);
       expect(card(l)).toHaveAttribute("title", expect.stringContaining("Not yet integrated"));
     }
     expect(api.listAssets).toHaveBeenCalledTimes(2);
   });
 
-  it("repeats the card values in the legend, in the same order, and draws only measured slices", async () => {
+  it("draws both non-zero segments in colour, in step with the legend, the centre total and the IP card", async () => {
     show();
     await loaded();
     const legend = within(screen.getByLabelText("Distribution legend")).getAllByRole("listitem");
-    expect(legend.map((li) => li.textContent)).toEqual(cards().map((c) => c.querySelector(".so-card-name")!.textContent! + c.querySelector(".so-card-count")!.textContent + c.querySelector(".so-card-share")!.textContent));
+    expect(legend.map((li) => li.textContent)).toEqual(["With a current IP address571%", "No current IP address229%"]);
     const ring = panel("Asset Distribution").querySelector("svg")!;
-    expect([...ring.querySelectorAll("[data-segment]")].map((s) => s.getAttribute("data-segment"))).toEqual(["databases"]);
+    const segs = [...ring.querySelectorAll("[data-segment]")];
+    expect(segs.map((s) => s.getAttribute("data-segment"))).toEqual(["addressed", "unaddressed"]);
+    // Each drawn in a colour, the addressed one in the IP Addresses card's.
+    expect(segs.map((s) => s.getAttribute("stroke"))).toEqual([card("IP Addresses").querySelector(".so-tile")!.getAttribute("data-color"), "#64748B"]);
+    expect(segs.every((s) => parseFloat(s.getAttribute("stroke-dasharray")!) > 0)).toBe(true);
+    // The segments split the centre total exactly; the legend's swatches are the ring's colours.
     expect(ring.querySelector(".so-ring-value")).toHaveTextContent("7");
+    expect(legend.map((li) => (li.querySelector(".so-swatch") as HTMLElement).style.background)).toEqual(["rgb(99, 102, 241)", "rgb(100, 116, 139)"]);
+    expect(value("IP Addresses")[1]).toBe(legend[0].querySelector(".so-legend-share")!.textContent);
+    expect(within(panel("Asset Distribution")).queryByText(/Other Assets/)).toBeNull();
+    expect(within(panel("Asset Distribution")).getByText(/Not drawn, because Core does not measure them: Servers, Laptops/)).toBeInTheDocument();
+  });
+
+  it("draws one full segment when every asset is unaddressed, and nothing for an empty inventory", async () => {
+    assetPages = [[asset(1, 1, { address: "" }), asset(2, 2, { address: "" })], []];
+    presence = { present: 0, responder: 0, unknown: 0, total: 0, statement: "" };
+    show();
+    await loaded();
+    expect(value("IP Addresses")).toEqual(["0", "0%"]);
+    expect([...panel("Asset Distribution").querySelectorAll("svg [data-segment]")].map((s) => s.getAttribute("data-segment"))).toEqual(["unaddressed"]);
   });
 
   it("reads Databases as — when the open-port list was capped, never as its partial count", async () => {
@@ -195,13 +235,17 @@ describe("Security Overview recent panels", () => {
     await loaded();
     const p = panel("Recently Discovered Assets");
     expect(within(p).getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Name", "Type", "IP / Endpoint", "First Seen", "Status"]);
-    expect(bodyRows("Recently Discovered Assets").map((r) => within(r).getAllByRole("cell")[2].textContent)).toEqual(["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"]);
-    const first = bodyRows("Recently Discovered Assets")[0];
-    // A database host carries the Databases icon; status is never assumed.
-    expect(first.querySelector("svg")).toHaveAttribute("data-icon", "database");
-    expect(bodyRows("Recently Discovered Assets")[1].querySelector("svg")).toHaveAttribute("data-icon", "shapes");
-    expect(within(first).getAllByRole("cell")[4]).toHaveTextContent("—");
-    expect(within(first).getAllByRole("cell")[1]).toHaveTextContent("—");
+    const rows = bodyRows("Recently Discovered Assets");
+    expect(rows.map((r) => within(r).getAllByRole("cell")[2].textContent)).toEqual(["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"]);
+    // Name: the hostname when Core has one, the address otherwise — never invented.
+    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["10.0.0.1", "web-02", "10.0.0.3", "10.0.0.4", "10.0.0.5"]);
+    // Type: a database host is a Database, in the Databases card's icon and colour; the rest are Unknown.
+    expect(rows.map((r) => within(r).getAllByRole("cell")[1].textContent)).toEqual(["Database", "Unknown", "Unknown", "Unknown", "Unknown"]);
+    expect(rows[0].querySelector(".so-tile")).toHaveAttribute("data-color", card("Databases").querySelector(".so-tile")!.getAttribute("data-color"));
+    expect(rows[0].querySelector("svg")).toHaveAttribute("data-icon", "database");
+    expect(rows[1].querySelector("svg")).toHaveAttribute("data-icon", "help");
+    // Status is never assumed.
+    expect(within(rows[0]).getAllByRole("cell")[4]).toHaveTextContent("—");
   });
 
   it("shows the Environment column once any asset carries one", async () => {
@@ -229,11 +273,11 @@ describe("Security Overview recent panels", () => {
     await loaded();
     expect(await within(panel("Recent Security Findings")).findByText("No findings were first seen in the last 24 hours.")).toBeInTheDocument();
     expect(within(panel("Recently Discovered Assets")).getByText("No assets were first seen in the last 24 hours.")).toBeInTheDocument();
-    await user.selectOptions(screen.getByLabelText("Time range"), "3d");
+    await pickRange(user, "Last 3 Days");
     expect(screen.getByTestId("where")).toHaveTextContent("/?range=3d");
     expect(within(panel("Recent Security Findings")).getByText("rule-3")).toBeInTheDocument();
     expect(bodyRows("Recently Discovered Assets")).toHaveLength(1);
-    expect(value("Total Assets")).toEqual(["1", "100%"]);
+    expect(value("Total Assets")).toEqual(["1", "—"]);
     expect(within(panel("Recently Discovered Assets")).getByRole("link", { name: "View All →" })).toHaveAttribute("href", "/dashboard/recent-assets?range=3d");
     expect(within(panel("Recent Security Findings")).getByRole("link", { name: "View All →" })).toHaveAttribute("href", "/dashboard/recent-findings?range=3d");
   });
@@ -270,10 +314,12 @@ describe("Security Overview navigation", () => {
   it("searches assets and findings from the header", async () => {
     const user = userEvent.setup();
     show();
-    await user.type(screen.getByRole("searchbox"), "10.0.0.6{Enter}");
-    expect(screen.getByTestId("where")).toHaveTextContent("/dashboard/search?q=10.0.0.6");
-    await waitFor(() => expect(screen.getAllByText("10.0.0.6").length).toBeGreaterThan(0));
-    expect(api.listAssets.mock.calls.some(([q]) => new URLSearchParams(q as string).get("q") === "10.0.0.6")).toBe(true);
+    await user.type(within(screen.getByRole("banner")).getByRole("searchbox"), "10.0.0.5{Enter}");
+    expect(screen.getByTestId("where")).toHaveTextContent("/dashboard/search?q=10.0.0.5");
+    await waitFor(() => expect(screen.getAllByText("10.0.0.5").length).toBeGreaterThan(0));
+    expect(api.listAssets.mock.calls.some(([q]) => new URLSearchParams(q as string).get("q") === "10.0.0.5")).toBe(true);
+    // The header box keeps the query it is showing results for.
+    expect(within(screen.getByRole("banner")).getByRole("searchbox")).toHaveValue("10.0.0.5");
   });
 
   it("View All lists every matching asset for the carried period", async () => {
