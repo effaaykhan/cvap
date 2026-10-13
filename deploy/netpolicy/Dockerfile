@@ -11,9 +11,10 @@
 # because a tag moved (ADR-025).
 FROM alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
-# tc (iproute2), ethtool for segmentation offload, nftables for the fail-closed
-# guard, jq so verification reads tc's JSON instead of scraping its text.
-RUN apk add --no-cache iproute2-tc ethtool nftables jq
+# iproute2 for tc and for `ip link set ... gso_max_segs` (BusyBox's `ip` cannot
+# set it), ethtool for the segmentation features, nftables for the fail-closed
+# guard, jq so verification reads tc's and ip's JSON instead of scraping text.
+RUN apk add --no-cache iproute2 ethtool nftables jq
 
 COPY netpolicy.sh /usr/local/bin/netpolicy
 RUN chmod 0755 /usr/local/bin/netpolicy
