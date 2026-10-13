@@ -181,19 +181,64 @@ printf '%s' 'cvapent_...' > secrets/enrollment-token
 ## 6. Start a scan point
 
 A scan point is not a compose service, because it cannot come up until a token
-exists. Run it from the same image, pointed at this host's enrollment endpoint:
+exists. It runs in two containers: a **network-policy holder** that owns the
+network namespace and enforces the scan point's packet ceiling in the kernel, and
+the scan point itself, which joins the holder's namespace and holds no
+capabilities at all (ADR-110). Start the holder first.
 
-The scan point must be on the **compose network** (to reach `cvap-core`) and be
-able to reach the hosts it will scan. The compose network is `<project>_default`
-— `cvap_default` for the default project name. It runs as the same UID as the
-secrets it reads, and its data dir (where it writes its issued certificate) must
-be writable by that UID, so use a host directory you own rather than a fresh
-named volume:
+### 6a. The network-policy holder
+
+The holder installs one kernel packet ceiling for everything the scan point's
+namespace sends — 1,000 packets/s with a burst of 100, counting the kernel's own
+ACKs, retransmissions and resets — except TCP to Core. It is the only container
+in that namespace with `NET_ADMIN`, and it keeps verifying its own setup: if any
+check fails it exits, and the scan point is left with no network at all.
+
+It needs Core's two endpoints as a scan point reaches them, **as IP addresses**
+(names are refused, so the exemption cannot change with a resolver's answer):
+the address `CVAP_ADVERTISE_HOST` resolves to, on 8443 (enrollment) and 8444
+(dispatch, ingest and rule packs). Nothing else is exempt — not the operator API
+on 8445, which a scan point never uses.
+
+```sh
+docker build -t cvap-netpolicy netpolicy
+CORE_IP=<the IPv4 address CVAP_ADVERTISE_HOST resolves to>
+docker run -d --name cvap-netpolicy \
+  --network cvap_default \
+  --cap-add NET_ADMIN \
+  --sysctl net.ipv4.ip_forward=0 \
+  --sysctl net.ipv4.conf.all.forwarding=0 \
+  --sysctl net.ipv4.conf.default.forwarding=0 \
+  --sysctl net.ipv6.conf.all.forwarding=0 \
+  --sysctl net.ipv6.conf.default.forwarding=0 \
+  -e CVAP_NP_CORE_ENDPOINTS="${CORE_IP}:8443,${CORE_IP}:8444" \
+  cvap-netpolicy
+```
+
+The compose network is `<project>_default` — `cvap_default` for the default
+project name. The forwarding sysctls are required: the holder cannot set them
+itself (`/proc/sys` is read-only in a container) and refuses to start without
+them. Confirm it is up — the log ends with `ready: eth0` and the health check
+reports `healthy`:
+
+```sh
+docker logs cvap-netpolicy
+docker inspect --format '{{.State.Health.Status}}' cvap-netpolicy
+```
+
+### 6b. The scan point
+
+The scan point runs from the same image as Core, inside the holder's namespace.
+It runs as the same UID as the secrets it reads — which must not be root — and
+its data dir (where it writes its issued certificate) must be writable by that
+UID, so use a host directory you own rather than a fresh named volume:
 
 ```sh
 mkdir -p "$PWD/scanpoint-data"
 docker run -d --name cvap-scanpoint \
-  --network cvap_default \
+  --network container:cvap-netpolicy \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
   --user "$(id -u):$(id -g)" \
   -v "$PWD/secrets/ca.crt:/creds/ca.crt:ro" \
   -v "$PWD/secrets/enrollment-token:/creds/enrollment-token:ro" \
@@ -208,8 +253,27 @@ docker run -d --name cvap-scanpoint \
 ```
 
 (`cvap-cvap-core` is the image compose built; adjust if your project name
-differs. If the scan point must reach a target network the compose network does
-not, `docker network connect <that-network> cvap-scanpoint` after it starts.)
+differs.)
+
+**Constraints — each one is part of the packet ceiling, not a preference:**
+
+- **Never give the scan point a capability, `--privileged`, or a root user.** A
+  raw socket bypasses the kernel ceiling entirely; `--cap-drop ALL` and
+  `no-new-privileges` are what rule it out.
+- **To reach another target network, connect it to the holder**, not to the scan
+  point: `docker network connect <that-network> cvap-netpolicy`. The holder
+  polices the new interface within about a second, and nothing leaves through it
+  until then.
+- **TCP, ICMP and ARP only.** Everything else leaving the namespace is dropped,
+  UDP included. The engines are TCP-only, so nothing they do is affected; name
+  lookups work through Docker's embedded DNS on the compose network. A scan point
+  that can only resolve `CVAP_ADVERTISE_HOST` through an external DNS server over
+  UDP will fail to start — use an IP address, or a name the embedded DNS resolves.
+- **If `CVAP_ADVERTISE_HOST`'s address changes**, recreate the holder with the new
+  `CORE_IP`, then recreate the scan point: it joined the old holder's namespace.
+- **If the holder stops**, the scan point has no network until the holder is
+  recreated and the scan point after it. Check `docker logs cvap-netpolicy` for
+  the check that failed first.
 
 On start it reads the token, redeems it against the enrollment endpoint, receives
 a certificate and its dispatch/ingest/rule-pack endpoints, zeroises the token,
