@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  allAssets, allFindings, arcs, assetKind, CATEGORIES, categoryByKey, databaseHosts, distribution, fmtShare, inRange,
+  allAssets, allFindings, arcs, assetKind, CATEGORIES, categoryByKey, distribution, fmtShare, inRange, KIND_KEYS, kindKey,
   matchFinding, measure, MAX_PAGES, newestBy, rangeFor, RANGES, share,
 } from "./dashboard";
 import type { AssetSummary, FindingSummary, OpenPorts } from "./api";
@@ -40,6 +40,8 @@ describe("Security Overview ranges", () => {
 });
 
 describe("Security Overview categories", () => {
+  const typed = (id: string, device_type: string, extra = {}) => asset(id, { device_type, ...extra });
+
   it("holds the eleven categories in the required order, Other Assets removed, each with its own colour and icon", () => {
     expect(CATEGORIES.map((c) => c.label)).toEqual([
       "Total Assets", "IP Addresses", "Servers", "Laptops", "APIs", "Web Applications",
@@ -48,104 +50,137 @@ describe("Security Overview categories", () => {
     expect(categoryByKey("other")).toBeUndefined();
     expect(new Set(CATEGORIES.map((c) => c.color)).size).toBe(11);
     expect(new Set(CATEGORIES.map((c) => c.icon)).size).toBe(11);
-    expect(CATEGORIES.every((c) => /^#[0-9A-F]{6}$/.test(c.color) && /^#[0-9A-F]{6}$/.test(c.dark) && c.dark !== c.color)).toBe(true);
+    expect(CATEGORIES.every((c) => /^#[0-9A-F]{6}$/.test(c.color) && /^#[0-9A-F]{6}$/.test(c.deep) && c.deep !== c.color)).toBe(true);
     // Only what Core measures leads somewhere real; everything else explains its gap.
     expect(CATEGORIES.filter((c) => c.to).map((c) => c.key)).toEqual(["total", "ip", "databases"]);
     expect(CATEGORIES.filter((c) => !c.to).every((c) => !!c.gap)).toBe(true);
+    // Total and IP Addresses are not kinds of asset.
+    expect(KIND_KEYS).toEqual(["servers", "laptops", "apis", "webapps", "docker", "k8s", "databases", "cloud", "network"]);
   });
 
-  it("keeps a white glyph at 3:1 or better on every tile's darker shade", () => {
-    const lum = (hex: string) => {
-      const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
-      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  it("keeps each bold glyph at 3:1 or better against its tinted tile, in both themes", () => {
+    const rgb = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+    const lum = ([r, g, b]: number[]) => {
+      const [R, G, B] = [r, g, b].map((v) => v / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+      return 0.2126 * R + 0.7152 * G + 0.0722 * B;
     };
-    for (const c of CATEGORIES) expect((1.05 / (lum(c.dark) + 0.05))).toBeGreaterThanOrEqual(3);
+    const mix = (a: number[], b: number[], t: number) => a.map((v, i) => v * t + b[i] * (1 - t));
+    const ratio = (x: number[], y: number[]) => { const [l1, l2] = [lum(x), lum(y)].sort((p, q) => q - p); return (l1 + 0.05) / (l2 + 0.05); };
+    for (const c of CATEGORIES) {
+      // Dark theme: 17% of the colour over the dark surface, glyph in the colour.
+      expect(ratio(rgb(c.color), mix(rgb(c.color), rgb("#161B22"), 0.17))).toBeGreaterThanOrEqual(3);
+      // Light theme: 13% of the colour over white, glyph in the deeper shade.
+      expect(ratio(rgb(c.deep), mix(rgb(c.color), rgb("#FFFFFF"), 0.13))).toBeGreaterThanOrEqual(3);
+    }
   });
 
-  it("measures total, addresses and database hosts; every other category stays unmeasured", () => {
+  it("gives each asset at most one kind: stored device type first, then a database service, else none", () => {
+    expect(kindKey(typed("a", "server"))).toBe("servers");
+    expect(kindKey(typed("a", "Edge Router"))).toBe("network");
+    expect(kindKey(typed("a", "docker container"))).toBe("docker");
+    expect(kindKey(asset("a"), [{ asset_id: "a", service: "mysql" }])).toBe("databases");
+    // The stored type wins, so a server running MySQL is one server, not also a database.
+    expect(kindKey(typed("a", "server"), [{ asset_id: "a", service: "mysql" }])).toBe("servers");
+    expect(kindKey(asset("a"), [{ asset_id: "a", service: "ssh" }])).toBeNull();
+    expect(kindKey(asset("a", { address: "10.0.0.9" }))).toBeNull();
+    expect(kindKey(typed("a", "toaster"))).toBeNull();
+    expect(assetKind(asset("a"))).toMatchObject({ label: "Unknown", icon: "help", known: false });
+    const db = categoryByKey("databases")!;
+    expect(assetKind(asset("a"), [{ asset_id: "a", service: "postgresql" }])).toMatchObject({ label: "Database", icon: db.icon, color: db.color, deep: db.deep, known: true });
+  });
+
+  it("measures what Core holds today: total, addresses, database hosts and the remainder; device kinds read —", () => {
     const ms = measure({ assets: [asset("a", { address: "10.0.0.1" }), asset("b"), asset("c")], addresses: 5, openPorts: ports([["a", "mysql"], ["a", "postgresql"], ["b", "ssh"]]) });
-    expect(ms.total.count).toBe(3);
+    expect(ms.total).toMatchObject({ count: 3, assets: 3 });
     // IP Addresses counts addresses; the assets holding one are what its share is taken from.
-    expect(ms.ip.count).toBe(5);
-    expect(ms.ip.assets).toBe(1);
+    expect(ms.ip).toMatchObject({ count: 5, assets: 1 });
     expect(ms.ip.note).toContain("held by 1 of the 3 assets");
     // One host with two engines is one database host.
-    expect(ms.databases.count).toBe(1);
+    expect(ms.databases).toMatchObject({ count: 1, assets: 1 });
+    expect(ms.unclassified).toMatchObject({ count: 2 });
+    // No asset carries a device type, so a 0 there would claim a classification never made.
     for (const k of ["servers", "laptops", "apis", "webapps", "docker", "k8s", "cloud", "network"] as const) expect(ms[k].count).toBeNull();
+  });
+
+  it("starts counting device kinds — zeros included — as soon as Core stores a device type", () => {
+    const ms = measure({ assets: [typed("a", "server"), typed("b", "server"), typed("c", "laptop"), asset("d"), asset("e")], addresses: 0, openPorts: ports([["d", "mysql"]]) });
+    expect([ms.servers.count, ms.laptops.count, ms.network.count, ms.cloud.count, ms.databases.count, ms.unclassified.count]).toEqual([2, 1, 0, 0, 1, 1]);
+    // The kinds and the remainder partition the inventory exactly.
+    const sum = KIND_KEYS.reduce((n, k) => n + (ms[k].count ?? 0), 0) + ms.unclassified.count!;
+    expect(sum).toBe(5);
+  });
+
+  it("reads Databases and the remainder as — past the open-port cap, keeping a lower bound", () => {
+    const ms = measure({ assets: [asset("a"), asset("b")], addresses: 0, openPorts: ports([["a", "mysql"]], true) });
+    expect(ms.databases.count).toBeNull();
+    expect(ms.databases.atLeast).toBe(1);
+    expect(ms.databases.note).toContain("500");
+    expect(ms.unclassified.count).toBeNull();
+    // A device-typed kind stays exact: it never depends on the port read.
+    const typedMs = measure({ assets: [typed("a", "server"), asset("b")], addresses: 0, openPorts: ports([], true) });
+    expect(typedMs.servers.count).toBe(1);
   });
 
   it("counts nothing that has not loaded, never zero", () => {
     const ms = measure({});
-    expect([ms.total.count, ms.ip.count, ms.ip.assets, ms.databases.count]).toEqual([null, null, null, null]);
+    expect([ms.total.count, ms.ip.count, ms.databases.count, ms.unclassified.count]).toEqual([null, null, null, null]);
+    const noPorts = measure({ assets: [asset("a")], addresses: 0 });
+    expect([noPorts.total.count, noPorts.databases.count, noPorts.unclassified.count]).toEqual([1, null, null]);
   });
 
-  it("reads database hosts as unknown past the open-port cap, keeping only a lower-bound hint", () => {
-    const m = databaseHosts(ports([["a", "mysql"]], true));
-    expect(m.count).toBeNull();
-    expect(m.atLeast).toBe(1);
-    expect(m.note).toContain("500");
-    expect(databaseHosts(ports([], false))).toEqual({ count: 0, assets: 0 });
-  });
-
-  it("takes every share over the inventory: Total has none, IP is the addressed assets, 526 and 14 are never added", () => {
-    const total = categoryByKey("total")!, ip = categoryByKey("ip")!, db = categoryByKey("databases")!, srv = categoryByKey("servers")!;
-    expect(share(total, { count: 526 }, 526)).toBeNull();
-    expect(share(ip, { count: 14, assets: 14 }, 526)).toBeCloseTo(2.66, 2);
-    // More addresses than assets holding them: the share follows the assets.
-    expect(share(ip, { count: 20, assets: 14 }, 526)).toBeCloseTo(2.66, 2);
-    expect(share(ip, { count: 14, assets: null }, 526)).toBeNull();
-    expect(share(db, { count: 1, assets: 1 }, 526)).toBeCloseTo(0.19, 2);
-    expect(share(db, { count: null }, 526)).toBeNull();
-    expect(share(db, { count: 1, assets: 1 }, null)).toBeNull();
-    expect(share(db, { count: 0, assets: 0 }, 0)).toBeNull();
-    expect(share(srv, { count: null }, 526)).toBeNull();
+  it("takes every share over the inventory: Total is the classified share, IP the addressed assets, never 526 + 14", () => {
+    const assets = [...Array.from({ length: 14 }, (_, i) => asset(`ip${i}`, { address: `10.0.0.${i}` })), ...Array.from({ length: 512 }, (_, i) => asset(`n${i}`))];
+    const ms = measure({ assets, addresses: 14, openPorts: ports([["n0", "mysql"]]) });
+    expect(share("ip", ms)).toBeCloseTo((100 * 14) / 526, 6);
+    expect(share("databases", ms)).toBeCloseTo((100 * 1) / 526, 6);
+    expect(share("unclassified", ms)).toBeCloseTo((100 * 525) / 526, 6);
+    // Total Assets: the classified share (1 database host of 526), never a 100% of itself.
+    expect(share("total", ms)).toBeCloseTo((100 * 1) / 526, 6);
+    // Unmeasured kinds and an unmeasured remainder have no share.
+    expect(share("servers", ms)).toBeNull();
+    const capped = measure({ assets, addresses: 14, openPorts: ports([["n0", "mysql"]], true) });
+    expect([share("total", capped), share("databases", capped), share("unclassified", capped)]).toEqual([null, null, null]);
+    expect(share("ip", capped)).toBeCloseTo((100 * 14) / 526, 6);
+    // A zero denominator is —.
+    expect(share("ip", measure({ assets: [], addresses: 0, openPorts: ports([]) }))).toBeNull();
     expect([fmtShare(null), fmtShare(0), fmtShare(100), fmtShare(0.19), fmtShare(2.66), fmtShare(97.34)]).toEqual(["—", "0%", "100%", "0.2%", "2.7%", "97%"]);
+    // Never all or none when it is neither: 428 of 430, 1 of 2,000, 1,999 of 2,000.
+    expect([fmtShare((100 * 428) / 430), fmtShare(0.05), fmtShare(99.95), fmtShare(99.4)]).toEqual(["99.5%", "<0.1%", ">99.9%", "99%"]);
   });
 
-  it("splits the inventory exactly by current address, so segments sum to the total and nothing counts twice", () => {
-    const assets = [asset("a", { address: "10.0.0.1" }), asset("b", { address: "10.0.0.2" }), asset("c"), asset("d"), asset("e")];
-    const segs = distribution(assets);
-    expect(segs).toEqual([
-      { key: "addressed", label: "With a current IP address", color: categoryByKey("ip")!.color, value: 2 },
-      { key: "unaddressed", label: "No current IP address", color: "#64748B", value: 3 },
+  it("draws one segment per measured kind with assets, then the remainder, summing to the total", () => {
+    const ms = measure({ assets: [typed("a", "server"), typed("b", "server"), typed("c", "router"), asset("d"), asset("e"), asset("f")], addresses: 2, openPorts: ports([["d", "mysql"]]) });
+    const segs = distribution(ms);
+    expect(segs.map((s) => [s.key, s.value, s.color])).toEqual([
+      ["servers", 2, categoryByKey("servers")!.color], ["databases", 1, categoryByKey("databases")!.color],
+      ["network", 1, categoryByKey("network")!.color], ["unclassified", 2, "#64748B"],
     ]);
-    expect(segs.reduce((n, s) => n + s.value, 0)).toBe(assets.length);
-    // A zero segment is left out; an unread inventory draws nothing.
-    expect(distribution([asset("c")]).map((s) => s.key)).toEqual(["unaddressed"]);
-    expect(distribution([])).toEqual([]);
-    expect(distribution(undefined)).toEqual([]);
+    expect(segs.reduce((n, s) => n + s.value, 0)).toBe(ms.total.count);
+    // IP Addresses and Total are never segments; zero kinds are left out.
+    expect(segs.some((s) => s.key === "ip" || s.key === "total" || s.key === "laptops")).toBe(false);
+    // Today's shape: one database host, the rest unclassified.
+    expect(distribution(measure({ assets: [asset("a"), asset("b")], addresses: 0, openPorts: ports([["a", "mysql"]]) })).map((s) => s.key)).toEqual(["databases", "unclassified"]);
+    // Capped and untyped: nothing exact to draw.
+    expect(distribution(measure({ assets: [asset("a")], addresses: 0, openPorts: ports([["a", "mysql"]], true) }))).toEqual([]);
+    expect(distribution(measure({}))).toEqual([]);
   });
 
-  it("gives every non-zero segment a visible arc, taking the difference from the largest", () => {
+  it("sizes each arc against the whole inventory, keeps a small one visible, and leaves unmeasured parts empty", () => {
     const circ = 2 * Math.PI * 74;
-    const segs = [{ key: "addressed", label: "", color: "", value: 14 }, { key: "unaddressed", label: "", color: "", value: 512 }];
-    const a = arcs(segs, circ);
-    expect(a.map((x) => x.key)).toEqual(["addressed", "unaddressed"]);
-    expect(a[0].len).toBeCloseTo((14 / 526) * circ - 2, 5);
-    expect(a[1].start).toBeCloseTo((14 / 526) * circ, 5);
-    // A tiny share still gets the minimum arc.
-    const tiny = arcs([{ ...segs[0], value: 1 }, { ...segs[1], value: 100000 }], circ);
-    expect(tiny[0].len).toBeCloseTo(6 - 2, 5);
-    expect(tiny[0].len + 2 + tiny[1].len + 2).toBeCloseTo(circ, 5);
-    // One segment is the whole ring, with no gap.
-    expect(arcs([segs[1]], circ)[0].len).toBeCloseTo(circ, 5);
-    expect(arcs([], circ)).toEqual([]);
-    expect(arcs([{ ...segs[0], value: 0 }], circ)).toEqual([]);
-  });
-
-  it("types an asset from its stored device type, else as a database host, else Unknown — never from an address", () => {
-    expect(assetKind(asset("a", { device_type: "server" }))).toMatchObject({ label: "Server", icon: "server", known: true });
-    expect(assetKind(asset("a", { device_type: "Edge Router" }))).toMatchObject({ label: "Network Device", icon: "router" });
-    expect(assetKind(asset("a", { device_type: "laptop" }))).toMatchObject({ label: "Laptop", icon: "laptop" });
-    expect(assetKind(asset("a"), [{ asset_id: "a", service: "mysql" }])).toMatchObject({ label: "Database", icon: "database", color: "#F43F5E", known: true });
-    expect(assetKind(asset("a"), [{ asset_id: "a", service: "ssh" }])).toMatchObject({ label: "Unknown", icon: "help", known: false });
-    expect(assetKind(asset("a", { address: "10.0.0.9" }))).toMatchObject({ label: "Unknown", known: false });
-    expect(assetKind(asset("a", { device_type: "toaster" }))).toMatchObject({ label: "Unknown", known: false });
-    // The stored device type wins over the open-port evidence.
-    expect(assetKind(asset("a", { device_type: "server" }), [{ asset_id: "a", service: "mysql" }]).label).toBe("Server");
-    // Card and row use the same icon and colour for a category.
-    const db = categoryByKey("databases")!;
-    expect(assetKind(asset("a"), [{ asset_id: "a", service: "postgresql" }])).toMatchObject({ icon: db.icon, color: db.color, dark: db.dark });
+    const seg = (key: string, value: number) => ({ key, label: key, color: "", value });
+    const a = arcs([seg("databases", 1), seg("unclassified", 525)], 526, circ);
+    // The 0.19% segment gets the minimum, taken from the largest; together they fill the ring.
+    expect(a[0].len).toBeCloseTo(4, 5);
+    expect(a[0].len + 2 + a[1].len + 2).toBeCloseTo(circ, 5);
+    // Proportional when large enough.
+    const b = arcs([seg("servers", 100), seg("unclassified", 100)], 200, circ);
+    expect(b[0].len).toBeCloseTo(circ / 2 - 2, 5);
+    // Only part of the inventory measured: the arcs cover only that part.
+    const c = arcs([seg("servers", 50)], 200, circ);
+    expect(c[0].len).toBeCloseTo(circ / 4, 5);
+    expect(arcs([], 10, circ)).toEqual([]);
+    expect(arcs([seg("x", 0)], 10, circ)).toEqual([]);
+    expect(arcs([seg("x", 3)], 0, circ)).toEqual([]);
   });
 });
 

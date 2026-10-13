@@ -53,11 +53,12 @@ export type Category = {
   // The singular form a table row uses for an asset of this kind.
   type: string;
   icon: IconName;
-  // The category colour, and a darker shade of it: the card's filled tile runs
-  // from one to the other behind a white glyph, and the shade keeps that glyph
-  // at 3:1 or better in both themes. Every category has its own pair.
+  // The category colour (its 500 shade) and a deeper shade of it (700). The
+  // icon tile is a light tint of the colour; the glyph on it is the colour
+  // itself on the dark theme and the deeper shade on the light one, which keeps
+  // it at 3:1 or better against its tile in both. Every category has its own.
   color: string;
-  dark: string;
+  deep: string;
   // Where the card leads. Absent for a category Core does not hold, whose card
   // opens the not-yet-integrated view instead.
   to?: string;
@@ -69,41 +70,75 @@ export type IconName =
   | "boxes" | "network" | "server" | "laptop" | "plug" | "globe"
   | "container" | "layers" | "database" | "cloud" | "router" | "shapes" | "help";
 
-const NO_DEVICE_TYPE = "Core does not classify assets by device type: the device-type field exists on an asset and nothing writes it.";
+const NO_DEVICE_TYPE = "Core does not classify assets by device type yet: the device-type field exists on an asset and nothing writes it. The count appears here once it does.";
 
 // The eleven cards, in their required order. The same entries drive the
-// cards, the asset-row icons and types, and the distribution's colours.
+// cards, the distribution's segments and legend, and the asset-row icons.
 export const CATEGORIES: Category[] = [
-  { key: "total", label: "Total Assets", type: "Asset", icon: "boxes", color: "#3B82F6", dark: "#2563EB", to: "/discover/discovery/asset-inventory" },
-  { key: "ip", label: "IP Addresses", type: "IP Address", icon: "network", color: "#6366F1", dark: "#4F46E5", to: "/discover/discovery/asset-inventory" },
-  { key: "servers", label: "Servers", type: "Server", icon: "server", color: "#8B5CF6", dark: "#7C3AED", gap: NO_DEVICE_TYPE },
-  { key: "laptops", label: "Laptops", type: "Laptop", icon: "laptop", color: "#84CC16", dark: "#65A30D",
-    gap: "Core does not classify assets by device type, and a network scan cannot tell a laptop from any other host." },
-  { key: "apis", label: "APIs", type: "API", icon: "plug", color: "#F97316", dark: "#EA580C",
+  { key: "total", label: "Total Assets", type: "Asset", icon: "boxes", color: "#3B82F6", deep: "#1D4ED8", to: "/discover/discovery/asset-inventory" },
+  { key: "ip", label: "IP Addresses", type: "IP Address", icon: "network", color: "#6366F1", deep: "#4338CA", to: "/discover/discovery/asset-inventory" },
+  { key: "servers", label: "Servers", type: "Server", icon: "server", color: "#8B5CF6", deep: "#6D28D9", gap: NO_DEVICE_TYPE },
+  { key: "laptops", label: "Laptops", type: "Laptop", icon: "laptop", color: "#84CC16", deep: "#4D7C0F", gap: NO_DEVICE_TYPE },
+  { key: "apis", label: "APIs", type: "API", icon: "plug", color: "#F97316", deep: "#C2410C",
     gap: "Core has no API inventory: no table or route records an API as an asset." },
-  { key: "webapps", label: "Web Applications", type: "Web Application", icon: "globe", color: "#10B981", dark: "#059669",
+  { key: "webapps", label: "Web Applications", type: "Web Application", icon: "globe", color: "#10B981", deep: "#047857",
     gap: "Core has no web-application inventory. Web ports are recorded as services on hosts, which are not applications." },
-  { key: "docker", label: "Docker Containers", type: "Docker Container", icon: "container", color: "#0EA5E9", dark: "#0284C7",
+  { key: "docker", label: "Docker Containers", type: "Docker Container", icon: "container", color: "#0EA5E9", deep: "#0369A1",
     gap: "Core does not discover containers." },
-  { key: "k8s", label: "Kubernetes Clusters", type: "Kubernetes Cluster", icon: "layers", color: "#D946EF", dark: "#C026D3",
+  { key: "k8s", label: "Kubernetes Clusters", type: "Kubernetes Cluster", icon: "layers", color: "#D946EF", deep: "#A21CAF",
     gap: "Core does not discover Kubernetes clusters." },
-  { key: "databases", label: "Databases", type: "Database", icon: "database", color: "#F43F5E", dark: "#E11D48", to: "/discover/discovery/databases" },
-  { key: "cloud", label: "Cloud Assets", type: "Cloud Asset", icon: "cloud", color: "#F59E0B", dark: "#D97706",
+  { key: "databases", label: "Databases", type: "Database", icon: "database", color: "#F43F5E", deep: "#BE123C", to: "/discover/discovery/databases" },
+  { key: "cloud", label: "Cloud Assets", type: "Cloud Asset", icon: "cloud", color: "#F59E0B", deep: "#B45309",
     gap: "Core does not discover cloud resources." },
-  { key: "network", label: "Network Devices", type: "Network Device", icon: "router", color: "#14B8A6", dark: "#0D9488", gap: NO_DEVICE_TYPE },
+  { key: "network", label: "Network Devices", type: "Network Device", icon: "router", color: "#14B8A6", deep: "#0F766E", gap: NO_DEVICE_TYPE },
 ];
 
 export const categoryByKey = (key: string | undefined): Category | undefined => CATEGORIES.find((c) => c.key === key);
 
-// An asset row whose kind Core has not established.
-export const UNKNOWN_KIND = { label: "Unknown", icon: "help" as IconName, color: "#64748B" };
+// The kinds an asset can be: every category except the two that are not kinds
+// of asset — Total Assets is the whole and IP Addresses a property (an asset
+// HAS an address; it is not one).
+export const KIND_KEYS = CATEGORIES.filter((c) => c.key !== "total" && c.key !== "ip").map((c) => c.key);
+
+// An asset whose kind Core has not established.
+export const UNKNOWN_KIND = { label: "Unknown", icon: "help" as IconName, color: "#64748B", deep: "#475569" };
+// The distribution's remainder: assets measured as none of the kinds.
+export const UNCLASSIFIED = { key: "unclassified", label: "Unclassified", color: "#64748B" };
+
+// ---------------------------------------------------------------- kinds
+// What one asset IS — at most one kind, so no asset is counted twice. The
+// device type Core stores, when one is set, mapped to the dashboard's words;
+// otherwise a database host (Core identified a database service on it);
+// otherwise none. An address alone never makes a kind.
+const DEVICE_TYPES: [RegExp, CategoryKey][] = [
+  [/server/i, "servers"], [/laptop|notebook/i, "laptops"], [/router|switch|firewall|access.?point|network/i, "network"],
+  [/kubernetes|k8s/i, "k8s"], [/container|docker/i, "docker"], [/database|\bdb\b/i, "databases"],
+  [/cloud/i, "cloud"], [/\bapi\b/i, "apis"], [/web.?app/i, "webapps"],
+];
+
+type PortRow = { asset_id: string; service?: string | null };
+
+export function kindKey(a: Pick<AssetSummary, "id" | "device_type">, ports?: PortRow[]): CategoryKey | null {
+  const dt = (a.device_type ?? "").trim();
+  const hit = dt ? DEVICE_TYPES.find(([re]) => re.test(dt)) : undefined;
+  if (hit) return hit[1];
+  if (ports?.some((p) => p.asset_id === a.id && isDatabaseService(p.service))) return "databases";
+  return null;
+}
+
+export type Kind = { label: string; icon: IconName; color: string; deep: string; known: boolean };
+
+export function assetKind(a: Pick<AssetSummary, "id" | "device_type">, ports?: PortRow[]): Kind {
+  const c = categoryByKey(kindKey(a, ports) ?? undefined);
+  return c ? { label: c.type, icon: c.icon, color: c.color, deep: c.deep, known: true } : { ...UNKNOWN_KIND, known: false };
+}
 
 // ---------------------------------------------------------------- counts
 // A measured count. `null` means not measured — not integrated, still loading,
-// or failed — and renders "—". `assets` is how many ASSETS the category
-// covers, which is what its share is taken from; for IP Addresses that differs
-// in kind from the count, which is addresses. `atLeast` is a lower bound shown
-// only as a hint when a capped read could not count exactly.
+// or failed — and renders "—". `assets` is how many ASSETS the figure covers,
+// which is what its share is taken from; for IP Addresses that differs in kind
+// from the count, which is addresses. `atLeast` is a lower bound shown only as
+// a hint when a capped read could not count exactly.
 export type Measure = { count: number | null; assets?: number | null; atLeast?: number; note?: string };
 
 export type Inventory = {
@@ -118,119 +153,133 @@ export type Inventory = {
 // address (the earliest one; store.Assets.List), whatever its hostname.
 export const hasCurrentAddress = (a: Pick<AssetSummary, "address">): boolean => !!a.address;
 
-// Hosts carrying a database service Core identified (MySQL/MariaDB,
-// PostgreSQL, SQL Server). It counts HOSTS, not services or ports: one host
-// with two engines is one. The open-port read is capped, so past the cap the
-// count is only a lower bound and the card reads "—".
-export function databaseHosts(ports: OpenPorts | undefined): Measure {
-  if (!ports) return { count: null };
-  const hosts = new Set(ports.ports.filter((p) => isDatabaseService(p.service)).map((p) => p.asset_id)).size;
-  if (ports.truncated) {
-    return { count: null, atLeast: hosts, note: `At least ${hosts} — Core lists only the ${ports.limit} most recently seen open ports, so the exact count cannot be read.` };
-  }
-  return { count: hosts, assets: hosts };
-}
+export type Measures = Record<CategoryKey, Measure> & { unclassified: Measure };
 
-export function measure(inv: Inventory): Record<CategoryKey, Measure> {
-  const out = Object.fromEntries(CATEGORIES.map((c) => [c.key, { count: null, note: c.gap }])) as Record<CategoryKey, Measure>;
-  out.total = { count: inv.assets ? inv.assets.length : null };
-  // IP Addresses is a SUBSET of the inventory, not a kind of asset beside it:
-  // every live address belongs to one of the assets. Its count is addresses
-  // (the presence total); its share is the assets that hold one.
-  const addressed = inv.assets ? inv.assets.filter(hasCurrentAddress).length : null;
+// Every card's figure, and the remainder, from one pass that gives each asset
+// at most one kind. Which figures are MEASURED:
+//  - Total Assets and IP Addresses, once the inventory is read;
+//  - the device-type kinds, once Core stores a device type on any asset —
+//    until then a count of 0 would claim a classification never made;
+//  - Databases, while the open-port read is complete. Past its cap a database
+//    host can be missed, so Databases — and the remainder that would silently
+//    absorb the missed ones — read "—", with the lower bound as a hint.
+// APIs, web applications, containers, clusters and cloud assets are counted
+// from a device type too, the only source Core could carry them in.
+export function measure(inv: Inventory): Measures {
+  const out = Object.fromEntries(CATEGORIES.map((c) => [c.key, { count: null, note: c.gap }])) as unknown as Measures;
+  out.unclassified = { count: null };
+  const assets = inv.assets;
+  if (!assets) {
+    out.ip = { count: null };
+    return out;
+  }
+  const total = assets.length;
+  out.total = { count: total, assets: total };
+
+  // IP Addresses is a SUBSET of the inventory, not a kind beside it: every live
+  // address belongs to one of the assets. Its count is addresses (the presence
+  // total); its share is the assets that hold one.
+  const addressed = assets.filter(hasCurrentAddress).length;
   out.ip = {
     count: inv.addresses ?? null,
     assets: inv.addresses === undefined ? null : addressed,
-    note: inv.addresses !== undefined && addressed !== null
-      ? `${inv.addresses.toLocaleString()} live IP address${inv.addresses === 1 ? "" : "es"}, held by ${addressed.toLocaleString()} of the ${inv.assets!.length.toLocaleString()} assets. The share is the assets that hold a current address.`
+    note: inv.addresses !== undefined
+      ? `${inv.addresses.toLocaleString()} live IP address${inv.addresses === 1 ? "" : "es"}, held by ${addressed.toLocaleString()} of the ${total.toLocaleString()} assets. IP Addresses overlaps every kind, so it is not a segment; its share is the assets that hold one.`
       : undefined,
   };
-  out.databases = databaseHosts(inv.openPorts);
+
+  const ports = inv.openPorts;
+  const portsExact = !!ports && !ports.truncated;
+  const counts = Object.fromEntries(KIND_KEYS.map((k) => [k, 0])) as Record<CategoryKey, number>;
+  let none = 0;
+  for (const a of assets) {
+    const k = kindKey(a, ports?.ports);
+    if (k) counts[k]++;
+    else none++;
+  }
+  const typed = assets.some((a) => !!(a.device_type ?? "").trim());
+  for (const k of KIND_KEYS) {
+    if (k === "databases") continue;
+    if (typed) out[k] = { count: counts[k], assets: counts[k] };
+  }
+  if (!ports) out.databases = { count: null };
+  else if (portsExact) out.databases = { count: counts.databases, assets: counts.databases };
+  else out.databases = { count: null, atLeast: counts.databases, note: `At least ${counts.databases} — Core lists only the ${ports.limit} most recently seen open ports, so the exact count cannot be read.` };
+
+  // The remainder is exact only when every kind that can absorb an asset was
+  // measured exactly. Unmeasured device-type kinds hold nothing (no asset has
+  // a device type), so they cannot hide one.
+  if (portsExact) out.unclassified = { count: none, assets: none };
   return out;
 }
 
-// A category's share is the assets it covers over the distribution's sum —
-// the whole inventory, which the distribution partitions exactly. Total
-// Assets IS that sum, so it has no share of its own. Nothing is rounded to
-// make shares reach 100; a missing count or denominator is "—".
-export function share(c: Category, m: Measure, total: number | null): number | null {
-  if (c.key === "total") return null;
-  if (total === null || total === 0 || m.count === null || m.assets === null || m.assets === undefined) return null;
+// A share is the assets a figure covers over the distribution's sum — the
+// whole inventory, which the segments partition, each asset in at most one.
+// Total Assets' share is how much of the inventory is CLASSIFIED (the kinds'
+// sum over the total), not a 100% of itself; it needs the remainder measured.
+// Nothing is rounded to make shares reach 100; a missing count or a zero
+// denominator is "—".
+export function share(key: CategoryKey | "unclassified", ms: Measures): number | null {
+  const total = ms.total.count;
+  if (total === null || total === 0) return null;
+  if (key === "total") {
+    const rest = ms.unclassified.count;
+    return rest === null ? null : (100 * (total - rest)) / total;
+  }
+  const m = ms[key];
+  if (m.count === null || m.assets === null || m.assets === undefined) return null;
   return (100 * m.assets) / total;
 }
 
 export function fmtShare(pct: number | null): string {
   if (pct === null) return "—";
   if (pct === 0 || pct === 100) return `${pct}%`;
-  // Below 10%, one decimal, so 0.2% does not read as 0%.
-  return pct < 10 ? `${pct.toFixed(1)}%` : `${Math.round(pct)}%`;
+  // Rounding must never claim all or none of the inventory when it is
+  // neither: a share above 0 never reads 0%, one below 100 never reads 100%.
+  if (pct < 0.1) return "<0.1%";
+  if (pct > 99.9) return ">99.9%";
+  if (pct < 10) return `${pct.toFixed(1)}%`;
+  if (pct >= 99.5) return `${(Math.floor(pct * 10) / 10).toFixed(1)}%`;
+  return `${Math.round(pct)}%`;
 }
 
 export const fmtCount = (m: Measure): string => (m.count === null ? "—" : m.count.toLocaleString());
 
 export type Segment = { key: string; label: string; color: string; value: number };
 
-// The distribution: the one partition of the inventory Core measures exactly,
-// mutually exclusive and exhaustive — assets that hold a current IP address
-// and assets that hold none. Its segments always sum to Total Assets. Nothing
-// else can join it: a database host may or may not hold an address, so adding
-// Databases would count assets twice, and Core classifies no device types. A
-// zero segment is left out; an unread inventory draws nothing.
-export function distribution(assets: AssetSummary[] | undefined): Segment[] {
-  if (!assets) return [];
-  const addressed = assets.filter(hasCurrentAddress).length;
-  const ip = categoryByKey("ip")!;
-  return [
-    { key: "addressed", label: "With a current IP address", color: ip.color, value: addressed },
-    { key: "unaddressed", label: "No current IP address", color: UNKNOWN_KIND.color, value: assets.length - addressed },
-  ].filter((s) => s.value > 0);
+// The distribution's segments: every measured kind with assets, in card
+// order and colour, then the Unclassified remainder when it was measured. The
+// kinds are mutually exclusive by construction, so when every one is measured
+// the segments sum exactly to Total Assets; an unmeasured kind leaves its part
+// of the ring undrawn rather than borrowed by another.
+export function distribution(ms: Measures): Segment[] {
+  if (ms.total.count === null) return [];
+  const segs: Segment[] = CATEGORIES.filter((c) => KIND_KEYS.includes(c.key) && (ms[c.key].count ?? 0) > 0)
+    .map((c) => ({ key: c.key, label: c.label, color: c.color, value: ms[c.key].count! }));
+  if ((ms.unclassified.count ?? 0) > 0) segs.push({ key: UNCLASSIFIED.key, label: UNCLASSIFIED.label, color: UNCLASSIFIED.color, value: ms.unclassified.count! });
+  return segs;
 }
 
-// The ring's arc lengths. Each non-zero segment is proportional to its value,
-// but never shorter than `min`, so a small share stays visible; the length it
-// gains comes from the largest segment, and the legend keeps the exact
-// numbers. With more than one segment a `gap` separates them.
-export function arcs(segs: Segment[], circ: number, min = 6, gap = 2): { key: string; start: number; len: number }[] {
-  const total = segs.reduce((n, s) => n + s.value, 0);
+// The ring's arcs, each a fraction of the WHOLE inventory (not of the drawn
+// segments, so an unmeasured part stays empty). A non-zero segment is never
+// shorter than `min` so it stays visible; the length it gains comes from the
+// largest segment, never from empty track, and the legend keeps the exact
+// numbers. Adjacent segments are separated by `gap`.
+export function arcs(segs: Segment[], total: number, circ: number, min = 4, gap = 2): { key: string; start: number; len: number }[] {
   if (total <= 0) return [];
-  const g = segs.length > 1 ? gap : 0;
-  const raw = segs.map((s) => (s.value / total) * circ);
-  const lens = raw.map((l) => Math.max(l, Math.min(min, circ / segs.length)));
+  const live = segs.filter((s) => s.value > 0);
+  if (!live.length) return [];
+  const g = live.length > 1 ? gap : 0;
+  const raw = live.map((s) => (s.value / total) * circ);
+  const lens = raw.map((l) => Math.max(l, min + g));
   const big = raw.indexOf(Math.max(...raw));
-  lens[big] -= lens.reduce((n, l) => n + l, 0) - circ;
+  lens[big] = Math.max(min + g, lens[big] - (lens.reduce((n, l) => n + l, 0) - raw.reduce((n, l) => n + l, 0)));
   let start = 0;
-  return segs.map((s, i) => {
+  return live.map((s, i) => {
     const a = { key: s.key, start, len: Math.max(0, lens[i] - g) };
     start += lens[i];
     return a;
   });
-}
-
-// What a table row may say an asset IS. The device type Core stores, when
-// one is set, mapped to the dashboard's own words; otherwise a database host
-// (a host where Core identified a database service — the capped open-port read
-// can miss one, never invent one); otherwise Unknown. An address alone never
-// makes a type.
-const DEVICE_TYPES: [RegExp, CategoryKey][] = [
-  [/server/i, "servers"], [/laptop|notebook/i, "laptops"], [/router|switch|firewall|access.?point|network/i, "network"],
-  [/kubernetes|k8s/i, "k8s"], [/container|docker/i, "docker"], [/database|\bdb\b/i, "databases"],
-  [/cloud/i, "cloud"], [/\bapi\b/i, "apis"], [/web.?app/i, "webapps"],
-];
-
-export type Kind = { label: string; icon: IconName; color: string; dark?: string; known: boolean };
-
-export function assetKind(a: Pick<AssetSummary, "id" | "device_type">, ports?: { asset_id: string; service?: string | null }[]): Kind {
-  const dt = (a.device_type ?? "").trim();
-  if (dt) {
-    const hit = DEVICE_TYPES.find(([re]) => re.test(dt));
-    const c = hit && categoryByKey(hit[1]);
-    if (c) return { label: c.type, icon: c.icon, color: c.color, dark: c.dark, known: true };
-  }
-  if (ports?.some((p) => p.asset_id === a.id && isDatabaseService(p.service))) {
-    const db = categoryByKey("databases")!;
-    return { label: db.type, icon: db.icon, color: db.color, dark: db.dark, known: true };
-  }
-  return { ...UNKNOWN_KIND, known: false };
 }
 
 // ---------------------------------------------------------------- paging

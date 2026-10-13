@@ -109,23 +109,30 @@ const PATHS: Record<IconName | "search" | "calendar", ReactNode> = {
   ),
 };
 
-export function CategoryIcon({ name, color, size = 18 }: { name: IconName | "search" | "calendar"; color?: string; size?: number }) {
+// `bold` draws the glyph heavy and solid: a thick stroke over a translucent
+// fill of the same colour, so each shape reads as a filled form rather than a
+// thin outline.
+export function CategoryIcon({ name, color, size = 18, bold = false }: { name: IconName | "search" | "calendar"; color?: string; size?: number; bold?: boolean }) {
+  const ink = color ?? "currentColor";
   return (
-    <svg className="so-icon" data-icon={name} width={size} height={size} viewBox="0 0 24 24" fill="none"
-         stroke={color ?? "currentColor"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg className={`so-icon${bold ? " so-icon-bold" : ""}`} data-icon={name} width={size} height={size} viewBox="0 0 24 24"
+         fill={bold ? ink : "none"} fillOpacity={bold ? 0.3 : undefined}
+         stroke={ink} strokeWidth={bold ? 2.4 : 1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       {PATHS[name]}
     </svg>
   );
 }
 
-// The filled tile a category's icon sits on: the category colour running to
-// its darker shade, with the glyph in white. One component for the cards and
-// the asset rows, so the two can never drift apart.
-export function IconTile({ name, color, dark, size = 34, label }: { name: IconName; color: string; dark?: string; size?: number; label?: string }) {
-  const style = { "--c": color, "--c-dark": dark ?? color, width: size, height: size } as CSSProperties;
+// The tile a category's icon sits on: a light tint of the category colour
+// behind a bold glyph in the colour itself — the 500 shade on the dark theme,
+// the deeper 700 shade on the light one (styles.css), so the shape carries the
+// emphasis and the tile stays quiet. One component for the cards and the asset
+// rows, so the two can never drift apart.
+export function IconTile({ name, color, deep, size = 34, label }: { name: IconName; color: string; deep?: string; size?: number; label?: string }) {
+  const style = { "--c": color, "--c-deep": deep ?? color, width: size, height: size } as CSSProperties;
   return (
     <span className="so-tile" style={style} data-color={color} title={label} role={label ? "img" : undefined} aria-label={label}>
-      <CategoryIcon name={name} color="#FFFFFF" size={Math.round(size * 0.56)} />
+      <CategoryIcon name={name} size={Math.round(size * 0.6)} bold />
     </span>
   );
 }

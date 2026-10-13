@@ -16,19 +16,23 @@ import {
 // opens when Core holds no data for its category.
 
 const STALE = 30_000;
+// The dashboard re-reads the inventory and findings on this interval, so the
+// counts, shares, segments and recent panels follow new discoveries without a
+// reload. Every figure is derived from the fresh read; none is stored.
+export const REFRESH = 60_000;
 
 // The whole asset inventory, read to the last page (a count is exact only
 // over every page), and the open-port read that names database hosts.
 export function useInventory(enabled: boolean) {
-  const assets = useQuery({ queryKey: ["dashboard", "assets-all"], queryFn: () => allAssets((q) => api.listAssets(q)), enabled, staleTime: STALE });
-  const ports = useQuery({ queryKey: ["open-ports"], queryFn: () => api.openPorts(), enabled, staleTime: STALE });
+  const assets = useQuery({ queryKey: ["dashboard", "assets-all"], queryFn: () => allAssets((q) => api.listAssets(q)), enabled, staleTime: STALE, refetchInterval: REFRESH });
+  const ports = useQuery({ queryKey: ["open-ports"], queryFn: () => api.openPorts(), enabled, staleTime: STALE, refetchInterval: REFRESH });
   return { assets, ports };
 }
 
 // Every finding, any status: the list has no date filter, so the period is
 // applied to the complete set rather than to one priority-ordered page.
 export function useAllFindings(enabled: boolean) {
-  return useQuery({ queryKey: ["dashboard", "findings-all"], queryFn: () => allFindings((q) => api.listFindings(q)), enabled, staleTime: STALE });
+  return useQuery({ queryKey: ["dashboard", "findings-all"], queryFn: () => allFindings((q) => api.listFindings(q)), enabled, staleTime: STALE, refetchInterval: REFRESH });
 }
 
 export function AssetTable({ rows, showEnv, ports, empty }: { rows: AssetSummary[]; showEnv: boolean; ports?: { asset_id: string; service?: string | null }[]; empty: string }) {
@@ -48,7 +52,7 @@ export function AssetTable({ rows, showEnv, ports, empty }: { rows: AssetSummary
                 <td>
                   {/* The hostname when Core has one; otherwise the address, then the id — never an invented name. */}
                   <Link className="so-name" to={`/assets/${a.id}`} title={a.id}>
-                    <IconTile name={kind.icon} color={kind.color} dark={kind.dark} size={22} label={kind.label} />
+                    <IconTile name={kind.icon} color={kind.color} deep={kind.deep} size={22} label={kind.label} />
                     <span className={a.hostname ? "" : "data"}>{a.hostname || a.address || a.id.slice(0, 8)}</span>
                   </Link>
                 </td>
@@ -216,7 +220,7 @@ export function CategoryView() {
       <Back />
       <PageHead title={c.label} sub="Not yet integrated" />
       <div className="card so-panel so-gap">
-        <IconTile name={c.icon} color={c.color} dark={c.dark} />
+        <IconTile name={c.icon} color={c.color} deep={c.deep} />
         <div>
           <p><b>Not yet integrated.</b> {c.gap}</p>
           <p className="muted small">The Security Overview shows — for this category until Core collects it. No figure is estimated.</p>

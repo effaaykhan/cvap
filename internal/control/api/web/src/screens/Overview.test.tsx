@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -38,8 +38,9 @@ function Where() {
   const l = useLocation();
   return <output data-testid="where">{l.pathname + l.search}</output>;
 }
+let qc: QueryClient;
 function show(path = "/") {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[path]}>
@@ -121,11 +122,22 @@ describe("Security Overview layout", () => {
     expect(cards().map((c) => c.querySelector("svg")!.getAttribute("data-icon"))).toEqual([
       "boxes", "network", "server", "laptop", "plug", "globe", "container", "layers", "database", "cloud", "router",
     ]);
-    // Filled: a colour tile behind a white glyph, a different colour per card.
+    // A light tint of the category colour behind a bold, solid glyph drawn in
+    // the colour itself (currentColor): thick stroke over a same-colour fill.
     const tiles = cards().map((c) => c.querySelector(".so-tile") as HTMLElement);
-    expect(tiles.every((t) => t.querySelector("svg")!.getAttribute("stroke") === "#FFFFFF")).toBe(true);
+    for (const t of tiles) {
+      const svg = t.querySelector("svg")!;
+      expect(svg).toHaveClass("so-icon-bold");
+      expect(svg.getAttribute("stroke")).toBe("currentColor");
+      expect(svg.getAttribute("fill")).toBe("currentColor");
+      expect(Number(svg.getAttribute("fill-opacity"))).toBeGreaterThan(0);
+      expect(Number(svg.getAttribute("stroke-width"))).toBeGreaterThanOrEqual(2.4);
+      expect(t.style.getPropertyValue("--c")).toBe(t.dataset.color);
+      expect(t.style.getPropertyValue("--c-deep")).toMatch(/^#[0-9A-F]{6}$/);
+    }
     expect(new Set(tiles.map((t) => t.dataset.color)).size).toBe(11);
     expect(card("Databases").querySelector(".so-tile")).toHaveAttribute("data-color", "#F43F5E");
+    expect(card("Network Devices").querySelector(".so-tile")).toHaveAttribute("data-color", "#14B8A6");
   });
 
   it("keeps the Asset Map panel blank", async () => {
@@ -139,11 +151,11 @@ describe("Security Overview layout", () => {
 });
 
 describe("Security Overview counts and shares", () => {
-  it("counts every asset page, the address total, and database hosts; shares are of the 7 assets; the rest read —", async () => {
+  it("counts every asset page, the address total, and database hosts; every share is of the 7 assets; the rest read —", async () => {
     show();
     await loaded();
-    // Total is the base the shares are taken over: no 100% of its own.
-    expect(value("Total Assets")).toEqual(["7", "—"]);
+    // Total Assets carries the classified share (1 database host of 7), never a 100% of itself.
+    expect(value("Total Assets")).toEqual(["7", "14% classified"]);
     // 8 addresses held by 5 of the 7 assets: the share follows the assets, and 7 + 8 is never formed.
     expect(value("IP Addresses")).toEqual(["8", "71%"]);
     expect(card("IP Addresses")).toHaveAttribute("title", expect.stringContaining("held by 5 of the 7 assets"));
@@ -156,32 +168,111 @@ describe("Security Overview counts and shares", () => {
     expect(api.listAssets).toHaveBeenCalledTimes(2);
   });
 
-  it("draws both non-zero segments in colour, in step with the legend, the centre total and the IP card", async () => {
+  const legendRows = () => within(screen.getByLabelText("Distribution legend")).getAllByRole("listitem");
+  const ringSegs = () => [...panel("Asset Distribution").querySelectorAll("svg [data-segment]")];
+
+  it("lists all eleven categories in the legend, in card order and colour, with the cards' own counts and shares", async () => {
     show();
     await loaded();
-    const legend = within(screen.getByLabelText("Distribution legend")).getAllByRole("listitem");
-    expect(legend.map((li) => li.textContent)).toEqual(["With a current IP address571%", "No current IP address229%"]);
-    const ring = panel("Asset Distribution").querySelector("svg")!;
-    const segs = [...ring.querySelectorAll("[data-segment]")];
-    expect(segs.map((s) => s.getAttribute("data-segment"))).toEqual(["addressed", "unaddressed"]);
-    // Each drawn in a colour, the addressed one in the IP Addresses card's.
-    expect(segs.map((s) => s.getAttribute("stroke"))).toEqual([card("IP Addresses").querySelector(".so-tile")!.getAttribute("data-color"), "#64748B"]);
-    expect(segs.every((s) => parseFloat(s.getAttribute("stroke-dasharray")!) > 0)).toBe(true);
-    // The segments split the centre total exactly; the legend's swatches are the ring's colours.
-    expect(ring.querySelector(".so-ring-value")).toHaveTextContent("7");
-    expect(legend.map((li) => (li.querySelector(".so-swatch") as HTMLElement).style.background)).toEqual(["rgb(99, 102, 241)", "rgb(100, 116, 139)"]);
-    expect(value("IP Addresses")[1]).toBe(legend[0].querySelector(".so-legend-share")!.textContent);
+    const legend = legendRows();
+    // Eleven categories, then the measured remainder; no Other Assets.
+    expect(legend.map((li) => li.dataset.category)).toEqual([
+      "total", "ip", "servers", "laptops", "apis", "webapps", "docker", "k8s", "databases", "cloud", "network", "unclassified",
+    ]);
     expect(within(panel("Asset Distribution")).queryByText(/Other Assets/)).toBeNull();
-    expect(within(panel("Asset Distribution")).getByText(/Not drawn, because Core does not measure them: Servers, Laptops/)).toBeInTheDocument();
+    // Each category row repeats its card exactly — count, share and colour.
+    for (const li of legend.slice(0, 11)) {
+      const c = card(li.querySelector(".so-legend-name")!.textContent!);
+      expect(li.querySelector(".so-legend-count")!.textContent).toBe(c.querySelector(".so-card-count")!.textContent);
+      expect(li.querySelector(".so-legend-share")!.textContent).toBe(c.querySelector(".so-card-share")!.textContent);
+      const hex = c.querySelector(".so-tile")!.getAttribute("data-color")!;
+      const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      expect((li.querySelector(".so-swatch") as HTMLElement).style.background).toBe(`rgb(${r}, ${g}, ${b})`);
+    }
+    expect(legend[11].textContent).toBe("Unclassified686%");
+    // The legend is laid out in two columns beside the ring.
+    expect(panel("Asset Distribution").querySelector(".so-dist-body > svg + .so-legend")).not.toBeNull();
   });
 
-  it("draws one full segment when every asset is unaddressed, and nothing for an empty inventory", async () => {
-    assetPages = [[asset(1, 1, { address: "" }), asset(2, 2, { address: "" })], []];
-    presence = { present: 0, responder: 0, unknown: 0, total: 0, statement: "" };
+  it("draws every measured non-zero kind in its colour, summing to the centre total, never IP Addresses or Total", async () => {
     show();
     await loaded();
-    expect(value("IP Addresses")).toEqual(["0", "0%"]);
-    expect([...panel("Asset Distribution").querySelectorAll("svg [data-segment]")].map((s) => s.getAttribute("data-segment"))).toEqual(["unaddressed"]);
+    const segs = ringSegs();
+    expect(segs.map((s) => s.getAttribute("data-segment"))).toEqual(["databases", "unclassified"]);
+    expect(segs.map((s) => s.getAttribute("stroke"))).toEqual(["#F43F5E", "#64748B"]);
+    expect(segs.every((s) => parseFloat(s.getAttribute("stroke-dasharray")!) > 0)).toBe(true);
+    expect(panel("Asset Distribution").querySelector(".so-ring-value")).toHaveTextContent("7");
+    // 1 + 6 = 7: the drawn kinds partition the inventory exactly.
+    expect(legendRows().filter((li) => li.classList.contains("drawn")).map((li) => Number(li.querySelector(".so-legend-count")!.textContent))
+      .reduce((n, v) => n + v, 0)).toBe(7);
+    expect(within(panel("Asset Distribution")).getByText(/IP Addresses overlaps the kinds, so it is listed but not drawn/)).toBeInTheDocument();
+    expect(within(panel("Asset Distribution")).getByText(/Not measured yet, so not drawn: Servers, Laptops/)).toBeInTheDocument();
+  });
+
+  it("counts device kinds — and draws them — as soon as Core stores device types", async () => {
+    assetPages = [[asset(1, 1, { device_type: "server" }), asset(2, 2, { device_type: "server" }), asset(3, 5, { device_type: "laptop" }), asset(4, 10)], [asset(5, 20)]];
+    openPorts = { ports: [port(4, "mysql")], truncated: false, limit: 500 };
+    show();
+    await loaded();
+    expect(value("Servers")).toEqual(["2", "40%"]);
+    expect(value("Laptops")).toEqual(["1", "20%"]);
+    expect(value("Network Devices")).toEqual(["0", "0%"]);
+    expect(value("Databases")).toEqual(["1", "20%"]);
+    expect(value("Total Assets")).toEqual(["5", "80% classified"]);
+    expect(ringSegs().map((s) => s.getAttribute("data-segment"))).toEqual(["servers", "laptops", "databases", "unclassified"]);
+    expect(bodyRows("Recently Discovered Assets").map((r) => within(r).getAllByRole("cell")[1].textContent)).toEqual(["Server", "Server", "Laptop", "Database", "Unknown"]);
+  });
+
+  it("updates every count, share and segment from the next read when the inventory changes", async () => {
+    show();
+    await loaded();
+    expect(value("Databases")).toEqual(["1", "14%"]);
+    // Core discovers a second database host and a typed server.
+    assetPages = [[asset(1, 1), asset(2, 2, { device_type: "server" }), asset(3, 5), asset(4, 10)], [asset(5, 20), asset(6, 30, { address: "" }), asset(7, 200, { address: "" }), asset(8, 0)]];
+    openPorts = { ports: [port(1, "mysql"), port(8, "postgresql")], truncated: false, limit: 500 };
+    // What the refresh interval does: the same queries read again.
+    await act(() => qc.refetchQueries());
+    await waitFor(() => expect(value("Total Assets")).toEqual(["8", "38% classified"]));
+    expect(value("Databases")).toEqual(["2", "25%"]);
+    expect(value("Servers")).toEqual(["1", "13%"]);
+    expect(ringSegs().map((s) => s.getAttribute("data-segment"))).toEqual(["servers", "databases", "unclassified"]);
+    expect(legendRows().find((li) => li.dataset.category === "unclassified")!.textContent).toBe("Unclassified563%");
+  });
+
+  it("reads the device kinds, Total's share and the ring as — or empty when nothing is measured exactly", async () => {
+    openPorts = { ...openPorts, truncated: true };
+    show();
+    await loaded();
+    expect(value("Total Assets")).toEqual(["7", "—"]);
+    expect(ringSegs()).toHaveLength(0);
+    expect(legendRows().some((li) => li.dataset.category === "unclassified")).toBe(false);
+    expect(within(panel("Asset Distribution")).getByText(/Databases is at least 1: Core's open-port list is capped/)).toBeInTheDocument();
+  });
+
+  it("draws one full segment when no asset is a known kind, and keeps a zero denominator as —", async () => {
+    openPorts = { ports: [], truncated: false, limit: 500 };
+    show();
+    await loaded();
+    expect(ringSegs().map((s) => s.getAttribute("data-segment"))).toEqual(["unclassified"]);
+    expect(value("Total Assets")).toEqual(["7", "0% classified"]);
+  });
+
+  it("shows — for every share over an empty inventory", async () => {
+    assetPages = [[], []];
+    presence = { present: 0, responder: 0, unknown: 0, total: 0, statement: "" };
+    show();
+    await waitFor(() => expect(value("Total Assets")[0]).toBe("0"));
+    expect(cards().map((c) => c.querySelector(".so-card-share")!.textContent).every((t) => t === "—")).toBe(true);
+    expect(ringSegs()).toHaveLength(0);
+  });
+
+  it("drops a read that fails on refresh to —, instead of keeping its old counts as current", async () => {
+    show();
+    await loaded();
+    api.listAssets.mockRejectedValue(new ApiError(500, "internal", "boom"));
+    await act(() => qc.refetchQueries());
+    await waitFor(() => expect(value("Total Assets")).toEqual(["—", "—"]));
+    expect(ringSegs()).toHaveLength(0);
   });
 
   it("reads Databases as — when the open-port list was capped, never as its partial count", async () => {
@@ -277,7 +368,7 @@ describe("Security Overview recent panels", () => {
     expect(screen.getByTestId("where")).toHaveTextContent("/?range=3d");
     expect(within(panel("Recent Security Findings")).getByText("rule-3")).toBeInTheDocument();
     expect(bodyRows("Recently Discovered Assets")).toHaveLength(1);
-    expect(value("Total Assets")).toEqual(["1", "—"]);
+    expect(value("Total Assets")).toEqual(["1", "0% classified"]);
     expect(within(panel("Recently Discovered Assets")).getByRole("link", { name: "View All →" })).toHaveAttribute("href", "/dashboard/recent-assets?range=3d");
     expect(within(panel("Recent Security Findings")).getByRole("link", { name: "View All →" })).toHaveAttribute("href", "/dashboard/recent-findings?range=3d");
   });
