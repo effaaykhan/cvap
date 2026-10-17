@@ -55,6 +55,16 @@ type Config struct {
 	// engine kind, because "which one did that scan run on" must have an answer.
 	EngineBinaries []string
 
+	// PolicyCoreEndpoints is the network-policy holder's exempt set E, verbatim
+	// from the same CVAP_NP_CORE_ENDPOINTS it was started with (ADR-110). The
+	// holder exempts TCP to these from the kernel packet ceiling; this runtime
+	// must therefore refuse every one of them as a scan target, and it refuses
+	// to START unless each is already among the Core addresses it resolved for
+	// itself - a mismatch (typo, NAT, split DNS) would be an exempt address that
+	// nothing refuses. Optional only where no holder is in use; then the exempt
+	// set is empty and there is nothing to cross-check.
+	PolicyCoreEndpoints string
+
 	// FingerprintPackPath is the signed corpus (ADR-019, ADR-048). Optional:
 	// absent means service identification degrades to banner matching from the
 	// built-in minimum, which is reported upstream rather than assumed.
@@ -88,6 +98,7 @@ func ConfigFromEnv(agentVersion, protocolVersion string) (Config, error) {
 		FingerprintPackPath: os.Getenv("CVAP_SP_FINGERPRINT_PACK"),
 		FingerprintKeyPath:  os.Getenv("CVAP_SP_FINGERPRINT_KEY"),
 		Hostname:            os.Getenv("CVAP_SP_HOSTNAME"),
+		PolicyCoreEndpoints: os.Getenv("CVAP_NP_CORE_ENDPOINTS"),
 		AgentVersion:        agentVersion,
 		ProtocolVersion:     protocolVersion,
 	}

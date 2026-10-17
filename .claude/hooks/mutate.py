@@ -111,6 +111,10 @@ GO_SUITES = [
     # removed alone, with everything else in scope, must fail its own test.
     "internal/dispatch/core_target_test.go",
     "internal/scanpoint/core_target_test.go",
+    # ADR-111: the Scan Point refuses to start with any capability (P3 checked
+    # by itself) or with a holder exempt set it would not refuse; each check
+    # disabled alone must fail its own test.
+    "internal/scanpoint/privilege_test.go",
     "internal/scanpoint/safetymode_test.go",
     "internal/engines/enginerate/ratebudget_test.go",
     "internal/engines/fingerprint/tls_test.go",

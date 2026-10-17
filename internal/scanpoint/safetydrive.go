@@ -73,6 +73,10 @@ type SafetyJob struct {
 	// harness resolves no names) the runtime refuses as targets (ADR-110), so
 	// the gate can put that refusal on a wire.
 	CoreEndpoints []string `json:"core_endpoints,omitempty"`
+	// PolicyCoreEndpoints is the holder's exempt set E, verbatim, as the real
+	// binary reads it from CVAP_NP_CORE_ENDPOINTS; the same startup cross-check
+	// applies, so the gate can show a mismatch refusing to run (ADR-110).
+	PolicyCoreEndpoints string `json:"policy_core_endpoints,omitempty"`
 }
 
 // SafetyResult is what SafetyDrive reports for diagnostics. The gate's assertion
@@ -96,6 +100,9 @@ func SafetyDrive(ctx context.Context, log *slog.Logger, binary string, j SafetyJ
 	if len(j.CoreEndpoints) > 0 {
 		var err error
 		if core, err = target.NewCoreEndpoints(ctx, j.CoreEndpoints, nil); err != nil {
+			return SafetyResult{}, err
+		}
+		if core, err = crossCheck(core, j.PolicyCoreEndpoints); err != nil {
 			return SafetyResult{}, err
 		}
 	}

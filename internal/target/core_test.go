@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -87,13 +88,78 @@ func TestListenAddressesAreSkippedAndAnEmptySetIsRefused(t *testing.T) {
 	}
 }
 
-// TestAV4MappedFormIsTheSameAddress: ::ffff:10.0.0.5 is 10.0.0.5 on the wire.
-func TestAV4MappedFormIsTheSameAddress(t *testing.T) {
-	e, err := NewCoreEndpoints(t.Context(), []string{"[::ffff:10.0.0.5]:8444"}, nil)
+// TestAV4MappedEndpointSpellingIsRefused: an IPv4-mapped IPv6 spelling in E is
+// refused, because Go would unmap it to v4 while the holder installs it as a v6
+// exemption, so the two enforcement layers would disagree (ADR-111). The refusal
+// is semantic (Is4In6), not a dotted-quad text match, so EVERY equivalent
+// spelling is refused - the all-hex ::ffff:0a00:0005 included, which a textual
+// check missed. Ordinary IPv4 and native IPv6 are still accepted. A v4-mapped
+// SCAN TARGET is still refused, because Canonicalise unmaps it to plain v4
+// before it reaches Contains.
+func TestAV4MappedEndpointSpellingIsRefused(t *testing.T) {
+	// Every spelling of the same IPv4-mapped address (10.0.0.5) is refused.
+	for _, mapped := range []string{
+		"[::ffff:10.0.0.5]:8444",          // dotted
+		"[::ffff:0a00:0005]:8444",         // all-hex, zero-padded
+		"[::ffff:a00:5]:8444",             // all-hex, minimal
+		"[0:0:0:0:0:ffff:0a00:0005]:8444", // fully expanded, all-hex
+		"[0:0:0:0:0:ffff:10.0.0.5]:8444",  // fully expanded, dotted
+		"[0::ffff:0a00:0005]:8444",        // partially compressed
+	} {
+		if _, err := NewCoreEndpoints(t.Context(), []string{mapped}, nil); err == nil {
+			t.Errorf("v4-mapped endpoint spelling %q was accepted; it must be refused (ADR-111)", mapped)
+		}
+	}
+	// Positive controls: ordinary IPv4 and native IPv6 - including a native
+	// address that merely contains an ffff group - are still accepted.
+	for _, ok := range []string{"10.0.0.5:8444", "[2001:db8::10]:8444", "[2001:db8::ffff:1:2]:8444", "[::ffff:0:1:2:3]:8444"} {
+		if _, err := NewCoreEndpoints(t.Context(), []string{ok}, nil); err != nil {
+			t.Errorf("%q is an ordinary IPv4/native IPv6 endpoint but was refused: %v", ok, err)
+		}
+	}
+	// The safe direction survives: a plain-v4 Core endpoint still catches a
+	// v4-mapped scan-target spelling, since the target canonicalises to v4.
+	e, err := NewCoreEndpoints(t.Context(), []string{"10.0.0.5:8444"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !e.Contains(mustMatch(t, "10.0.0.5")) {
-		t.Error("a v4-mapped Core endpoint does not refuse the plain v4 address")
+	for _, spelling := range []string{"::ffff:10.0.0.5", "::ffff:0a00:0005"} {
+		c, err := Canonicalise(spelling)
+		if err != nil {
+			t.Fatalf("Canonicalise(%s): %v", spelling, err)
+		}
+		if !e.Contains(c) {
+			t.Errorf("a v4-mapped scan target %q is not refused against the plain v4 Core address", spelling)
+		}
 	}
 }
+
+// TestCoversIsEverExemptAddressBeingRefused: Covers is what the Scan Point's
+// startup cross-check rests on - one direction only, by address identity. A
+// v4-mapped spelling is refused at parse (TestAV4MappedEndpointSpellingIsRefused)
+// and so never reaches Covers.
+func TestCoversIsEveryExemptAddressBeingRefused(t *testing.T) {
+	refusal, err := NewCoreEndpoints(t.Context(), []string{"192.0.2.10:8443", "[2001:db8::10]:8444"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		exempt string
+		covers bool
+	}{
+		{"192.0.2.10:8443", true},
+		{"[2001:db8::10]:8443", true},
+		{"192.0.2.11:8443", false},
+		{"192.0.2.10:8443,192.0.2.11:8443", false},
+	} {
+		exempt, err := NewCoreEndpoints(t.Context(), splitComma(c.exempt), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := refusal.Covers(exempt); got != c.covers {
+			t.Errorf("Covers(%s) = %v, want %v (missing %v)", c.exempt, got, c.covers, refusal.Missing(exempt))
+		}
+	}
+}
+
+func splitComma(s string) []string { return strings.Split(s, ",") }

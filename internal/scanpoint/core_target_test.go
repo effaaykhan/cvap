@@ -24,7 +24,7 @@ func testCore(t *testing.T) target.CoreEndpoints {
 // still refused; its neighbours are not.
 //
 // mutate:subject internal/scanpoint/enginehost.go
-// mutate:test    ./internal/scanpoint/ -run TestTheRuntimeRefusesACoreEndpointWhateverTheScopeSays|TestAJobNamingCoreIsRefusedBeforeAnyEngineExists|TestTheSafetyHarnessRefusesCoreThroughTheSamePath
+// mutate:test    ./internal/scanpoint/ -run TestTheRuntimeRefusesACoreEndpointWhateverTheScopeSays|TestAJobNamingCoreIsRefusedBeforeAnyEngineExists|TestTheSafetyHarnessRefusesCoreThroughTheSamePath|TestTheHolderExemptSetMustBeCoveredByWhatTheRuntimeRefuses
 // mutate:case    the runtime consults only the scope rules, so a job naming a Core endpoint spawns an engine
 // mutate:old     if h.core.Contains(c) {
 // mutate:new     if false && h.core.Contains(c) {
@@ -127,4 +127,61 @@ func mustCanonical(t *testing.T, raw string) target.Canonical {
 		t.Fatalf("%q is not canonical", raw)
 	}
 	return c
+}
+
+// TestTheHolderExemptSetMustBeCoveredByWhatTheRuntimeRefuses: E is what the
+// holder exempts from the ceiling; every address in it must be one this
+// runtime refuses, or an exempt address would be scannable outside the ceiling.
+// Any mismatch - a typo, a NAT address, a split-DNS answer - refuses startup.
+//
+// mutate:subject internal/scanpoint/core.go
+// mutate:case    the exempt set is parsed but never compared, so an exempt address the runtime would not refuse starts anyway
+// mutate:old     if missing := resolved.Missing(exempt); len(missing) > 0 {
+// mutate:new     if missing := resolved.Missing(exempt); false && len(missing) > 0 {
+func TestTheHolderExemptSetMustBeCoveredByWhatTheRuntimeRefuses(t *testing.T) {
+	id := &Identity{DispatchAddr: "192.0.2.10:8444", IngestAddr: "192.0.2.10:8444", RulePacksAddr: "192.0.2.10:8444"}
+	ok := []string{
+		"",                                    // no holder: nothing to cross-check
+		"192.0.2.10:8443,192.0.2.10:8444",     // exactly what the runtime resolved
+		" 192.0.2.10:8443 , 192.0.2.10:8444 ", // whitespace the holder also strips
+		"192.0.2.10:8443",                     // a subset of the runtime's set is fine
+	}
+	for _, e := range ok {
+		if _, err := CoreEndpoints(t.Context(), Config{EnrollEndpoint: "192.0.2.10:8443", PolicyCoreEndpoints: e}, id); err != nil {
+			t.Errorf("E=%q: refused although every exempt address is Core: %v", e, err)
+		}
+	}
+	bad := map[string]error{
+		"192.0.2.11:8443":               ErrExemptNotRefused, // a typo: exempt, not Core
+		"192.0.2.10:8443,10.0.0.5:8444": ErrExemptNotRefused, // one right, one not
+		"[2001:db8::10]:8443":           ErrExemptNotRefused, // Core has no v6 address here
+		"core.example:8443":             nil,                 // a name: unparseable E, refused
+		"192.0.2.10":                    nil,                 // no port
+	}
+	for e, want := range bad {
+		_, err := CoreEndpoints(t.Context(), Config{EnrollEndpoint: "192.0.2.10:8443", PolicyCoreEndpoints: e}, id)
+		if err == nil {
+			t.Errorf("E=%q: started with an exempt address the runtime would not refuse", e)
+			continue
+		}
+		if want != nil && !errors.Is(err, want) {
+			t.Errorf("E=%q: got %v, want %v", e, err, want)
+		}
+	}
+}
+
+// TestTheCrossCheckUsesTheRuntimesOwnResolution: the runtime's set may be
+// LARGER than E (Core reachable at more addresses than the holder exempts) and
+// that is fine; the check is one-directional, E within the refusal set.
+func TestTheCrossCheckUsesTheRuntimesOwnResolution(t *testing.T) {
+	c, err := CoreEndpoints(t.Context(), Config{EnrollEndpoint: "192.0.2.10:8443", PolicyCoreEndpoints: "192.0.2.20:8444"},
+		&Identity{DispatchAddr: "192.0.2.20:8444", IngestAddr: "192.0.2.21:8444", RulePacksAddr: "192.0.2.21:8444"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []string{"192.0.2.10", "192.0.2.20", "192.0.2.21"} {
+		if !c.Contains(mustCanonical(t, a)) {
+			t.Errorf("%s dropped from the refusal set by the cross-check", a)
+		}
+	}
 }

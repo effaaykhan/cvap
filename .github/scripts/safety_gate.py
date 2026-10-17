@@ -655,8 +655,9 @@ def main():
         print(ln)
     print("\nScan Point kernel packet ceiling (ADR-110): packets leaving the namespace, other")
     print("than TCP to Core, <= 100 + 1000*D in every window, captured on the host side of the")
-    print("namespace's veth (every packet, every protocol), equal to the policer's own count;")
-    print("a lowered ceiling bites; the corpus is unchanged; all five preconditions hold:")
+    print("namespace's veth (every packet, every protocol; the policer's counters count buffers")
+    print("and decide nothing); a reconnected interface and a second interface hold; a lowered")
+    print("ceiling bites; the corpus is unchanged; all five preconditions hold:")
     for ln in r2d_lines:
         print(ln)
     print("\nThe capture filter is 'tcp or udp port 53' — this engine's traffic plus resolver")

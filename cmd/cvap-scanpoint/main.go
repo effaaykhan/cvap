@@ -32,6 +32,13 @@ var (
 )
 
 func main() {
+	// First, before the runtime has done anything else on our behalf: a process
+	// that can never gain a privilege (ADR-110 P3). This may re-exec the binary
+	// once; the re-exec'd process returns here at once. See EnsureNoNewPrivs.
+	if err := scanpoint.EnsureNoNewPrivs(); err != nil {
+		fmt.Fprintln(os.Stderr, "cvap-scanpoint: refusing to start (ADR-110 P3):", err)
+		os.Exit(1)
+	}
 	log := logging.New(os.Stdout, logging.Options{Level: levelFromEnv()})
 
 	if err := run(log); err != nil {
@@ -65,6 +72,14 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// Before anything touches the network: the kernel packet ceiling (ADR-110)
+	// holds only for a process with no capability and no way to gain one. The
+	// deployment is told to run it that way; this checks that it was. (The "no
+	// way to gain one" half, no_new_privs, was made true in main before the
+	// runtime did anything else.)
+	if err := scanpoint.CheckUnprivileged("/proc/self/status"); err != nil {
+		return fmt.Errorf("cvap-scanpoint: refusing to start (ADR-110 P3): %w", err)
+	}
 	log.Info("scan point runtime starting",
 		slog.String("version", version),
 		slog.String("protocol_version", protocolVersion),
@@ -84,7 +99,8 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("cvap-scanpoint: Core endpoints (ADR-110): %w", err)
 	}
-	log.Info("Core endpoints are never scan targets", slog.Any("addresses", core.Addrs()))
+	log.Info("Core endpoints are never scan targets", slog.Any("addresses", core.Addrs()),
+		slog.String("network_policy_exempts", cfg.PolicyCoreEndpoints))
 
 	mtls, err := scanpoint.MutualTLS(cfg.DataDir, cfg.CABundlePath)
 	if err != nil {

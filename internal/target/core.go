@@ -58,6 +58,18 @@ func NewCoreEndpoints(ctx context.Context, endpoints []string, resolve Resolver)
 		}
 		var addrs []netip.Addr
 		if a, err := netip.ParseAddr(host); err == nil {
+			// An IPv4-in-IPv6 address (::ffff:10.0.0.5, and every equivalent
+			// spelling: the all-hex ::ffff:0a00:0005, an expanded
+			// 0:0:0:0:0:ffff:10.0.0.5) is refused. Go would unmap it to v4 below,
+			// but the network-policy holder installs it as an IPv6 exemption from
+			// the literal, so the two enforcement layers would disagree about one
+			// address and the cross-check would pass a config whose exempt set and
+			// refused set are not the same object (ADR-111). Detected semantically
+			// with Is4In6 rather than by looking for a dotted quad in the text, so
+			// no spelling slips through. Write Core as a plain IPv4 or IPv6 address.
+			if a.Is4In6() {
+				return CoreEndpoints{}, fmt.Errorf("target: Core endpoint %q is an IPv4-in-IPv6 spelling; write a plain IPv4 or IPv6 address", ep)
+			}
 			addrs = []netip.Addr{a}
 		} else {
 			if resolve == nil {
@@ -87,6 +99,29 @@ func NewCoreEndpoints(ctx context.Context, endpoints []string, resolve Resolver)
 
 // Addrs is the resolved set, for logging.
 func (e CoreEndpoints) Addrs() []netip.Addr { return slices.Clone(e.addrs) }
+
+// Covers reports whether every address of other is in e: whether a refusal set
+// e refuses everything other exempts. Compared unmapped and zone-free, as both
+// sets are stored.
+func (e CoreEndpoints) Covers(other CoreEndpoints) bool {
+	for _, a := range other.addrs {
+		if !slices.Contains(e.addrs, a) {
+			return false
+		}
+	}
+	return true
+}
+
+// Missing lists the addresses of other that e does not contain.
+func (e CoreEndpoints) Missing(other CoreEndpoints) []netip.Addr {
+	var out []netip.Addr
+	for _, a := range other.addrs {
+		if !slices.Contains(e.addrs, a) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
 
 // Contains reports whether scanning c would put packets on a Core address: c is
 // one, or c is a prefix covering one. A hostname cannot be decided here and is

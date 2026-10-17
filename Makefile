@@ -616,7 +616,9 @@ safety-sabotage: ## Prove each safety case can fail INDEPENDENTLY
 		else echo "  ok        $$c: fails when sabotaged"; fi; \
 	done; \
 	for c in gso-segs seg-feature forwarding udp-default-deny udp-allowed netraw other-cap \
-			unpoliced-iface wide-exclusion core-target core-target-other-refusal; do \
+			unpoliced-iface wide-exclusion core-target core-target-other-refusal \
+			guard-flushed guard-arp-removed root-qdisc exempt-not-refused rate-raised sp-root name-keyed-guard \
+			holder-self-verify holder-no-retry holder-lists-down; do \
 		if out=$$(CVAP_SAFETY_R2D_SABOTAGE=$$c python3 .github/scripts/safety_gate.py 2>&1); then \
 			echo "  SURVIVED  r2d $$c: the kernel-ceiling gate passed with a precondition broken"; fail=1; \
 		elif ! echo "$$out" | grep -q '^  r2d '; then \
