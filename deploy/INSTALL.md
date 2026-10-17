@@ -64,6 +64,16 @@ one is the address a scan point uses to reach this host — a DNS name or LAN IP
 never `localhost` or a container name — because Core hands it to a scan point at
 enrollment. `.env` is gitignored and must never be committed.
 
+Core resolves, once at startup, every name it serves or advertises —
+`CVAP_ADVERTISE_HOST`, `CVAP_EXTERNAL_HOST` and the rest of
+`CVAP_CORE_SERVER_HOSTS`, plus its dispatch/ingest/rule-pack endpoints — and
+**refuses to start if any of them does not resolve inside its container**
+(ADR-110/111: those addresses are the ones no scan point may ever scan, and a
+set Core cannot build is a refusal that matches nothing). A name that only
+resolves on public or split-horizon DNS the container cannot reach is a startup
+failure, not a warning: give the container a resolver that answers, or use an
+address.
+
 Also set `CVAP_UID` and `CVAP_GID` to the user that owns `deploy/secrets` — your
 `id -u` and `id -g`. cvap-core runs as this user so it can read the `0600` CA key
 (the image is nonroot, and the key must be owned by whoever the container runs
@@ -192,20 +202,26 @@ The holder installs one kernel packet ceiling for everything the scan point's
 namespace sends — 1,000 packets/s with a burst of 100, counting the kernel's own
 ACKs, retransmissions and resets — except TCP to Core. It is the only container
 in that namespace with `NET_ADMIN`, and it keeps verifying its own setup: if any
-check fails it exits, and the scan point is left with no network at all.
+check fails it exits, and the scan point is left with no network at all. (An
+interface that disappears while a check is running, as a `docker network
+disconnect` does, is not a failed check: the pass is simply run again. An
+interface that is down is not checked at all — it carries nothing and is policed
+within a second of coming up, blocked until then.)
 
-It needs Core's two endpoints as a scan point reaches them, **as IP addresses**
-(names are refused, so the exemption cannot change with a resolver's answer):
-the address `CVAP_ADVERTISE_HOST` resolves to, on 8443 (enrollment) and 8444
+It needs Core's two endpoints as a scan point reaches them, **as single IP
+addresses** (names, prefixes and `0.0.0.0`/`::` are refused, so the exemption
+cannot change with a resolver's answer and is never wider than one host): the
+address `CVAP_ADVERTISE_HOST` resolves to, on 8443 (enrollment) and 8444
 (dispatch, ingest and rule packs). Nothing else is exempt — not the operator API
-on 8445, which a scan point never uses.
+on 8445, which a scan point never uses. IPv4 and IPv6 literals may be mixed.
 
 ```sh
 docker build -t cvap-netpolicy netpolicy
 CORE_IP=<the IPv4 address CVAP_ADVERTISE_HOST resolves to>
 docker run -d --name cvap-netpolicy \
   --network cvap_default \
-  --cap-add NET_ADMIN \
+  --cap-drop ALL --cap-add NET_ADMIN \
+  --security-opt no-new-privileges \
   --sysctl net.ipv4.ip_forward=0 \
   --sysctl net.ipv4.conf.all.forwarding=0 \
   --sysctl net.ipv4.conf.default.forwarding=0 \
@@ -218,8 +234,12 @@ docker run -d --name cvap-netpolicy \
 The compose network is `<project>_default` — `cvap_default` for the default
 project name. The forwarding sysctls are required: the holder cannot set them
 itself (`/proc/sys` is read-only in a container) and refuses to start without
-them. Confirm it is up — the log ends with `ready: eth0` and the health check
-reports `healthy`:
+them. It also refuses to start with a rate above 1,000 pps or a burst above 100
+(`CVAP_NP_RATE_PPS`, `CVAP_NP_BURST`: a deployment may lower the ceiling, never
+raise it), or a verify interval above 5 s. Keep `CORE_IP` for the next step: the
+scan point is given the same value and refuses to start if it disagrees. Confirm
+the holder is up — the log ends with `ready: eth0`; it re-verifies every second
+and the Docker health check (every 5 s) reports `healthy`:
 
 ```sh
 docker logs cvap-netpolicy
@@ -244,6 +264,7 @@ docker run -d --name cvap-scanpoint \
   -v "$PWD/secrets/enrollment-token:/creds/enrollment-token:ro" \
   -v "$PWD/scanpoint-data:/data" \
   -e CVAP_SP_ENROLL_ENDPOINT="${CVAP_ADVERTISE_HOST}:8443" \
+  -e CVAP_NP_CORE_ENDPOINTS="${CORE_IP}:8443,${CORE_IP}:8444" \
   -e CVAP_SP_CA_BUNDLE=/creds/ca.crt \
   -e CVAP_SP_ENROLLMENT_TOKEN_FILE=/creds/enrollment-token \
   -e CVAP_SP_DATA_DIR=/data \
@@ -259,13 +280,23 @@ differs.)
 
 - **Never give the scan point a capability, `--privileged`, or a root user.** A
   raw socket bypasses the kernel ceiling entirely; `--cap-drop ALL` and
-  `no-new-privileges` are what rule it out.
+  `no-new-privileges` are what rule it out — and the scan point checks this
+  itself at start, refusing to run as root or with any capability, and setting
+  `no_new_privs` on itself so nothing it executes can gain one. If your shell is
+  root, `$(id -u)` is 0 and it will refuse: pass a non-root UID that owns the
+  secrets and the data dir.
+- **`CVAP_NP_CORE_ENDPOINTS` must be the same value on both containers.** The
+  holder exempts those addresses from the ceiling; the scan point refuses them
+  as targets and refuses to start if any of them is not an address it resolved
+  for Core itself (a typo, a NAT address or a split-horizon answer would be an
+  exempt address nothing refuses).
 - **To reach another target network, connect it to the holder**, not to the scan
-  point: `docker network connect <that-network> cvap-netpolicy`. The holder
-  polices the new interface within about a second, and nothing leaves through it
-  until then.
-- **TCP, ICMP and ARP only.** Everything else leaving the namespace is dropped,
-  UDP included. The engines are TCP-only, so nothing they do is affected; name
+  point: `docker network connect <that-network> cvap-netpolicy`. The guard drops
+  everything through an interface the holder has not yet policed — including one
+  that comes back under a reused name after a disconnect — and the holder
+  polices it on its next cycle, within a second.
+- **TCP, ICMP, ICMPv6 and ARP only.** Everything else leaving the namespace is
+  dropped, UDP included. The engines are TCP-only, so nothing they do is affected; name
   lookups work through Docker's embedded DNS on the compose network. A scan point
   that can only resolve `CVAP_ADVERTISE_HOST` through an external DNS server over
   UDP will fail to start — use an IP address, or a name the embedded DNS resolves.
